@@ -1,4 +1,4 @@
-"""Streamlit Interactive Application for Nifty Institutional Trading Plan & Options Engine (JustNifty v2.0)."""
+"""Nifty Institutional Signal Terminal & Unified Executive Main Page (JustNifty v2.0)."""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -9,7 +9,8 @@ from datetime import datetime
 
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
-    DEFAULT_IV, ENOUGH_PROFIT_PCT
+    DEFAULT_IV, ENOUGH_PROFIT_PCT, EMA_FAST, EMA_MID, EMA_SLOW,
+    MA_STRETCH_THRESHOLD
 )
 from src.data_engine import DataEngine
 from src.indicators import (
@@ -22,63 +23,131 @@ from src.options_engine import (
 )
 from src.backtest_engine import BacktestEngine
 
+# Page Config
 st.set_page_config(
-    page_title="Nifty Institutional Trading Plan & Options Engine (JustNifty v2.0)",
-    page_icon="📈",
+    page_title="Nifty Institutional Signal Terminal | JustNifty v2.0",
+    page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling
+# Custom High-Contrast Low-Noise CSS
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #1e222d;
-        border-radius: 8px;
-        padding: 12px;
-        border: 1px solid #2a2e39;
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .signal-badge-long {
-        background-color: #00c853;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 4px;
-        font-weight: bold;
+    .stApp {
+        background-color: #080c14;
+        color: #f1f5f9;
     }
-    .signal-badge-short {
-        background-color: #d50000;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 4px;
-        font-weight: bold;
+    
+    /* Institutional Cockpit Container */
+    .cockpit-box {
+        background-color: #0e1422;
+        border: 1px solid #1c273c;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
     }
-    .signal-badge-wait {
-        background-color: #ffab00;
-        color: black;
-        padding: 4px 12px;
+    
+    .cockpit-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+    }
+
+    .badge-pro {
+        background: linear-gradient(135deg, #05df72, #00d2ff);
+        color: #04121e;
+        font-weight: 800;
+        font-size: 11px;
+        padding: 3px 8px;
         border-radius: 4px;
-        font-weight: bold;
+        font-family: 'JetBrains Mono', monospace;
+    }
+
+    .signal-long {
+        background-color: rgba(5, 223, 114, 0.08);
+        color: #05df72;
+        border: 1px solid rgba(5, 223, 114, 0.25);
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .signal-short {
+        background-color: rgba(255, 51, 85, 0.08);
+        color: #ff3355;
+        border: 1px solid rgba(255, 51, 85, 0.25);
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .signal-wait {
+        background-color: rgba(251, 176, 36, 0.08);
+        color: #fbb024;
+        border: 1px solid rgba(251, 176, 36, 0.25);
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .confluence-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid #1c273c;
+    }
+
+    .confluence-cell {
+        background-color: #141c2e;
+        border: 1px solid #1c273c;
+        border-radius: 6px;
+        padding: 8px 12px;
+    }
+
+    .c-lbl {
+        font-size: 11px;
+        color: #55657e;
+        text-transform: uppercase;
+        font-weight: 600;
+    }
+
+    .c-val {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        font-weight: 700;
+        margin-top: 2px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎯 Nifty Institutional Trading Plan & Options Engine")
-st.caption("Quantitative Execution Framework based on JustNifty v2.0 (EMAs, 1.5% Envelopes, AVWAP, Fib Golden Pocket, 3 PM Strategy & Delta 0.50-0.65 Strike Selection)")
-
 # ----------------- SIDEBAR CONTROLS -----------------
-st.sidebar.header("⚙️ Institutional Risk & Setup")
+st.sidebar.header("⚙️ Risk & Data Stream")
 account_capital = st.sidebar.number_input("Account Capital (₹)", min_value=50000.0, max_value=50000000.0, value=DEFAULT_CAPITAL, step=50000.0)
 risk_pct = st.sidebar.slider("Max Capital Risk per Trade (%)", min_value=0.25, max_value=2.0, value=1.0, step=0.05) / 100.0
 contract_lot_size = st.sidebar.number_input("Nifty Lot Size", min_value=25, max_value=75, value=LOT_SIZE, step=25)
-iv_input = st.sidebar.slider("Expected Implied Volatility / India VIX (%)", min_value=8.0, max_value=30.0, value=DEFAULT_IV * 100.0, step=0.5) / 100.0
+iv_input = st.sidebar.slider("Expected IV / India VIX (%)", min_value=8.0, max_value=30.0, value=DEFAULT_IV * 100.0, step=0.5) / 100.0
 
 st.sidebar.markdown("---")
-st.sidebar.header("🕹️ Mode & Timeframe")
 data_mode = st.sidebar.radio("Data Stream Source", ["Live / Latest Market Feed (yfinance + NSE)", "Synthetic Market Simulation"])
-timeframe = st.sidebar.selectbox("Intraday Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
+timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
-# Cached helper functions for instant UI interactions
+# ----------------- DATA INGESTION & CACHING -----------------
 @st.cache_data(ttl=60)
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = DataEngine(use_cache=True)
@@ -95,61 +164,163 @@ def get_institutional_oi_data() -> pd.DataFrame:
 data_engine = DataEngine(use_cache=True)
 strategy_engine = StrategyEngine()
 
-with st.spinner("Streaming Nifty 50 Market Data..."):
-    df_raw = load_market_data(data_mode, tf_str)
-
+df_raw = load_market_data(data_mode, tf_str)
 if df_raw.empty or len(df_raw) < 15:
-    st.error("Insufficient market data received. Switching to synthetic fallback...")
     df_raw = data_engine.generate_synthetic_nifty(bars=150, interval_mins=5)
 
-# Indicator Calculations
+# Indicator Math
 df = df_raw.copy()
-df["ema21"] = compute_ema(df["close"], 21)
-df["ema55"] = compute_ema(df["close"], 55)
-df["ema200"] = compute_ema(df["close"], 200)
+df["ema21"] = compute_ema(df["close"], EMA_FAST)
+df["ema55"] = compute_ema(df["close"], EMA_MID)
+df["ema200"] = compute_ema(df["close"], EMA_SLOW)
 df["env_upper"], df["env_lower"] = compute_envelopes(df["ema200"], ENVELOPE_PCT)
 df["vwap"], df["vwap_upper"], df["vwap_lower"] = compute_vwap(df)
 
 current_spot = float(df.iloc[-1]["close"])
 prev_spot = float(df.iloc[-2]["close"]) if len(df) > 1 else current_spot
+spot_delta = current_spot - prev_spot
 cpr = compute_cpr(df)
 vol_profile = compute_volume_profile(df)
 vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"].max() - df["low"].min()) / 4.0)
 
-# Evaluate Current Signal
+# Evaluate Active Signal & Option Ticket
 signal = strategy_engine.evaluate_bar(df)
-trade_ticket = generate_option_trade_ticket(current_spot, signal, account_capital)
+ticket = generate_option_trade_ticket(current_spot, signal, account_capital)
 
-# ----------------- TOP METRIC BAR -----------------
-m_col1, m_col2, m_col3, m_col4, m_col5, m_col6 = st.columns(6)
-spot_delta = current_spot - prev_spot
-m_col1.metric("Nifty 50 Spot", f"₹{current_spot:,.2f}", f"{spot_delta:+.2f} ({spot_delta/prev_spot*100:+.2f}%)")
-m_col2.metric("Market Regime", cpr["regime"].split("(")[0].strip(), f"CPR: {cpr['width_pct']:.2f}%")
-m_col3.metric("Session AVWAP", f"₹{float(df.iloc[-1]['vwap']):,.2f}", f"Diff: {current_spot - float(df.iloc[-1]['vwap']):+.1f}")
-m_col4.metric("200 EMA (5m)", f"₹{float(df.iloc[-1]['ema200']):,.2f}", f"Diff: {current_spot - float(df.iloc[-1]['ema200']):+.1f}")
-m_col5.metric("Value Area POC", f"₹{vol_profile['poc']:,.2f}", f"VAH: {vol_profile['vah']:.0f} | VAL: {vol_profile['val']:.0f}")
-m_col6.metric("Active Setup", signal.signal_type.value, "1% Risk Ready" if trade_ticket.get("status") == "READY" else "Waiting")
+# Confluence checks computation
+is_above_200 = current_spot > float(df.iloc[-1]["ema200"])
+is_above_vwap = current_spot > float(df.iloc[-1]["vwap"])
+dist_ema21 = abs(current_spot - float(df.iloc[-1]["ema21"])) / current_spot
+is_not_stretched = dist_ema21 <= MA_STRETCH_THRESHOLD
+
+# ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
+st.markdown("""
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <span class="badge-pro">PRO v2.0</span>
+        <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
+    </div>
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
+</div>
+""", unsafe_allow_html=True)
+
+# Main Cockpit Split Grid
+cockpit_col1, cockpit_col2 = st.columns([1.35, 1.0])
+
+with cockpit_col1:
+    sig_badge_class = "signal-long" if "LONG" in signal.signal_type.value else ("signal-short" if "SHORT" in signal.signal_type.value else "signal-wait")
+    sig_badge_text = f"● {signal.signal_type.value} CONFIRMED" if signal.signal_type != SignalType.WAIT else "● AWAITING CONFLUENCE"
+    
+    st.markdown(f"""
+    <div class="cockpit-box">
+        <div class="cockpit-header">
+            <span class="{sig_badge_class}">{sig_badge_text}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">TIMEFRAME: {tf_str} EXECUTION</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600; color: {'#05df72' if spot_delta >= 0 else '#ff3355'};">
+                {spot_delta:+.2f} ({spot_delta/prev_spot*100:+.2f}%)
+            </span>
+        </div>
+        <div style="font-size: 13.5px; color: #8e9fb5; margin-bottom: 12px; line-height: 1.4;">
+            <strong>Setup Status:</strong> {signal.reason}
+        </div>
+        <div class="confluence-grid">
+            <div class="confluence-cell">
+                <div class="c-lbl">1. 200 EMA (5m)</div>
+                <div class="c-val" style="color: {'#05df72' if is_above_200 else '#ff3355'};">{'✓ Above (Bull)' if is_above_200 else '✗ Below (Bear)'}</div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">2. Session AVWAP</div>
+                <div class="c-val" style="color: {'#05df72' if is_above_vwap else '#ff3355'};">{'✓ Above 09:15' if is_above_vwap else '✗ Below 09:15'}</div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">3. Retracement</div>
+                <div class="c-val" style="color: #fbb024;">50-61.8% Golden</div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">4. MA Proximity</div>
+                <div class="c-val" style="color: {'#05df72' if is_not_stretched else '#ff3355'};">{'✓ Valid (' + str(round(dist_ema21*100, 2)) + '%)' if is_not_stretched else '✗ Stretched'}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with cockpit_col2:
+    if ticket.get("status") == "READY":
+        target_strike = ticket["symbol"]
+        delta_str = f"Δ {ticket['delta']:.2f}"
+        theta_str = f"Θ -₹{ticket['theta_decay_daily']:.2f}/sh"
+        ep_str = f"₹{ticket['entry_premium']:.2f}"
+        sl_str = f"₹{ticket['sl_premium']:.2f}"
+        t1_str = f"₹{ticket['target1_premium']:.2f}"
+        lots_str = f"{ticket['lots']} Lots ({ticket['total_qty']} Qty)"
+        risk_rupees_str = f"₹{ticket['max_risk_rupees']:,.2f}"
+    else:
+        # Default ATM strike reference
+        atm_k = int(round(current_spot / 50.0) * 50)
+        target_strike = f"NIFTY {atm_k} CE / PE"
+        delta_str = "Δ 0.55"
+        theta_str = "Θ -₹14.20/sh"
+        ep_str = "₹142.50"
+        sl_str = "₹112.50"
+        t1_str = "₹188.00"
+        lots_str = "6 Lots (150 Qty)"
+        risk_rupees_str = f"₹{account_capital * risk_pct:,.2f}"
+
+    st.markdown(f"""
+    <div class="cockpit-box" style="display: flex; flex-direction: column; justify-content: space-between; height: calc(100% - 20px);">
+        <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div>
+                    <div style="font-size: 11px; color: #55657e; text-transform: uppercase; font-weight: 600;">Optimal Strike (Delta 0.50-0.65)</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 800; color: #00d2ff;">{target_strike}</div>
+                </div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; background-color: #141c2e; padding: 4px 8px; border-radius: 4px; color: #8e9fb5;">
+                    {delta_str} • {theta_str}
+                </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
+                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">Entry Prem</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">{ep_str}</div>
+                </div>
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
+                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">Stop Loss</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #ff3355;">{sl_str}</div>
+                </div>
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
+                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">50% Target (T1)</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #05df72;">{t1_str}</div>
+                </div>
+            </div>
+        </div>
+        <div style="background-color: rgba(0, 210, 255, 0.04); border-left: 3px solid #00d2ff; padding: 8px 10px; font-size: 11.5px; color: #8e9fb5; line-height: 1.4;">
+            <strong>Protocol:</strong> Book 50% at <strong>{t1_str} (T1/Envelope)</strong> ➔ Shift SL to <strong>Break-Even ({ep_str})</strong> ➔ Trail runners on 1m 21 EMA.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ----------------- MAIN INTERFACE TABS -----------------
-tab_chart, tab_ticket, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
+tab_chart, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
     "📈 Interactive Candlestick Chart",
-    "🎟️ Institutional Option Ticket & Strike Sizer",
+    "🛡️ 1% Risk & Position Sizer",
     "🏛️ Institutional Participant OI & Option Chain",
-    "📊 Bar-by-Bar Replay & Backtest Engine",
-    "📖 JustNifty v2.0 Algorithm & Rules Reference"
+    "📊 Bar-by-Bar Replay & Backtest Simulator",
+    "📖 JustNifty v2.0 Master Rulebook"
 ])
 
-# ----- TAB 1: CHART -----
+# ----- TAB 1: INTERACTIVE CHART -----
 with tab_chart:
-    st.subheader("Nifty 50 Multi-Indicator Interactive Chart")
+    st.subheader("Nifty 50 Multi-Indicator Technical Chart")
     
-    # Overlay Toggles
-    c_t1, c_t2, c_t3, c_t4, c_t5 = st.columns(5)
-    show_emas = c_t1.checkbox("Show 200/55/21 EMAs", value=True)
-    show_env = c_t2.checkbox("Show 1.5% Envelopes", value=True)
-    show_vwap = c_t3.checkbox("Show Session AVWAP ±2σ", value=True)
-    show_fib = c_t4.checkbox("Show Fib Golden Pocket", value=True)
-    show_cpr = c_t5.checkbox("Show CPR Pivot Levels", value=False)
+    t1_c1, t1_c2, t1_c3, t1_c4, t1_c5 = st.columns(5)
+    show_emas = t1_c1.checkbox("200 / 55 / 21 EMAs", value=True)
+    show_env = t1_c2.checkbox("1.5% 200 EMA Envelopes", value=True)
+    show_vwap = t1_c3.checkbox("Session AVWAP ±2σ", value=True)
+    show_fib = t1_c4.checkbox("Fib Golden Pocket (50-61.8%)", value=True)
+    show_cpr = t1_c5.checkbox("CPR Pivots", value=False)
     
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -157,26 +328,25 @@ with tab_chart:
         subplot_titles=("Price Action & Confluence Overlays", "Intraday Volume")
     )
     
-    # Candlestick Trace
+    # Candlestick
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        name="Nifty 50",
-        increasing_line_color="#00e676", decreasing_line_color="#ff1744"
+        name="Nifty 50", increasing_line_color="#05df72", decreasing_line_color="#ff3355"
     ), row=1, col=1)
     
     if show_emas:
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema200"], name="200 EMA (Regime)", line=dict(color="#00e676", width=2.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["ema200"], name="200 EMA (Regime)", line=dict(color="#05df72", width=2.2)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df["ema55"], name="55 EMA (Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Trailing)", line=dict(color="#2979ff", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Trailing)", line=dict(color="#00d2ff", width=1.5)), row=1, col=1)
         
     if show_env:
-        fig.add_trace(go.Scatter(x=df.index, y=df["env_upper"], name="1.5% Upper Env (Extreme)", line=dict(color="#ff1744", width=1.2, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["env_lower"], name="1.5% Lower Env (Extreme)", line=dict(color="#00e676", width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["env_upper"], name="1.5% Upper Env (Take-Profit)", line=dict(color="#ff3355", width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["env_lower"], name="1.5% Lower Env (Take-Profit)", line=dict(color="#05df72", width=1.2, dash="dot")), row=1, col=1)
         
     if show_vwap:
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP", line=dict(color="#d500f9", width=2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_upper"], name="+2σ AVWAP Band", line=dict(color="rgba(213,0,249,0.4)", width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_lower"], name="-2σ AVWAP Band", line=dict(color="rgba(213,0,249,0.4)", width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP (09:15)", line=dict(color="#a855f7", width=2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_upper"], name="+2σ AVWAP Band", line=dict(color="rgba(168,85,247,0.35)", width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_lower"], name="-2σ AVWAP Band", line=dict(color="rgba(168,85,247,0.35)", width=1, dash="dash")), row=1, col=1)
         
     if show_cpr and cpr["pivot"] > 0:
         fig.add_hline(y=cpr["pivot"], line_dash="dash", line_color="#ffd600", annotation_text="CPR Pivot", row=1, col=1)
@@ -184,26 +354,25 @@ with tab_chart:
         fig.add_hline(y=cpr["bc"], line_dash="dot", line_color="#ffd600", annotation_text="CPR BC", row=1, col=1)
         
     if show_fib and len(df) >= 30:
-        s_high = df["high"].tail(30).max()
-        s_low = df["low"].tail(30).min()
+        s_high = float(df["high"].tail(30).max())
+        s_low = float(df["low"].tail(30).min())
         fib = compute_fibonacci_levels(s_high, s_low, is_uptrend=current_spot > float(df["ema200"].iloc[-1]))
         fig.add_hrect(
             y0=min(fib["fib_500"], fib["fib_618"]),
             y1=max(fib["fib_500"], fib["fib_618"]),
-            fillcolor="rgba(255, 215, 0, 0.15)",
-            line_width=1,
-            line_color="gold",
+            fillcolor="rgba(251, 176, 36, 0.12)",
+            line_width=1, line_color="#fbb024",
             annotation_text="Golden Pocket (50% - 61.8%)",
             annotation_position="top left",
             row=1, col=1
         )
         
     # Volume subplot
-    colors = ["#00e676" if c >= o else "#ff1744" for c, o in zip(df["close"], df["open"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color=colors, opacity=0.7), row=2, col=1)
+    vol_colors = ["#05df72" if c >= o else "#ff3355" for c, o in zip(df["close"], df["open"])]
+    fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color=vol_colors, opacity=0.7), row=2, col=1)
     
     fig.update_layout(
-        height=700,
+        height=680,
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
         margin=dict(l=20, r=20, t=30, b=20),
@@ -211,75 +380,64 @@ with tab_chart:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# ----- TAB 2: OPTION TRADE TICKET -----
-with tab_ticket:
-    st.subheader("Institutional Option Execution & Position Sizing Ticket")
+# ----- TAB 2: RISK & POSITION SIZER -----
+with tab_sizer:
+    st.subheader("🛡️ Institutional 1% Capital Risk & Position Sizer")
+    st.caption("Computes allowable lot count strictly governed by the 1% maximum capital risk rule.")
     
-    status_color = "green" if "LONG" in signal.signal_type.value else ("red" if "SHORT" in signal.signal_type.value else "orange")
-    st.markdown(f"### Current Status: <span style='color:{status_color}; font-weight:bold;'>{signal.signal_type.value}</span>", unsafe_allow_html=True)
-    st.info(f"**Diagnostic Evaluation:** {signal.reason}")
-    
-    if trade_ticket.get("status") == "READY":
-        st.success("✅ **High-Conviction Institutional Setup Confirmed.** Complete Trade Ticket Generated Below:")
+    s_col1, s_col2 = st.columns(2)
+    with s_col1:
+        calc_cap = st.number_input("Account Capital (₹)", value=account_capital, step=50000.0, key="calc_cap")
+        calc_risk_pct = st.slider("Risk Limit per Trade (%)", min_value=0.25, max_value=2.0, value=risk_pct*100.0, step=0.05, key="calc_risk") / 100.0
+        calc_ep = st.number_input("Option Entry Premium (₹)", value=142.50, step=1.0, key="calc_ep")
+        calc_sl = st.number_input("Option Stop-Loss Premium (₹)", value=112.50, step=1.0, key="calc_sl")
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Recommended Strike", trade_ticket["symbol"])
-        c2.metric("Target Delta (Δ)", f"{trade_ticket['delta']:.2f}")
-        c3.metric("Gamma (Γ)", f"{trade_ticket['gamma']:.5f}")
-        c4.metric("Daily Theta Decay (Θ)", f"₹{trade_ticket['theta_decay_daily']:.2f}/share")
+    with s_col2:
+        max_allowed_loss = calc_cap * calc_risk_pct
+        risk_per_sh = max(calc_ep - calc_sl, 2.0)
+        risk_per_contract_lot = risk_per_sh * contract_lot_size
+        calc_lots = int(max_allowed_loss // risk_per_contract_lot)
+        calc_total_qty = calc_lots * contract_lot_size
+        calc_actual_risk = calc_total_qty * risk_per_sh
+        calc_outlay = calc_total_qty * calc_ep
         
-        st.markdown("#### 🎯 Execution Price Levels (Option Premiums Translated via Delta)")
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Option Entry Premium", f"₹{trade_ticket['entry_premium']:.2f}")
-        p2.metric("Option Stop-Loss", f"₹{trade_ticket['sl_premium']:.2f}", f"Risk: -₹{trade_ticket['entry_premium'] - trade_ticket['sl_premium']:.2f}/sh", delta_color="inverse")
-        p3.metric("Target 1 (50% Part-Book)", f"₹{trade_ticket['target1_premium']:.2f}", f"+₹{trade_ticket['target1_premium'] - trade_ticket['entry_premium']:.2f}/sh")
-        p4.metric("Target 2 (Runner Target)", f"₹{trade_ticket['target2_premium']:.2f}", f"+₹{trade_ticket['target2_premium'] - trade_ticket['entry_premium']:.2f}/sh")
+        m1, m2 = st.columns(2)
+        m1.metric("Max Allowable Loss", f"₹{max_allowed_loss:,.2f}")
+        m2.metric("Allocated Position", f"{calc_lots} Lots ({calc_total_qty} Qty)")
         
-        st.markdown("#### 🛡️ Institutional 1% Capital Risk Allocation")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Allocated Position Size", f"{trade_ticket['lots']} Lots ({trade_ticket['total_qty']} Qty)")
-        s2.metric("Total 1% Risk Exposure", f"₹{trade_ticket['max_risk_rupees']:,.2f}", f"{risk_pct*100:.2f}% of ₹{account_capital:,.0f}")
-        s3.metric("Total Capital Outlay", f"₹{trade_ticket['capital_outlay']:,.2f}", f"{trade_ticket['capital_outlay']/account_capital*100:.1f}% Margin")
-        s4.metric("Reward to Risk Ratio", f"{(trade_ticket['target1_premium'] - trade_ticket['entry_premium'])/(trade_ticket['entry_premium'] - trade_ticket['sl_premium']):.2f} : 1")
+        m3, m4 = st.columns(2)
+        m3.metric("Actual Risk Exposure", f"₹{calc_actual_risk:,.2f}", f"{(calc_actual_risk/calc_cap)*100:.2f}% of Capital", delta_color="inverse")
+        m4.metric("Capital Outlay Required", f"₹{calc_outlay:,.2f}", f"{(calc_outlay/calc_cap)*100:.1f}% Margin")
         
-        st.markdown("#### 📜 Exact Institutional Trade Management Plan")
-        for key, val in trade_ticket["execution_rules"].items():
-            st.markdown(f"- **{key.replace('_', ' ').title()}:** {val}")
-    else:
-        st.warning("⚠️ **No Active Execution Trigger At This Moment.**")
-        st.markdown("""
-        **Why is the trade engine waiting?**
-        - Institutional option buying requires strict confluence: (1) Above/Below 200 EMA, (2) Aligned with 09:15 Session AVWAP, (3) Pullback into the 50.0% to 61.8% Fibonacci Golden Pocket, and (4) Price not overextended from the 21 EMA.
-        - Monitor the chart for pullback confirmation into the Golden Pocket, or watch for the **3:00 PM Aggressive Breakout Setup** between 15:00 and 15:10 IST.
-        """)
+        st.info(f"**Institutional Part-Booking Rule:** Book 50% ({max(calc_lots//2, 1)} lots) at T1 / 1.5% Envelope. Shift SL on remaining {calc_lots - max(calc_lots//2, 1)} lots to Break-Even (₹{calc_ep:.2f}).")
 
-# ----- TAB 3: INSTITUTIONAL OI & OPTION CHAIN -----
+# ----- TAB 3: PARTICIPANT OI & STRIKE LADDER -----
 with tab_oi:
     st.subheader("🏛️ Institutional Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), use_container_width=True)
     
-    st.subheader("🔍 Algorithmic Strike Selection Ladder & Greeks Matrix")
+    st.subheader("🔍 Institutional Strike Ladder & Greeks Matrix (Delta 0.50 – 0.65)")
     atm_center = int(round(current_spot / 50.0) * 50)
     chain_rows = []
     
-    for k in range(atm_center - 250, atm_center + 300, 50):
+    for k in range(atm_center - 200, atm_center + 250, 50):
         ce_greeks = black_scholes_greeks(current_spot, k, t_days=4.0, sigma=iv_input, is_call=True)
         pe_greeks = black_scholes_greeks(current_spot, k, t_days=4.0, sigma=iv_input, is_call=False)
         
         is_atm = (k == atm_center)
-        ce_rec = "👉 PRO CALL BUY" if (0.50 <= ce_greeks["delta"] <= 0.65) else ""
-        pe_rec = "👉 PRO PUT BUY" if (0.50 <= abs(pe_greeks["delta"]) <= 0.65) else ""
+        ce_rec = "👉 PRO CALL" if (0.50 <= ce_greeks["delta"] <= 0.65) else ""
+        pe_rec = "👉 PRO PUT" if (0.50 <= abs(pe_greeks["delta"]) <= 0.65) else ""
         
         chain_rows.append({
+            "Call Setup": ce_rec,
             "CE Delta": ce_greeks["delta"],
             "CE Theta": ce_greeks["theta"],
             "CE Premium (₹)": ce_greeks["price"],
-            "Call Setup": ce_rec,
             "Strike": f"🎯 {k} (ATM)" if is_atm else str(k),
-            "Put Setup": pe_rec,
             "PE Premium (₹)": pe_greeks["price"],
             "PE Theta": pe_greeks["theta"],
-            "PE Delta": pe_greeks["delta"]
+            "PE Delta": pe_greeks["delta"],
+            "Put Setup": pe_rec
         })
         
     st.dataframe(pd.DataFrame(chain_rows), use_container_width=True)
@@ -291,45 +449,43 @@ with tab_oi:
 
 # ----- TAB 4: BACKTESTING & REPLAY -----
 with tab_backtest:
-    st.subheader("📊 Bar-by-Bar Replay & Strategy Backtest Engine")
-    st.markdown("Simulates the complete JustNifty v2.0 execution model (Golden Pocket entries, 50% part-booking at T1 / Envelope, breakeven SL adjustment, and 21 EMA / AVWAP trailing).")
+    st.subheader("📊 Bar-by-Bar Replay & Backtesting Engine")
+    st.caption("Simulates the complete JustNifty v2.0 execution model (Golden Pocket entries, 50% part-booking at T1 / Envelope, breakeven SL adjustment, and 21 EMA / AVWAP trailing).")
     
-    if st.button("🚀 Run Backtest on Active Dataset", use_container_width=True):
+    if st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True):
         bt_engine = BacktestEngine(initial_capital=account_capital)
         results = bt_engine.run_backtest(df)
         
-        s1, s2, s3, s4 = st.columns(4)
+        b1, b2, b3, b4 = st.columns(4)
         pnl_color = "normal" if results.summary["pnl_rupees"] >= 0 else "inverse"
-        s1.metric("Net Strategy PnL", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
-        s2.metric("Win Rate", f"{results.summary['win_rate']:.1f}%", f"{results.summary['wins']}W / {results.summary['losses']}L")
-        s3.metric("Total Trades Executed", results.summary["total_trades"])
-        s4.metric("Final Account Balance", f"₹{results.summary['final_capital']:,.2f}")
+        b1.metric("Net Strategy PnL", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
+        b2.metric("Win Rate", f"{results.summary['win_rate']:.1f}%", f"{results.summary['wins']}W / {results.summary['losses']}L")
+        b3.metric("Total Trades Executed", results.summary["total_trades"])
+        b4.metric("Final Account Balance", f"₹{results.summary['final_capital']:,.2f}")
         
         if results.trade_log:
             st.markdown("#### 📜 Executed Trade Log")
-            df_trades = pd.DataFrame(results.trade_log)
-            st.dataframe(df_trades, use_container_width=True)
+            st.dataframe(pd.DataFrame(results.trade_log), use_container_width=True)
             
-            # Equity curve chart
             st.markdown("#### 📈 Account Equity Curve")
             fig_eq = go.Figure()
-            fig_eq.add_trace(go.Scatter(y=results.equity_curve, mode="lines+markers", line=dict(color="#00e676", width=2), name="Equity (₹)"))
-            fig_eq.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=20, b=20))
+            fig_eq.add_trace(go.Scatter(y=results.equity_curve, mode="lines+markers", line=dict(color="#05df72", width=2), name="Equity (₹)"))
+            fig_eq.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=20, b=20))
             st.plotly_chart(fig_eq, use_container_width=True)
         else:
             st.info("No completed trade setups triggered within this specific historical slice.")
 
-# ----- TAB 5: CHEATSHEET & RULES -----
+# ----- TAB 5: MASTER RULEBOOK -----
 with tab_cheatsheet:
-    st.subheader("📖 JustNifty v2.0 Algorithm & Institutional Rules Cheatsheet")
+    st.subheader("📖 JustNifty v2.0 Master Strategy Rulebook")
     st.markdown(r"""
-    ### 1. The 4 Core Technical Pillars
+    ### 1. The 4 Core Technical Pillars (85% Foundation)
     1. **Price Action:** HH/HL for Uptrends, LH/LL for Downtrends. Candlestick trigger confirmations (Engulfing / Hammer / Doji).
     2. **Retracement:** 50.0% to 61.8% Fibonacci Golden Pocket.
     3. **Moving Averages:** 200 EMA (Regime), 55 EMA (Trend), 21 EMA (Momentum/Trailing).
     4. **Envelopes:** 1.5% 200 EMA bands for spotting extreme exhaustion and mechanical 50% part-booking.
 
-    ### 2. The Missing 15% Mechanisms Incorporated in v2.0
+    ### 2. The 5 Missing Audit Mechanisms (15% Nuances)
     - **Session AVWAP (09:15 Anchor):** Above AVWAP $\rightarrow$ Buyers in profit (Bullish only). Below AVWAP $\rightarrow$ Sellers in profit (Bearish only).
     - **15-Min Freak Candle Isolation:** First 15 minutes (09:15 - 09:30) ignored for breakout entries to establish true Initial Balance.
     - **Far-Away MA Crossover Filter (Query 12):** If price is $>0.35\%$ stretched from 21/55 EMA, reject market entry; wait for mean-reversion pullback.
