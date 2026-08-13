@@ -1,11 +1,11 @@
-"""JustNifty v3.0 Tier-1 Quantitative Indicators & Adaptive Stochastic Models."""
+"""JustNifty v3.0 Tier-1 Quantitative Indicators, Stochastic Models & Order Flow Mechanics."""
 
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Any, List
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA, VAKC_ATR_SPAN,
-    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV
+    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN
 )
 
 def compute_ema(series: pd.Series, period: int) -> pd.Series:
@@ -18,26 +18,35 @@ def compute_envelopes(ema_series: pd.Series, pct: float = 0.015) -> Tuple[pd.Ser
     lower = ema_series * (1.0 - pct)
     return upper, lower
 
-def compute_hurst_exponent(series: pd.Series, min_lag: int = 4, max_lag: int = 35) -> Dict[str, Any]:
+def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 30) -> Dict[str, Any]:
     """
-    Computes the Fractional Hurst Exponent (H) via Rescaled Range (R/S) analysis.
-    H > 0.55 -> Persistent / Trending Regime
+    Computes the Fractional Hurst Exponent (H) via Log-Returns Rescaled Range (R/S) Analysis
+    with finite-sample Anis-Lloyd / Peters Bias Correction.
+    H > 0.52 -> Persistent / Trending Regime (Golden Pocket Active)
     H < 0.45 -> Anti-Persistent / Mean-Reverting Regime
-    0.45 <= H <= 0.55 -> Random Walk (No alpha)
+    0.45 <= H <= 0.52 -> Random Walk / Noise
     """
     if len(series) < max_lag + 10:
         return {"hurst": 0.50, "regime": "RANDOM_WALK (Accumulating Data)", "is_trending": False}
         
     prices = series.values[-100:] if len(series) >= 100 else series.values
-    lags = np.unique(np.linspace(min_lag, min(max_lag, len(prices) // 2), 8, dtype=int))
+    # Compute continuously compounded log-returns for weak-sense stationarity
+    log_returns = np.diff(np.log(np.maximum(prices, 1.0)))
+    
+    if len(log_returns) < max_lag:
+        return {"hurst": 0.50, "regime": "RANDOM_WALK (Accumulating Data)", "is_trending": False}
+
+    lags = np.unique(np.linspace(min_lag, min(max_lag, len(log_returns) // 2), 6, dtype=int))
     rs_values = []
     
     for lag in lags:
-        sub_returns = np.diff(prices[:len(prices) - (len(prices) % lag)])
-        chunks = np.array_split(sub_returns, len(sub_returns) // lag)
-        
+        n_chunks = len(log_returns) // lag
+        if n_chunks < 1:
+            continue
+            
         chunk_rs = []
-        for chunk in chunks:
+        for i in range(n_chunks):
+            chunk = log_returns[i * lag : (i + 1) * lag]
             if len(chunk) < 2:
                 continue
             mean = np.mean(chunk)
@@ -48,23 +57,28 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 4, max_lag: int = 3
                 chunk_rs.append(r / s)
                 
         if chunk_rs:
-            rs_values.append(np.mean(chunk_rs))
+            # Anis-Lloyd analytical expected R/S for standard white noise
+            expected_rs = np.sqrt((lag - 0.5) / (np.pi * 0.5)) if lag > 2 else 1.0
+            raw_rs = np.mean(chunk_rs)
+            # Subtract finite-sample bias
+            rs_values.append(raw_rs / max(expected_rs * 0.85, 0.1))
             
     if len(rs_values) >= 3:
         valid_lags = lags[:len(rs_values)]
         poly = np.polyfit(np.log(valid_lags), np.log(rs_values), 1)
-        h = float(np.clip(poly[0], 0.05, 0.95))
+        # Shift regression slope back to H scale
+        h = float(np.clip(poly[0] + 0.50, 0.10, 0.90))
     else:
         h = 0.50
         
-    if h > HURST_TRENDING_MIN:
-        regime = "PERSISTENT TRENDING (H > 0.55 - Golden Pocket Active)"
+    if h >= HURST_TRENDING_MIN:
+        regime = f"PERSISTENT TRENDING (H={h:.2f} >= 0.52 - Golden Pocket Active)"
         is_trending = True
     elif h < HURST_MEAN_REV_MAX:
-        regime = "ANTI-PERSISTENT MEAN-REVERTING (H < 0.45 - Fade Extremes)"
+        regime = f"ANTI-PERSISTENT MEAN-REVERTING (H={h:.2f} < 0.45 - Fade Extremes)"
         is_trending = False
     else:
-        regime = "RANDOM WALK (0.45 <= H <= 0.55 - High Noise)"
+        regime = f"RANDOM WALK (H={h:.2f} - High Noise Filtered)"
         is_trending = False
         
     return {
@@ -81,21 +95,24 @@ def compute_vakc_envelopes(
     iv: float = DEFAULT_IV
 ) -> Tuple[pd.Series, pd.Series]:
     """
-    Computes Volatility-Adaptive Keltner Channels (VAKC):
-    Upper = EMA200 + k * ATR * sqrt(IV / IV_baseline)
-    Lower = EMA200 - k * ATR * sqrt(IV / IV_baseline)
+    Computes Volatility-Adaptive Keltner Channels (VAKC) using Wilder's RMA for ATR
+    and dynamic volatility expansion scaling:
+    Upper = EMA200 + k * ATR * sqrt(IV / 0.12)
+    Lower = EMA200 - k * ATR * sqrt(IV / 0.12)
     """
     df = df.copy()
     ema200 = compute_ema(df["close"], ema_span)
     
-    # Calculate Average True Range (ATR)
+    # Calculate True Range
     high_low = df["high"] - df["low"]
     high_close_prev = (df["high"] - df["close"].shift(1)).abs()
     low_close_prev = (df["low"] - df["close"].shift(1)).abs()
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-    atr = tr.rolling(window=atr_span, min_periods=1).mean()
     
-    # Volatility expansion scaling
+    # Wilder's RMA (Exponential Running Moving Average for ATR)
+    atr = tr.ewm(alpha=1.0/atr_span, adjust=False).mean()
+    
+    # Dynamic Volatility Multiplier
     vol_scalar = np.sqrt(max(iv, 0.08) / 0.12)
     band_width = (k * atr * vol_scalar).fillna(ema200 * 0.015)
     
@@ -104,7 +121,7 @@ def compute_vakc_envelopes(
     return upper_vakc, lower_vakc
 
 def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Computes Session Anchored VWAP and ±2σ dispersion bands with zero-volume resilience."""
+    """Computes Session Anchored VWAP and Exact Online 2nd-Moment Variance (±2σ dispersion bands)."""
     df = df.copy()
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
     
@@ -115,21 +132,25 @@ def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Seri
         vol = vol.replace(0, 1.0)
         
     tp_vol = typical_price * vol
+    tp_sq_vol = (typical_price ** 2) * vol
     
     if anchor_session:
-        dates = pd.Series(df.index.date, index=df.index)
-        cum_vol = vol.groupby(dates).cumsum()
+        dates = pd.Series(df.index.date, index=df.index) if hasattr(df.index, "date") else pd.Series(0, index=df.index)
+        cum_vol = vol.groupby(dates).cumsum().clip(lower=1.0)
         cum_tp_vol = tp_vol.groupby(dates).cumsum()
-        vwap = (cum_tp_vol / cum_vol.clip(lower=1.0)).fillna(typical_price)
+        cum_tp_sq_vol = tp_sq_vol.groupby(dates).cumsum()
         
-        squared_diff = ((typical_price - vwap) ** 2) * vol
-        cum_sq_diff = squared_diff.groupby(dates).cumsum()
-        std_dev = np.sqrt(np.maximum(cum_sq_diff / cum_vol.clip(lower=1.0), 0)).fillna(0)
+        vwap = (cum_tp_vol / cum_vol).fillna(typical_price)
+        # Exact online 2nd-moment standard deviation: sqrt(E[X^2] - (E[X])^2)
+        variance = (cum_tp_sq_vol / cum_vol) - (vwap ** 2)
+        std_dev = np.sqrt(np.maximum(variance, 0.0)).fillna(0.0)
     else:
         cum_vol = vol.cumsum().clip(lower=1.0)
         cum_tp_vol = tp_vol.cumsum()
+        cum_tp_sq_vol = tp_sq_vol.cumsum()
         vwap = (cum_tp_vol / cum_vol).fillna(typical_price)
-        std_dev = np.sqrt((((typical_price - vwap) ** 2) * vol).cumsum() / cum_vol).fillna(0)
+        variance = (cum_tp_sq_vol / cum_vol) - (vwap ** 2)
+        std_dev = np.sqrt(np.maximum(variance, 0.0)).fillna(0.0)
 
     upper_sd = vwap + (2.0 * std_dev)
     lower_sd = vwap - (2.0 * std_dev)
@@ -137,28 +158,39 @@ def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Seri
 
 def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Computes Cumulative Volume Delta (CVD) and Order Flow Imbalance (OFI) proxy.
-    Positive OFI indicates aggressive buyer market orders absorbing liquidity.
+    Computes Composite Price-Wick Weighted Bar Delta & Rolling 20-Bar OFI Z-Score.
+    Detects institutional absorption at Session AVWAP.
     """
     if df.empty or len(df) < 2:
-        return {"ofi": 0.0, "cvd": 0.0, "buyer_defense": True, "cvd_series": pd.Series()}
+        return {"ofi": 0.0, "ofi_zscore": 0.0, "cvd": 0.0, "buyer_defense": True, "cvd_series": pd.Series()}
         
     vol = df["volume"].copy().astype(float)
     if vol.sum() == 0 or (vol == 0).all():
         vol = (df["high"] - df["low"]).clip(lower=1.0)
         
-    # Proxy delta: Signed volume based on candle body position relative to high/low range
-    candle_range = (df["high"] - df["low"]).replace(0, 1.0)
-    delta_weight = (df["close"] - df["open"]) / candle_range
-    bar_delta = vol * delta_weight
+    c_range = (df["high"] - df["low"]).replace(0, 1.0)
+    # Composite Delta Weight: 60% Body Displacement + 40% Close Location Relative to Midpoint
+    body_weight = (df["close"] - df["open"]) / c_range
+    close_loc_weight = (2.0 * df["close"] - df["high"] - df["low"]) / c_range
+    composite_weight = (0.60 * body_weight) + (0.40 * close_loc_weight)
     
+    bar_delta = vol * composite_weight
     cvd = bar_delta.cumsum()
+    
+    # Rolling 20-Bar OFI Z-Score
+    rolling_mean = bar_delta.rolling(window=20, min_periods=3).mean()
+    rolling_std = bar_delta.rolling(window=20, min_periods=3).std().replace(0, 1.0)
+    ofi_zscore_series = ((bar_delta - rolling_mean) / rolling_std).fillna(0.0)
+    
+    recent_z = float(ofi_zscore_series.iloc[-1])
     recent_ofi = float(bar_delta.tail(5).sum())
     
     return {
         "ofi": round(recent_ofi, 2),
+        "ofi_zscore": round(recent_z, 3),
         "cvd": round(float(cvd.iloc[-1]), 2),
-        "buyer_defense": recent_ofi >= 0,
+        "buyer_defense": recent_z >= -0.20,
+        "seller_defense": recent_z <= 0.20,
         "cvd_series": cvd
     }
 
@@ -172,7 +204,6 @@ def compute_cpr(daily_df: pd.DataFrame) -> Dict[str, Any]:
             "regime": "UNKNOWN"
         }
     
-    # Resample to true Daily OHLC if intraday dataset is passed
     if len(daily_df) > 10 and hasattr(daily_df.index, "date"):
         daily_resampled = daily_df.resample("D").agg({
             "open": "first", "high": "max", "low": "min", "close": "last"
@@ -252,7 +283,6 @@ def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]
     bin_volumes = np.zeros(n_bins - 1)
     
     for _, row in df.iterrows():
-        # Distribute volume across candle range
         c_low, c_high = float(row["low"]), float(row["high"])
         vol = float(row["volume"]) if row["volume"] > 0 else (c_high - c_low)
         
@@ -272,7 +302,6 @@ def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]
     low_idx, high_idx = poc_idx, poc_idx
     curr_vol = bin_volumes[poc_idx]
     
-    # Dual-bracket expansion for Value Area
     while curr_vol < target_vol and (low_idx > 0 or high_idx < len(bin_volumes) - 1):
         v_below = bin_volumes[low_idx - 1] if low_idx > 0 else 0
         v_above = bin_volumes[high_idx + 1] if high_idx < len(bin_volumes) - 1 else 0
@@ -297,21 +326,15 @@ def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]
     }
 
 def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float = 12800000.0) -> Dict[str, Any]:
-    """
-    Computes Net Dealer Gamma Exposure (GEX) and Gamma Flip Level.
-    Positive GEX: Market makers Long Gamma -> Mean-Reversion Mode
-    Negative GEX: Market makers Short Gamma -> Momentum Breakout Mode
-    """
-    # Standard Nifty GEX approximation in ₹ Crores per 1% spot move
+    """Computes Net Dealer Gamma Exposure (GEX) in ₹ Crores and Gamma Flip Level."""
     net_oi_diff = (call_oi - put_oi) / 100000.0
     gex_crores = net_oi_diff * (spot / 24000.0) * 4.5
-    
     is_positive_gex = gex_crores >= 0
     flip_strike = int(round(spot / 50.0) * 50) + (50 if not is_positive_gex else -50)
     
     return {
         "net_gex_crores": round(gex_crores, 2),
         "is_positive_gamma": is_positive_gex,
-        "gamma_regime": "POSITIVE GAMMA (MM Long Gamma -> Mean-Reversion S/R Holds)" if is_positive_gex else "NEGATIVE GAMMA (MM Short Gamma -> High Velocity Breakouts)",
+        "gamma_regime": "POSITIVE GAMMA (MM Long Gamma -> S/R Pinning)" if is_positive_gex else "NEGATIVE GAMMA (MM Short Gamma -> High Velocity Breakouts)",
         "gamma_flip_strike": flip_strike
     }

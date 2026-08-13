@@ -23,9 +23,9 @@ def test_select_institutional_strike_call():
     assert res["option_type"] == "CE"
 
 def test_select_institutional_strike_put():
-    # Spot 24480, Short -> Target 24500 PE (1-step ITM) or 24450 PE (ATM) with delta ~0.50-0.65
+    # Spot 24480, Short -> Target ATM or ITM PE (24500, 24550, 24600) with delta ~0.50-0.65
     res = select_institutional_strike(spot=24480.0, is_call=False)
-    assert res["strike"] in [24500, 24450]
+    assert res["strike"] in [24500, 24550, 24600]
     assert 0.48 <= abs(res["delta"]) <= 0.65
     assert res["option_type"] == "PE"
 

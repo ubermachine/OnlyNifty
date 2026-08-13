@@ -6,17 +6,20 @@ MAX_RISK_PCT: float = 0.01               # Strict 1.0% max risk per trade baseli
 LOT_SIZE: int = 25                      # Nifty 50 derivative contract lot size
 KELLY_FRACTION: float = 0.25            # Quarter-Kelly allocation for fat-tail safety
 MAX_TOLERABLE_MDD: float = 0.10         # 10.0% Maximum tolerable portfolio drawdown
+DAILY_LOSS_LIMIT_PCT: float = 0.015     # 1.5% Hard Daily Loss Limit (DLL) circuit breaker
+MAX_CONSECUTIVE_LOSSES_DAY: int = 2     # 2-Strike Rule: Halt intraday trading after 2 consecutive losses
+MAX_TRADES_PER_DAY: int = 3             # Daily trade frequency ceiling to prevent overtrading & TCA drag
 PROFIT_RATCHET_TRIGGER: float = 0.015   # Lock in 65% of peak gains once +1.5R (+1.5%) achieved
 
 # ----------------- ADAPTIVE STOCHASTIC PILLARS -----------------
 # 1. Fractional Hurst Exponent (H)
-HURST_TRENDING_MIN: float = 0.55        # H > 0.55: Persistent / Trending regime
+HURST_TRENDING_MIN: float = 0.52        # H >= 0.52: Persistent / Trending regime (Anis-Lloyd corrected)
 HURST_MEAN_REV_MAX: float = 0.45        # H < 0.45: Anti-Persistent / Mean-Reverting regime
-HURST_WINDOW: int = 50                  # Rolling lookback window for Rescaled Range (R/S)
+HURST_WINDOW: int = 60                  # Rolling lookback window for Rescaled Range (R/S)
 
 # 2. Volatility-Adaptive Keltner Channels (VAKC)
 VAKC_LAMBDA: float = 2.25               # ATR multiplier for adaptive dispersion bands
-VAKC_ATR_SPAN: int = 14                 # Average True Range lookback span
+VAKC_ATR_SPAN: int = 14                 # Average True Range lookback span (Wilder RMA)
 EMA_FAST: int = 21                      # Momentum & micro-trailing EMA
 EMA_MID: int = 55                       # Intermediate trend filter EMA
 EMA_SLOW: int = 200                     # Primary market regime filter EMA
@@ -30,25 +33,25 @@ FIB_SL_SHORT: float = 0.786             # 78.6% Retracement boundary + 5 points 
 MA_STRETCH_THRESHOLD: float = 0.0035    # 0.35% distance threshold from 21/55 EMA (Query 12 filter)
 
 # 4. Order Flow Imbalance (OFI) & Cumulative Volume Delta (CVD)
-OFI_THRESHOLD: float = 0.0              # OFI > 0 confirms buyer defense at AVWAP
+OFI_ZSCORE_MIN: float = 0.65            # Minimum rolling Z-score OFI required to validate AVWAP defense
 VPIN_TOXICITY_THRESHOLD: float = 0.65   # Volume-Synchronized Probability of Informed Trading limit
 
 # ----------------- DERIVATIVES & SECOND-ORDER GREEKS -----------------
 DELTA_MIN: float = 0.50                 # Minimum Delta for ATM / 1-ITM directional options
 DELTA_MAX: float = 0.65                 # Maximum Delta for institutional directional buying
-DELTA_DEEP_ITM_0DTE: float = 0.75       # Target Delta on Thursday 0DTE after 12:30 to avoid gamma cliff
+DELTA_DEEP_ITM_0DTE: float = 0.78       # Target Delta on Thursday 0DTE after 12:30 (Deep ITM Synthetic)
 RISK_FREE_RATE: float = 0.065           # 6.5% RBI reference repo rate
 DEFAULT_IV: float = 0.12                # 12.0% India VIX / IV baseline
 PUT_SKEW_PREMIUM: float = 0.025         # +250 bps structural downside put skew
 
 # ----------------- TRANSACTION COST ANALYSIS (TCA) - NSE FRICTION -----------------
-STT_SELL_PCT: float = 0.001             # 0.10% Securities Transaction Tax on sell turnover
+STT_SELL_PCT: float = 0.001             # 0.10% Securities Transaction Tax on sell turnover (Oct 2024 mandate)
 BROKERAGE_PER_ORDER: float = 20.0       # ₹20 flat per executed order
 NSE_TURNOVER_PCT: float = 0.0003503     # 0.03503% NSE exchange turnover charges
 GST_PCT: float = 0.18                   # 18% GST on (Brokerage + Exchange Fees)
 SEBI_CHARGES_PCT: float = 0.000001      # ₹10 per Crore
 STAMP_DUTY_BUY_PCT: float = 0.00003     # 0.003% Stamp duty on buy turnover
-DEFAULT_SLIPPAGE_PTS: float = 0.75      # ₹0.75 per share realistic round-trip slippage
+DEFAULT_SLIPPAGE_PTS: float = 0.75      # ₹0.75 baseline per share slippage
 
 # ----------------- SESSION TIMINGS (IST) -----------------
 SESSION_START: str = "09:15"

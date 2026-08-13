@@ -7,7 +7,11 @@ from src.indicators import (
     compute_hurst_exponent, compute_vakc_envelopes,
     compute_order_flow_imbalance, compute_dealer_gex
 )
-from src.options_engine import black_scholes_greeks, calculate_tca_friction
+from src.options_engine import (
+    black_scholes_greeks, calculate_adaptive_tca_friction,
+    convert_to_free_vertical_spread, generate_option_trade_ticket
+)
+from src.strategy_rules import StrategyEngine, Signal, SignalType
 from src.data_engine import DataEngine
 
 def test_hurst_exponent():
@@ -36,6 +40,7 @@ def test_order_flow_imbalance():
     df = engine.generate_synthetic_nifty(bars=50)
     ofi = compute_order_flow_imbalance(df)
     assert "ofi" in ofi
+    assert "ofi_zscore" in ofi
     assert "cvd" in ofi
     assert "buyer_defense" in ofi
 
@@ -51,7 +56,29 @@ def test_second_order_greeks_and_tca():
     assert "charm" in g
     assert "volga" in g
     
-    tca = calculate_tca_friction(entry_prem=142.50, exit_prem=188.00, total_qty=150, lots=6)
+    tca = calculate_adaptive_tca_friction(
+        entry_prem=142.50, t1_prem=188.00, final_exit_prem=188.00,
+        total_qty=150, lots=6, part_booked=True
+    )
     assert tca["total_friction"] > 0
     assert tca["stt"] > 0
-    assert tca["brokerage"] == 40.0  # ₹20 buy + ₹20 sell
+    assert tca["brokerage"] == 60.0  # 3 orders (Buy + Sell 50% + Sell remaining)
+
+def test_free_vertical_spread_conversion():
+    dummy_signal = Signal(
+        signal_type=SignalType.LONG,
+        entry_price=24500.0,
+        sl_price=24450.0,
+        target_1=24550.0,
+        target_2=24650.0,
+        reason="Test Long Setup",
+        htf_aligned=True,
+        fib_retracement=0.55,
+        details={}
+    )
+    ticket = generate_option_trade_ticket(24500.0, dummy_signal, capital=500000.0)
+    spread = convert_to_free_vertical_spread(ticket, spot_at_t1=24550.0, t_days_remaining=3.0)
+    assert spread["status"] == "CONVERTED_SPREAD"
+    assert "short_leg" in spread
+    assert spread["max_spread_width_pts"] == 100
+    assert "net_theta_daily" in spread

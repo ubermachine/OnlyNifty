@@ -1,4 +1,4 @@
-"""JustNifty v3.0 Institutional Strategy Engine with Hurst Regime, VAKC Bands, OFI Delta, and LAAF Triggers."""
+"""JustNifty v3.0 Institutional Strategy Engine with Hurst Regime Gating, VAKC Bands, OFI Delta, and LAAF Triggers."""
 
 from enum import Enum
 from dataclasses import dataclass
@@ -37,14 +37,16 @@ class Signal:
 
 class StrategyEngine:
     def __init__(self):
-        pass
+        self.session_losses: int = 0
+        self.last_session_date: Optional[Any] = None
 
     def evaluate_bar(
         self,
         df_5m: pd.DataFrame,
         current_idx: int = -1,
         df_daily: Optional[pd.DataFrame] = None,
-        df_hourly: Optional[pd.DataFrame] = None
+        df_hourly: Optional[pd.DataFrame] = None,
+        live_iv: float = DEFAULT_IV
     ) -> Signal:
         """Evaluates JustNifty v3.0 institutional trade setups on the specified 5m bar."""
         if df_5m.empty:
@@ -71,7 +73,7 @@ class StrategyEngine:
                 details={"bar_time": bar_time}
             )
 
-        # 2. 3:00 PM (15:00) Aggressive Breakout Strategy Check (Page 100 / Query 39)
+        # 2. 3:00 PM (15:00) Aggressive Breakout Strategy Check
         if bar_time in ["15:05", "15:10"]:
             three_pm_indices = [
                 i for i, idx in enumerate(df_5m.index[:current_idx + 1])
@@ -111,7 +113,7 @@ class StrategyEngine:
         ema200_series = compute_ema(df_5m["close"], EMA_SLOW)
         ema55_series = compute_ema(df_5m["close"], EMA_MID)
         ema21_series = compute_ema(df_5m["close"], EMA_FAST)
-        vakc_upper, vakc_lower = compute_vakc_envelopes(df_5m)
+        vakc_upper, vakc_lower = compute_vakc_envelopes(df_5m, iv=live_iv)
         vwap_series, _, _ = compute_vwap(df_5m)
         
         # Adaptive Stochastic Metrics
@@ -159,8 +161,8 @@ class StrategyEngine:
         prev_bar = df_5m.iloc[current_idx - 1]
         prev_close = float(prev_bar["close"])
 
-        # 5. LONG Setup Check (Above 200 EMA + Above AVWAP + 50-61.8% Golden Pocket + Bullish Confirmation Candle)
-        if close > ema200 and close > current_vwap and swing_range >= 35.0:
+        # 5. LONG Setup Check (Above 200 EMA + Above AVWAP + 50-61.8% Golden Pocket + Bullish Confirmation Candle + OFI Defense)
+        if close > ema200 and close > current_vwap and swing_range >= 35.0 and ofi_info["buyer_defense"]:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=True)
             in_pocket = fib["fib_618"] <= min(close, bar_open) and max(close, bar_open) <= (fib["fib_500"] + 10.0)
             
@@ -176,7 +178,7 @@ class StrategyEngine:
                     sl_price=fib["sl_level"],
                     target_1=t1,
                     target_2=t2,
-                    reason="LONG Setup Confirmed: Above 200 EMA + Above AVWAP + Golden Pocket (50-61.8%) + Bullish Confirmation Candle.",
+                    reason="LONG Setup Confirmed: Above 200 EMA + Above AVWAP + Golden Pocket (50-61.8%) + Bullish Confirmation Candle + Positive OFI Defense.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
@@ -185,8 +187,8 @@ class StrategyEngine:
                     }
                 )
 
-        # 6. SHORT Setup Check (Below 200 EMA + Below AVWAP + 50-61.8% Golden Pocket + Bearish Confirmation Candle)
-        if close < ema200 and close < current_vwap and swing_range >= 35.0:
+        # 6. SHORT Setup Check (Below 200 EMA + Below AVWAP + 50-61.8% Golden Pocket + Bearish Confirmation Candle + OFI Defense)
+        if close < ema200 and close < current_vwap and swing_range >= 35.0 and ofi_info["seller_defense"]:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=False)
             in_pocket = (fib["fib_500"] - 10.0) <= min(close, bar_open) and max(close, bar_open) <= fib["fib_618"]
             
@@ -202,7 +204,7 @@ class StrategyEngine:
                     sl_price=fib["sl_level"],
                     target_1=t1,
                     target_2=t2,
-                    reason="SHORT Setup Confirmed: Below 200 EMA + Below AVWAP + Golden Pocket (50-61.8%) + Bearish Confirmation Candle.",
+                    reason="SHORT Setup Confirmed: Below 200 EMA + Below AVWAP + Golden Pocket (50-61.8%) + Bearish Confirmation Candle + Negative OFI Defense.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
