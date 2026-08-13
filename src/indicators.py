@@ -96,9 +96,10 @@ def compute_vakc_envelopes(
 ) -> Tuple[pd.Series, pd.Series]:
     """
     Computes Volatility-Adaptive Keltner Channels (VAKC) using Wilder's RMA for ATR
-    and dynamic volatility expansion scaling:
-    Upper = EMA200 + k * ATR * sqrt(IV / 0.12)
-    Lower = EMA200 - k * ATR * sqrt(IV / 0.12)
+    and a smooth C1 non-linear volatility elasticity function:
+    xi(IV) = (IV / 0.12)^0.45 * (1 + 0.12 * tanh((IV - 0.18) / 0.06))
+    Upper = EMA200 + k * ATR * xi(IV)
+    Lower = EMA200 - k * ATR * xi(IV)
     """
     df = df.copy()
     ema200 = compute_ema(df["close"], ema_span)
@@ -112,13 +113,17 @@ def compute_vakc_envelopes(
     # Wilder's RMA (Exponential Running Moving Average for ATR)
     atr = tr.ewm(alpha=1.0/atr_span, adjust=False).mean()
     
-    # Dynamic Volatility Multiplier
-    vol_scalar = np.sqrt(max(iv, 0.08) / 0.12)
+    # Smooth Non-Linear Volatility Elasticity Multiplier
+    clamped_iv = max(iv if iv is not None else DEFAULT_IV, 0.06)
+    vol_ratio = clamped_iv / 0.12
+    vol_scalar = (vol_ratio ** 0.45) * (1.0 + 0.12 * np.tanh((clamped_iv - 0.18) / 0.06))
+    
     band_width = (k * atr * vol_scalar).fillna(ema200 * 0.015)
     
     upper_vakc = ema200 + band_width
     lower_vakc = ema200 - band_width
     return upper_vakc, lower_vakc
+
 
 def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """Computes Session Anchored VWAP and Exact Online 2nd-Moment Variance (±2σ dispersion bands)."""
@@ -325,6 +330,162 @@ def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]
         "volumes": [int(v) for v in bin_volumes]
     }
 
+def compute_pre_open_gap_filter(
+    df_5m: pd.DataFrame,
+    prev_close: Optional[float] = None,
+    pre_open_data: Optional[Dict[str, Any]] = None,
+    gap_threshold_pct: float = 0.0050,
+    half_life_mins: float = 45.0
+) -> Dict[str, Any]:
+    """
+    Evaluates 09:08 - 09:30 AM Pre-Open & Opening Gap dynamics and adapts Fibonacci/AVWAP rules.
+    """
+    if df_5m.empty:
+        return {
+            "regime": "NORMAL", "gap_pct": 0.0, "is_large_gap": False,
+            "anchor_high": 0.0, "anchor_low": 0.0, "gap_golden_pocket": None,
+            "slope_tolerance_mult": 1.0, "elapsed_mins": 0.0
+        }
+        
+    first_bar = df_5m.iloc[0]
+    session_open = float(pre_open_data.get("iep", first_bar["open"])) if pre_open_data else float(first_bar["open"])
+    
+    if prev_close is None or prev_close <= 0:
+        prev_close = session_open
+        
+    gap_pts = session_open - prev_close
+    gap_pct = (gap_pts / prev_close) if prev_close > 0 else 0.0
+    
+    # 09:15-09:30 Opening Range
+    opening_bars = df_5m.head(3)
+    opening_high = float(opening_bars["high"].max()) if not opening_bars.empty else session_open
+    opening_low = float(opening_bars["low"].min()) if not opening_bars.empty else session_open
+    
+    # Time decay since 09:15
+    elapsed_mins = float(min(len(df_5m) * 5.0, 360.0))
+    decay_factor = np.exp(-elapsed_mins / max(half_life_mins, 1.0))
+    slope_tolerance_mult = float(1.0 + (abs(gap_pct) / gap_threshold_pct) * decay_factor)
+    
+    if gap_pct >= gap_threshold_pct:
+        regime = "LARGE_GAP_UP"
+        is_large = True
+        anchor_low = min(session_open, opening_low)
+        anchor_high = float(df_5m["high"].max())
+        gap_gp = {
+            "gf_support_500": round(prev_close + 0.500 * gap_pts, 2),
+            "gf_support_618": round(prev_close + 0.618 * gap_pts, 2),
+            "gap_fill_target": round(prev_close, 2)
+        }
+    elif gap_pct <= -gap_threshold_pct:
+        regime = "LARGE_GAP_DOWN"
+        is_large = True
+        anchor_high = max(session_open, opening_high)
+        anchor_low = float(df_5m["low"].min())
+        gap_gp = {
+            "gf_resist_500": round(prev_close - 0.500 * abs(gap_pts), 2),
+            "gf_resist_618": round(prev_close - 0.618 * abs(gap_pts), 2),
+            "gap_fill_target": round(prev_close, 2)
+        }
+    else:
+        regime = "NORMAL"
+        is_large = False
+        anchor_high = float(df_5m["high"].max())
+        anchor_low = float(df_5m["low"].min())
+        gap_gp = None
+        
+    return {
+        "regime": regime,
+        "gap_pct": round(gap_pct * 100.0, 3),
+        "gap_pts": round(gap_pts, 2),
+        "is_large_gap": is_large,
+        "anchor_high": round(anchor_high, 2),
+        "anchor_low": round(anchor_low, 2),
+        "gap_golden_pocket": gap_gp,
+        "slope_tolerance_mult": round(slope_tolerance_mult, 3),
+        "elapsed_mins": round(elapsed_mins, 1)
+    }
+
+def detect_volume_profile_triggers(
+    df: pd.DataFrame,
+    vp_data: Dict[str, Any],
+    ofi_data: Dict[str, Any],
+    atr_14: float = 35.0
+) -> Dict[str, Any]:
+    """
+    Evaluates Auction Market Theory (AMT) rejection & acceptance triggers:
+    1. VAH Rejection (Bearish Fade): Probe > VAH, close back inside, upper wick >= 35%, OFI Z <= 0.10.
+    2. VAL Rejection (Bullish Defense): Probe < VAL, close back inside, lower wick >= 35%, OFI Z >= -0.10.
+    3. Value Area Breakout (Initiative Expansion): 2 consecutive closes outside VA + OFI confirmation.
+    """
+    if df.empty or vp_data.get("poc", 0) == 0:
+        return {"trigger": "NONE", "side": "NEUTRAL", "confidence": 0.0, "reason": "Insufficient VP data"}
+        
+    last_bar = df.iloc[-1]
+    c_open, c_high, c_low, c_close = float(last_bar["open"]), float(last_bar["high"]), float(last_bar["low"]), float(last_bar["close"])
+    c_range = max(c_high - c_low, 1.0)
+    
+    vah = vp_data.get("vah", c_close)
+    val = vp_data.get("val", c_close)
+    poc = vp_data.get("poc", c_close)
+    ofi_z = ofi_data.get("ofi_zscore", 0.0)
+    
+    upper_wick_ratio = (c_high - max(c_open, c_close)) / c_range
+    lower_wick_ratio = (min(c_open, c_close) - c_low) / c_range
+    
+    # 1. VAH Rejection (Bearish Fade)
+    if c_high >= vah and c_close < vah and upper_wick_ratio >= 0.35 and ofi_z <= 0.10:
+        return {
+            "trigger": "VAH_REJECTION",
+            "side": "SHORT",
+            "confidence": 0.85,
+            "entry": c_close,
+            "sl": round(c_high + 5.0, 2),
+            "target_1": poc,
+            "target_2": val,
+            "reason": f"VAH Rejection confirmed: Probe above VAH ({vah:.2f}) rejected with {upper_wick_ratio*100:.1f}% upper wick & OFI Z={ofi_z:.2f}."
+        }
+        
+    # 2. VAL Rejection (Bullish Defense / Spring)
+    if c_low <= val and c_close > val and lower_wick_ratio >= 0.35 and ofi_z >= -0.10:
+        return {
+            "trigger": "VAL_REJECTION",
+            "side": "LONG",
+            "confidence": 0.85,
+            "entry": c_close,
+            "sl": round(c_low - 5.0, 2),
+            "target_1": poc,
+            "target_2": vah,
+            "reason": f"VAL Rejection confirmed: Probe below VAL ({val:.2f}) defended with {lower_wick_ratio*100:.1f}% lower wick & OFI Z={ofi_z:.2f}."
+        }
+        
+    # 3. Value Area Breakout (Initiative Expansion)
+    if len(df) >= 2:
+        prev_bar = df.iloc[-2]
+        if float(prev_bar["close"]) > vah and c_close > vah and ofi_z >= OFI_ZSCORE_MIN:
+            return {
+                "trigger": "VA_EXPANSION_BULLISH",
+                "side": "LONG",
+                "confidence": 0.80,
+                "entry": c_close,
+                "sl": round(vah - 5.0, 2),
+                "target_1": round(c_close + 1.5 * atr_14, 2),
+                "target_2": round(c_close + 3.0 * atr_14, 2),
+                "reason": f"Value Area Bullish Breakout: 2 consecutive closes above VAH ({vah:.2f}) with aggressive OFI Z={ofi_z:.2f}."
+            }
+        elif float(prev_bar["close"]) < val and c_close < val and ofi_z <= -OFI_ZSCORE_MIN:
+            return {
+                "trigger": "VA_EXPANSION_BEARISH",
+                "side": "SHORT",
+                "confidence": 0.80,
+                "entry": c_close,
+                "sl": round(val + 5.0, 2),
+                "target_1": round(c_close - 1.5 * atr_14, 2),
+                "target_2": round(c_close - 3.0 * atr_14, 2),
+                "reason": f"Value Area Bearish Breakdown: 2 consecutive closes below VAL ({val:.2f}) with aggressive OFI Z={ofi_z:.2f}."
+            }
+            
+    return {"trigger": "IN_VALUE", "side": "NEUTRAL", "confidence": 0.50, "reason": "Auction trading within Value Area equilibrium."}
+
 def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float = 12800000.0) -> Dict[str, Any]:
     """Computes Net Dealer Gamma Exposure (GEX) in ₹ Crores and Gamma Flip Level."""
     net_oi_diff = (call_oi - put_oi) / 100000.0
@@ -338,3 +499,5 @@ def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float =
         "gamma_regime": "POSITIVE GAMMA (MM Long Gamma -> S/R Pinning)" if is_positive_gex else "NEGATIVE GAMMA (MM Short Gamma -> High Velocity Breakouts)",
         "gamma_flip_strike": flip_strike
     }
+
+

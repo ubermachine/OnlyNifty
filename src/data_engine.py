@@ -134,6 +134,8 @@ class DataEngine:
                     strike = item.get("strikePrice")
                     ce = item.get("CE", {})
                     pe = item.get("PE", {})
+                    ce_vol = ce.get("totalTradedVolume", 0)
+                    pe_vol = pe.get("totalTradedVolume", 0)
                     rows.append({
                         "strike": strike,
                         "expiry": item.get("expiryDate"),
@@ -141,26 +143,76 @@ class DataEngine:
                         "ce_oi": ce.get("openInterest", 0),
                         "ce_change_oi": ce.get("changeinOpenInterest", 0),
                         "ce_iv": ce.get("impliedVolatility", 0.0),
+                        "ce_volume": ce_vol,
                         "pe_ltp": pe.get("lastPrice", 0.0),
                         "pe_oi": pe.get("openInterest", 0),
                         "pe_change_oi": pe.get("changeinOpenInterest", 0),
                         "pe_iv": pe.get("impliedVolatility", 0.0),
+                        "pe_volume": pe_vol,
                     })
-                return {
-                    "underlying_value": underlying,
-                    "expiry_dates": expiry_dates,
-                    "dataframe": pd.DataFrame(rows),
-                    "source": "jugaad-data (NSELive)"
-                }
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    return {
+                        "underlying_value": underlying,
+                        "expiry_dates": expiry_dates,
+                        "dataframe": df,
+                        "source": "jugaad-data (NSELive)"
+                    }
         except Exception:
             pass
             
+        return self.generate_synthetic_option_chain(spot=24395.85)
+
+    def generate_synthetic_option_chain(self, spot: float = 24395.85) -> Dict[str, Any]:
+        """Generates realistic synthetic NSE Option Chain with OI and Greeks for offline resilience."""
+        atm_center = int(round(spot / 50.0) * 50)
+        strikes = [atm_center + (i * 50) for i in range(-12, 13)]
+        
+        today = datetime.now(IST)
+        days_ahead = (3 - today.weekday() + 7) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        expiry_dt = today + timedelta(days=days_ahead)
+        expiry_str = expiry_dt.strftime("%d-%b-%Y")
+        
+        rows = []
+        for k in strikes:
+            moneyness = (k - spot) / spot
+            base_dist = np.exp(-0.5 * ((k - spot) / 250.0) ** 2)
+            round_boost = 1.6 if (k % 500 == 0) else (1.3 if (k % 100 == 0) else 1.0)
+            
+            ce_oi = int(max(int(1200000 * base_dist * round_boost * (1.0 + 0.5 * moneyness)), 45000))
+            pe_oi = int(max(int(1350000 * base_dist * round_boost * (1.0 - 0.5 * moneyness)), 42000))
+            
+            ce_chg = int(ce_oi * np.random.uniform(-0.15, 0.25))
+            pe_chg = int(pe_oi * np.random.uniform(-0.10, 0.30))
+            
+            ce_price = max(round(spot - k + 45.0, 2) if spot > k else round(max(150.0 - abs(k - spot) * 0.45, 8.0), 2), 2.0)
+            pe_price = max(round(k - spot + 45.0, 2) if k > spot else round(max(150.0 - abs(spot - k) * 0.45, 8.0), 2), 2.0)
+            
+            rows.append({
+                "strike": k,
+                "expiry": expiry_str,
+                "ce_ltp": ce_price,
+                "ce_oi": ce_oi,
+                "ce_change_oi": ce_chg,
+                "ce_iv": 11.8,
+                "ce_volume": int(ce_oi * 1.8),
+                "pe_ltp": pe_price,
+                "pe_oi": pe_oi,
+                "pe_change_oi": pe_chg,
+                "pe_iv": 12.4,
+                "pe_volume": int(pe_oi * 1.7),
+            })
+            
+        df = pd.DataFrame(rows)
         return {
-            "underlying_value": 24395.85,
-            "expiry_dates": ["18-Aug-2026", "25-Aug-2026"],
-            "dataframe": pd.DataFrame(),
-            "source": "Synthetic Fallback"
+            "underlying_value": spot,
+            "expiry_dates": [expiry_str, (expiry_dt + timedelta(days=7)).strftime("%d-%b-%Y")],
+            "dataframe": df,
+            "source": "Synthetic Fallback Chain"
         }
+
 
     def fetch_market_status(self) -> Dict[str, Any]:
         """Fetches live NSE exchange trading status (Open/Closed)."""

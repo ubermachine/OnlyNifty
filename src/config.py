@@ -53,6 +53,24 @@ SEBI_CHARGES_PCT: float = 0.000001      # ₹10 per Crore
 STAMP_DUTY_BUY_PCT: float = 0.00003     # 0.003% Stamp duty on buy turnover
 DEFAULT_SLIPPAGE_PTS: float = 0.75      # ₹0.75 baseline per share slippage
 
+# ----------------- RISK MANAGEMENT & MONTE CARLO UPGRADES (v3.2) -----------------
+GOLDEN_VAULT_TRIGGER_PCT: float = 0.015   # +1.5% Intraday Net PnL activates the Golden Vault
+GOLDEN_VAULT_LOCK_PCT: float = 0.75       # 75% of peak intraday gains permanently locked
+MONTE_CARLO_PATHS: int = 1000             # 1,000 Vectorized Monte Carlo simulation paths
+MONTE_CARLO_HORIZON_TRADES: int = 100     # 100 consecutive trade stress horizon
+RUIN_MDD_THRESHOLD: float = 0.50          # 50.0% Max Drawdown ruin barrier
+
+# ----------------- GAP & VOLATILITY EXTENSIONS (v3.2) -----------------
+GAP_THRESHOLD_LARGE_PCT: float = 0.0050     # 0.50% threshold for Large Gap-Up / Gap-Down
+GAP_DECAY_HALF_LIFE_MINS: float = 45.0      # Half-life for morning gap decay in minutes
+VAKC_ELASTICITY_GAMMA: float = 0.50         # Core diffusion scaling exponent
+VAKC_ELASTICITY_ALPHA: float = 0.35         # Fat-tail high-vol expansion weight
+VAKC_ELASTICITY_BETA: float = 0.60          # Regime transition smoothness parameter
+VAKC_ELASTICITY_MIN: float = 0.70           # Min elasticity floor (VIX ~ 7)
+VAKC_ELASTICITY_MAX: float = 2.50           # Max elasticity ceiling (VIX ~ 35)
+VALUE_AREA_PCT: float = 0.70                # 70.0% standard Value Area volume bracket
+VA_REJECTION_WICK_MIN_RATIO: float = 0.35   # Minimum wick ratio (35%) to confirm Value Area rejection
+
 # ----------------- SESSION TIMINGS (IST) -----------------
 SESSION_START: str = "09:15"
 OPENING_RANGE_END: str = "09:30"
@@ -60,3 +78,4 @@ EUROPEAN_OPEN_START: str = "13:00"
 THREE_PM_CANDLE: str = "15:00"
 HARD_SQUAREOFF_TIME: str = "15:15"      # Mandatory institutional intraday sweep close
 SESSION_END: str = "15:30"
+

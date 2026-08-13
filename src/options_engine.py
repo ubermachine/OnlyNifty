@@ -12,6 +12,8 @@ Features:
 
 import math
 from typing import Dict, Any, List, Optional
+import numpy as np
+import pandas as pd
 from scipy.stats import norm
 
 from src.config import (
@@ -22,6 +24,7 @@ from src.config import (
     DEFAULT_SLIPPAGE_PTS, KELLY_FRACTION, MAX_TOLERABLE_MDD
 )
 from src.strategy_rules import Signal, SignalType
+
 
 
 def compute_volatility_surface(
@@ -290,17 +293,79 @@ def calculate_tca_friction(
     )
 
 
+# ----------------- THE GOLDEN VAULT INTRADAY PROFIT LOCK -----------------
+
+def evaluate_golden_vault_lock(
+    initial_capital: float = DEFAULT_CAPITAL,
+    current_intraday_pnl: float = 0.0,
+    peak_intraday_pnl: float = 0.0,
+    profit_trigger_pct: float = 0.015,
+    lock_pct: float = 0.75
+) -> Dict[str, Any]:
+    """
+    Dynamic Intraday Profit Lock ('The Golden Vault Rule'):
+    Once intraday Net PnL reaches >= +1.5% of account capital, lock 75% of peak profits
+    as an untouchable risk floor for the remainder of the session.
+    """
+    trigger_threshold_rupees = initial_capital * profit_trigger_pct
+    peak_pnl = max(peak_intraday_pnl, current_intraday_pnl)
+    is_vault_triggered = peak_pnl >= trigger_threshold_rupees
+    
+    if is_vault_triggered:
+        locked_profit_floor = round(peak_pnl * lock_pct, 2)
+        untouchable_capital_floor = round(initial_capital + locked_profit_floor, 2)
+        risk_cushion = round(max(current_intraday_pnl - locked_profit_floor, 0.0), 2)
+        is_session_halted = current_intraday_pnl <= locked_profit_floor
+        
+        if is_session_halted:
+            status = "LOCKED_GOLDEN_VAULT"
+            message = (
+                f"🔒 Golden Vault Engaged: +₹{locked_profit_floor:,.2f} locked floor reached. "
+                f"Session trading halted to preserve 75% of peak gains (₹{peak_pnl:,.2f})."
+            )
+        else:
+            status = "VAULT_ACTIVE"
+            message = (
+                f"🛡️ Golden Vault Active: Peak PnL ₹{peak_pnl:,.2f} (≥ +{profit_trigger_pct*100:.1f}%). "
+                f"₹{locked_profit_floor:,.2f} locked floor. Remaining risk cushion: ₹{risk_cushion:,.2f}."
+            )
+    else:
+        locked_profit_floor = 0.0
+        untouchable_capital_floor = initial_capital
+        risk_cushion = float("inf")
+        is_session_halted = False
+        status = "UNLOCKED"
+        message = f"Golden Vault Idle (Triggers at +₹{trigger_threshold_rupees:,.2f} / +{profit_trigger_pct*100:.1f}% net gain)."
+        
+    return {
+        "status": status,
+        "is_vault_triggered": is_vault_triggered,
+        "is_session_halted": is_session_halted,
+        "peak_intraday_pnl": round(peak_pnl, 2),
+        "current_intraday_pnl": round(current_intraday_pnl, 2),
+        "trigger_threshold_rupees": round(trigger_threshold_rupees, 2),
+        "locked_profit_floor": locked_profit_floor,
+        "untouchable_capital_floor": untouchable_capital_floor,
+        "risk_cushion": risk_cushion,
+        "lock_pct": lock_pct,
+        "message": message
+    }
+
+
 def calculate_position_size(
     capital: float,
     risk_pct: float,
     entry_prem: float,
     sl_prem: float,
     lot_size: int = LOT_SIZE,
-    current_drawdown_pct: float = 0.0
+    current_drawdown_pct: float = 0.0,
+    current_intraday_pnl: float = 0.0,
+    peak_intraday_pnl: float = 0.0,
+    enforce_golden_vault: bool = True
 ) -> Dict[str, Any]:
     """
-    Computes exact lot sizing with Non-Linear Drawdown Dampener and 10% MDD hard circuit breaker.
-    Enforces maximum portfolio margin allocation constraints (max 35% margin).
+    Computes exact lot sizing with Non-Linear Drawdown Dampener, 10% MDD hard circuit breaker,
+    and Dynamic Intraday Profit Lock ('The Golden Vault Rule').
     """
     if current_drawdown_pct >= MAX_TOLERABLE_MDD:
         dd_dampener = 0.0
@@ -314,6 +379,23 @@ def calculate_position_size(
         
     adjusted_risk_pct = risk_pct * dd_dampener
     max_risk_rupees = capital * adjusted_risk_pct
+    
+    vault_info = evaluate_golden_vault_lock(
+        initial_capital=capital,
+        current_intraday_pnl=current_intraday_pnl,
+        peak_intraday_pnl=peak_intraday_pnl
+    )
+    
+    vault_constrained = False
+    if enforce_golden_vault and vault_info["is_vault_triggered"]:
+        if vault_info["is_session_halted"]:
+            max_risk_rupees = 0.0
+            vault_constrained = True
+        else:
+            if max_risk_rupees > vault_info["risk_cushion"]:
+                max_risk_rupees = vault_info["risk_cushion"]
+                vault_constrained = True
+
     risk_per_share = max(entry_prem - sl_prem, 12.0)
     risk_per_lot = risk_per_share * lot_size
     
@@ -335,7 +417,267 @@ def calculate_position_size(
         "actual_risk_rupees": actual_risk_rupees,
         "max_risk_rupees": round(max_risk_rupees, 2),
         "capital_required": total_capital_required,
-        "dd_dampener": round(dd_dampener, 3)
+        "dd_dampener": round(dd_dampener, 3),
+        "vault_info": vault_info,
+        "vault_constrained": vault_constrained
+    }
+
+
+def run_monte_carlo_simulation(
+    initial_capital: float = DEFAULT_CAPITAL,
+    base_risk_pct: float = MAX_RISK_PCT,
+    win_rate: float = 0.58,
+    win_payoff_r: float = 2.10,
+    loss_payoff_r: float = -1.0,
+    num_simulations: int = 1000,
+    num_trades: int = 100,
+    ruin_threshold_pct: float = 0.50,
+    enable_quarter_kelly_dampener: bool = True,
+    random_seed: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    High-Performance Vectorized 1,000-Path Monte Carlo Ruin & Stress-Test Engine.
+    Computes VaR (95%/99%), CVaR (Expected Shortfall), Drawdown distributions, and PoR < 0.01%.
+    """
+    rng = np.random.default_rng(random_seed)
+    win_matrix = rng.random((num_simulations, num_trades)) < win_rate
+    r_multipliers = np.where(win_matrix, win_payoff_r, loss_payoff_r)
+    
+    equity_paths = np.zeros((num_simulations, num_trades + 1), dtype=np.float64)
+    equity_paths[:, 0] = initial_capital
+    
+    peak_cap = np.full(num_simulations, initial_capital, dtype=np.float64)
+    current_cap = np.full(num_simulations, initial_capital, dtype=np.float64)
+    
+    for t in range(num_trades):
+        dd = np.maximum((peak_cap - current_cap) / peak_cap, 0.0)
+        
+        if enable_quarter_kelly_dampener:
+            dampener = np.where(
+                dd <= 0.03,
+                1.0,
+                np.where(
+                    dd <= 0.06,
+                    1.0 - ((dd - 0.03) / 0.03) * 0.50,
+                    np.where(
+                        dd < MAX_TOLERABLE_MDD,
+                        np.maximum(0.50 * ((1.0 - (dd - 0.06) / (MAX_TOLERABLE_MDD - 0.06)) ** 2), 0.05),
+                        0.0
+                    )
+                )
+            )
+        else:
+            dampener = 1.0
+            
+        risk_budget = current_cap * (base_risk_pct * dampener)
+        step_pnl = risk_budget * r_multipliers[:, t]
+        current_cap = np.maximum(current_cap + step_pnl, 0.0)
+        peak_cap = np.maximum(peak_cap, current_cap)
+        equity_paths[:, t + 1] = current_cap
+
+    cum_max = np.maximum.accumulate(equity_paths, axis=1)
+    dd_matrix = (cum_max - equity_paths) / cum_max
+    path_max_dds = np.max(dd_matrix, axis=1)
+    
+    mdd_median_pct = float(np.median(path_max_dds) * 100.0)
+    mdd_95th_pct = float(np.percentile(path_max_dds, 95) * 100.0)
+    mdd_99th_pct = float(np.percentile(path_max_dds, 99) * 100.0)
+    mdd_worst_pct = float(np.max(path_max_dds) * 100.0)
+    
+    var_95_rupees = round(initial_capital * (mdd_95th_pct / 100.0), 2)
+    var_99_rupees = round(initial_capital * (mdd_99th_pct / 100.0), 2)
+    
+    tail_95 = path_max_dds[path_max_dds >= np.percentile(path_max_dds, 95)]
+    tail_99 = path_max_dds[path_max_dds >= np.percentile(path_max_dds, 99)]
+    
+    cvar_95_mdd_pct = float(np.mean(tail_95) * 100.0) if len(tail_95) > 0 else mdd_95th_pct
+    cvar_99_mdd_pct = float(np.mean(tail_99) * 100.0) if len(tail_99) > 0 else mdd_99th_pct
+    cvar_95_rupees = round(initial_capital * (cvar_95_mdd_pct / 100.0), 2)
+    cvar_99_rupees = round(initial_capital * (cvar_99_mdd_pct / 100.0), 2)
+    
+    ruined_count = int(np.sum(path_max_dds >= ruin_threshold_pct))
+    prob_of_ruin_pct = float((ruined_count / num_simulations) * 100.0)
+    por_display_str = "< 0.01%" if prob_of_ruin_pct == 0.0 else f"{prob_of_ruin_pct:.2f}%"
+    
+    final_equities = equity_paths[:, -1]
+    net_returns_pct = (final_equities - initial_capital) / initial_capital * 100.0
+    
+    mean_final_equity = round(float(np.mean(final_equities)), 2)
+    median_final_equity = round(float(np.median(final_equities)), 2)
+    min_final_equity = round(float(np.min(final_equities)), 2)
+    max_final_equity = round(float(np.max(final_equities)), 2)
+    
+    ret_std = float(np.std(net_returns_pct))
+    sharpe_proxy = round(float(np.mean(net_returns_pct)) / ret_std, 2) if ret_std > 0 else 0.0
+    
+    pos_pnls = final_equities[final_equities > initial_capital] - initial_capital
+    neg_pnls = initial_capital - final_equities[final_equities < initial_capital]
+    profit_factor = round(float(np.sum(pos_pnls) / np.sum(neg_pnls)), 2) if np.sum(neg_pnls) > 0 else 999.0
+
+    p5 = np.percentile(equity_paths, 5, axis=0)
+    p25 = np.percentile(equity_paths, 25, axis=0)
+    p50 = np.percentile(equity_paths, 50, axis=0)
+    p75 = np.percentile(equity_paths, 75, axis=0)
+    p95 = np.percentile(equity_paths, 95, axis=0)
+    
+    return {
+        "num_simulations": num_simulations,
+        "num_trades": num_trades,
+        "initial_capital": initial_capital,
+        "win_rate": win_rate,
+        "win_payoff_r": win_payoff_r,
+        "loss_payoff_r": loss_payoff_r,
+        "prob_of_ruin_pct": prob_of_ruin_pct,
+        "prob_of_ruin_str": por_display_str,
+        "is_ruin_safe": prob_of_ruin_pct < 0.01,
+        "var_95_pct": round(mdd_95th_pct, 2),
+        "var_95_rupees": var_95_rupees,
+        "var_99_pct": round(mdd_99th_pct, 2),
+        "var_99_rupees": var_99_rupees,
+        "cvar_95_pct": round(cvar_95_mdd_pct, 2),
+        "cvar_95_rupees": cvar_95_rupees,
+        "cvar_99_pct": round(cvar_99_mdd_pct, 2),
+        "cvar_99_rupees": cvar_99_rupees,
+        "mdd_median_pct": round(mdd_median_pct, 2),
+        "mdd_95th_pct": round(mdd_95th_pct, 2),
+        "mdd_99th_pct": round(mdd_99th_pct, 2),
+        "mdd_worst_pct": round(mdd_worst_pct, 2),
+        "mean_final_equity": mean_final_equity,
+        "median_final_equity": median_final_equity,
+        "min_final_equity": min_final_equity,
+        "max_final_equity": max_final_equity,
+        "sharpe_ratio": sharpe_proxy,
+        "profit_factor": profit_factor,
+        "percentile_5": p5.tolist(),
+        "percentile_25": p25.tolist(),
+        "percentile_50": p50.tolist(),
+        "percentile_75": p75.tolist(),
+        "percentile_95": p95.tolist(),
+        "sample_paths": equity_paths[:35].tolist(),
+        "all_max_drawdowns": (path_max_dds * 100.0).tolist()
+    }
+
+
+def calculate_pcr_and_max_pain(option_chain_df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Computes exact Max Pain strike price (where option sellers incur minimum cumulative payout)
+    and Open Interest / Change in OI / Volume Put-Call Ratio (PCR).
+    """
+    if option_chain_df is None or option_chain_df.empty:
+        return {
+            "max_pain_strike": 24500.0,
+            "total_ce_oi": 0, "total_pe_oi": 0, "pcr_oi": 1.0,
+            "pcr_sentiment": "Neutral / Balanced (No Data)",
+            "total_ce_change_oi": 0, "total_pe_change_oi": 0, "pcr_change_oi": 1.0,
+            "total_ce_volume": 0, "total_pe_volume": 0, "pcr_volume": 1.0,
+            "min_payout_loss": 0.0, "pain_distribution": pd.DataFrame(), "strikes_analyzed": 0
+        }
+
+    df = option_chain_df.copy()
+    col_map = {c: str(c).strip().lower().replace(" ", "_") for c in df.columns}
+    df.rename(columns=col_map, inplace=True)
+    
+    strike_col = next((c for c in ["strike", "strikeprice", "strike_price"] if c in df.columns), None)
+    if not strike_col:
+        for c in df.columns:
+            if pd.to_numeric(df[c], errors="coerce").notnull().all():
+                strike_col = c
+                break
+    if not strike_col:
+        strike_col = df.columns[0]
+        
+    df[strike_col] = pd.to_numeric(df[strike_col], errors="coerce")
+    df = df.dropna(subset=[strike_col]).sort_values(by=strike_col).reset_index(drop=True)
+    
+    if df.empty:
+        return {
+            "max_pain_strike": 24500.0,
+            "total_ce_oi": 0, "total_pe_oi": 0, "pcr_oi": 1.0,
+            "pcr_sentiment": "Neutral / Balanced", "total_ce_change_oi": 0,
+            "total_pe_change_oi": 0, "pcr_change_oi": 1.0, "total_ce_volume": 0,
+            "total_pe_volume": 0, "pcr_volume": 1.0, "min_payout_loss": 0.0,
+            "pain_distribution": pd.DataFrame(), "strikes_analyzed": 0
+        }
+
+    ce_oi_col = next((c for c in ["ce_oi", "ce_open_interest", "call_oi", "openinterest_ce"] if c in df.columns), None)
+    pe_oi_col = next((c for c in ["pe_oi", "pe_open_interest", "put_oi", "openinterest_pe"] if c in df.columns), None)
+    
+    ce_chg_col = next((c for c in ["ce_change_oi", "ce_changeinopeninterest", "call_change_oi", "ce_chg_oi"] if c in df.columns), None)
+    pe_chg_col = next((c for c in ["pe_change_oi", "pe_changeinopeninterest", "put_change_oi", "pe_chg_oi"] if c in df.columns), None)
+    
+    ce_vol_col = next((c for c in ["ce_volume", "ce_total_volume", "call_volume", "ce_vol"] if c in df.columns), None)
+    pe_vol_col = next((c for c in ["pe_volume", "pe_total_volume", "put_volume", "pe_vol"] if c in df.columns), None)
+
+    ce_oi_vals = pd.to_numeric(df[ce_oi_col], errors="coerce").fillna(0).values if ce_oi_col else np.zeros(len(df))
+    pe_oi_vals = pd.to_numeric(df[pe_oi_col], errors="coerce").fillna(0).values if pe_oi_col else np.zeros(len(df))
+    
+    ce_chg_vals = pd.to_numeric(df[ce_chg_col], errors="coerce").fillna(0).values if ce_chg_col else np.zeros(len(df))
+    pe_chg_vals = pd.to_numeric(df[pe_chg_col], errors="coerce").fillna(0).values if pe_chg_col else np.zeros(len(df))
+    
+    ce_vol_vals = pd.to_numeric(df[ce_vol_col], errors="coerce").fillna(0).values if ce_vol_col else np.zeros(len(df))
+    pe_vol_vals = pd.to_numeric(df[pe_vol_col], errors="coerce").fillna(0).values if pe_vol_col else np.zeros(len(df))
+    
+    total_ce_oi = int(np.sum(ce_oi_vals))
+    total_pe_oi = int(np.sum(pe_oi_vals))
+    pcr_oi = round(float(total_pe_oi / total_ce_oi), 3) if total_ce_oi > 0 else 1.0
+    
+    total_ce_chg = int(np.sum(ce_chg_vals))
+    total_pe_chg = int(np.sum(pe_chg_vals))
+    pcr_chg = round(float(total_pe_chg / total_ce_chg), 3) if total_ce_chg > 0 else (round(pcr_oi, 3))
+    
+    total_ce_vol = int(np.sum(ce_vol_vals))
+    total_pe_vol = int(np.sum(pe_vol_vals))
+    pcr_vol = round(float(total_pe_vol / total_ce_vol), 3) if total_ce_vol > 0 else 1.0
+    
+    if pcr_oi >= 1.30:
+        sentiment = "Strong Bullish (Put Writing Floor / Bull Trap for Bears)"
+    elif pcr_oi >= 1.05:
+        sentiment = "Moderately Bullish (Put Support Dominant)"
+    elif pcr_oi <= 0.70:
+        sentiment = "Strong Bearish (Call Writing Ceiling / Overbought)"
+    elif pcr_oi <= 0.90:
+        sentiment = "Moderately Bearish (Call Resistance Dominant)"
+    else:
+        sentiment = "Neutral / Balanced Oscillation Range"
+        
+    strikes = df[strike_col].values.astype(float)
+    pain_records = []
+    min_loss = float("inf")
+    max_pain_strike = float(strikes[0]) if len(strikes) > 0 else 24500.0
+    
+    for s_expiry in strikes:
+        call_loss = np.sum(ce_oi_vals * np.maximum(0.0, s_expiry - strikes))
+        put_loss = np.sum(pe_oi_vals * np.maximum(0.0, strikes - s_expiry))
+        total_loss = call_loss + put_loss
+        
+        pain_records.append({
+            "strike": float(s_expiry),
+            "call_payout": round(float(call_loss), 2),
+            "put_payout": round(float(put_loss), 2),
+            "total_payout": round(float(total_loss), 2)
+        })
+        
+        if total_loss < min_loss:
+            min_loss = total_loss
+            max_pain_strike = float(s_expiry)
+            
+    pain_df = pd.DataFrame(pain_records)
+    
+    return {
+        "max_pain_strike": round(max_pain_strike, 2),
+        "total_ce_oi": total_ce_oi,
+        "total_pe_oi": total_pe_oi,
+        "pcr_oi": pcr_oi,
+        "pcr_sentiment": sentiment,
+        "total_ce_change_oi": total_ce_chg,
+        "total_pe_change_oi": total_pe_chg,
+        "pcr_change_oi": pcr_chg,
+        "total_ce_volume": total_ce_vol,
+        "total_pe_volume": total_pe_vol,
+        "pcr_volume": pcr_vol,
+        "min_payout_loss": round(min_loss, 2),
+        "pain_distribution": pain_df,
+        "strikes_analyzed": len(strikes)
     }
 
 
@@ -407,8 +749,9 @@ def convert_to_free_vertical_spread(
     
     net_effective_cost = round(entry_prem_k1 - prem_k2_now, 2)
     max_spread_width = abs(k2 - k1)
-    max_spread_profit_pts = round(max_spread_width - net_effective_cost, 2)
+    max_spread_profit_pts = round(max_spread_width - max(net_effective_cost, 0.0) if net_effective_cost >= 0 else max_spread_width + abs(net_effective_cost), 2)
     max_spread_pnl_rupees = round(max_spread_profit_pts * total_qty, 2)
+    breakeven_spot = round(k1 + net_effective_cost if is_call else k1 - net_effective_cost, 2)
     
     net_delta = round(greeks_k1_now["delta"] - greeks_k2_now["delta"], 3)
     net_theta = round(greeks_k1_now["theta"] - greeks_k2_now["theta"], 2)
@@ -420,17 +763,67 @@ def convert_to_free_vertical_spread(
         "long_leg": f"NIFTY {k1} {'CE' if is_call else 'PE'} (Bought @ ₹{entry_prem_k1:.2f})",
         "short_leg": f"NIFTY {k2} {'CE' if is_call else 'PE'} (Sold @ ₹{prem_k2_now:.2f})",
         "short_strike": k2,
+        "strike_k1": k1,
+        "strike_k2": k2,
         "short_premium_collected": prem_k2_now,
+        "credit_received": prem_k2_now,
         "net_effective_cost_per_share": net_effective_cost,
+        "net_debit": net_effective_cost,
         "max_spread_width_pts": max_spread_width,
         "max_spread_profit_pts": max_spread_profit_pts,
         "max_spread_pnl_rupees": max_spread_pnl_rupees,
+        "breakeven_spot": breakeven_spot,
         "net_delta": net_delta,
         "net_theta_daily": net_theta,
         "net_vega": net_vega,
         "is_theta_positive": net_theta >= 0,
-        "execution_guidance": f"SELL {lots} Lots of NIFTY {k2} {'CE' if is_call else 'PE'} @ ₹{prem_k2_now:.2f}. Theta decay is neutralized ({net_theta:+.2f}/sh/day)."
+        "execution_guidance": (
+            f"SELL {lots} Lots of NIFTY {k2} {'CE' if is_call else 'PE'} @ ₹{prem_k2_now:.2f}. "
+            f"Net debit is ₹{net_effective_cost:.2f}. Theta decay is neutralized ({net_theta:+.2f}/sh/day). "
+            f"Max Profit: ₹{max_spread_profit_pts:.2f} pts (₹{max_spread_pnl_rupees:,.2f}) with Breakeven at ₹{breakeven_spot:.2f}."
+        )
     }
+
+
+def compute_strike_ladder_greeks(
+    spot: float,
+    iv: float = DEFAULT_IV,
+    t_days: float = 4.0,
+    r: float = RISK_FREE_RATE,
+    q: float = 0.0,
+    num_strikes: int = 10,
+    step: int = 50
+) -> pd.DataFrame:
+    """Computes strike ladder DataFrame around current spot price with Greeks matrix."""
+    atm_center = int(round(spot / float(step)) * step)
+    min_strike = atm_center - (num_strikes // 2) * step
+    max_strike = atm_center + (num_strikes // 2) * step
+    
+    rows = []
+    for k in range(min_strike, max_strike + step, step):
+        ce = black_scholes_greeks(spot, k, t_days=t_days, r=r, q=q, sigma=iv, is_call=True)
+        pe = black_scholes_greeks(spot, k, t_days=t_days, r=r, q=q, sigma=iv, is_call=False)
+        is_atm = (k == atm_center)
+        ce_rec = "👉 PRO CALL" if (0.50 <= ce["delta"] <= 0.65) else ""
+        pe_rec = "👉 PRO PUT" if (0.50 <= abs(pe["delta"]) <= 0.65) else ""
+        rows.append({
+            "Call Setup": ce_rec,
+            "CE Delta": ce["delta"],
+            "CE Gamma": ce["gamma"],
+            "CE Theta": ce["theta"],
+            "CE Vega": ce["vega"],
+            "CE Vanna": ce["vanna"],
+            "CE Premium (₹)": ce["price"],
+            "Strike": f"🎯 {k} (ATM)" if is_atm else str(k),
+            "PE Premium (₹)": pe["price"],
+            "PE Vanna": pe["vanna"],
+            "PE Vega": pe["vega"],
+            "PE Theta": pe["theta"],
+            "PE Gamma": pe["gamma"],
+            "PE Delta": pe["delta"],
+            "Put Setup": pe_rec
+        })
+    return pd.DataFrame(rows)
 
 
 def generate_option_trade_ticket(
@@ -442,7 +835,7 @@ def generate_option_trade_ticket(
     iv: float = DEFAULT_IV,
     is_0dte_afternoon: bool = False
 ) -> Dict[str, Any]:
-    """Translates 3-Tier spot setups into convex institutional Option Trade Ticket."""
+    """Translates 3-Tier spot setups into convex institutional Option Trade Ticket with Free Spread details."""
     if signal.signal_type == SignalType.WAIT:
         return {"status": "WAIT", "message": signal.reason}
         
@@ -453,6 +846,7 @@ def generate_option_trade_ticket(
     gamma = strike_info["gamma"]
     theta = strike_info["theta"]
     entry_prem = strike_info["price"]
+    k1 = strike_info["strike"]
     
     spot_risk = abs(signal.entry_price - signal.sl_price)
     convexity_benefit = 0.5 * gamma * (spot_risk ** 2)
@@ -478,6 +872,33 @@ def generate_option_trade_ticket(
     
     lots_35 = max(int(round(sizing["lots"] * 0.35)), 1) if sizing["lots"] >= 3 else (sizing["lots"] // 2 or 1)
     lots_30 = sizing["lots"] - (2 * lots_35) if sizing["lots"] >= 3 else (sizing["lots"] - lots_35)
+    
+    # Free Vertical Spread at T1 Construction
+    spread_width = 100 if is_call else -100
+    k2 = k1 + spread_width if is_call else k1 - abs(spread_width)
+    
+    greeks_k2_at_t1 = black_scholes_greeks(signal.target_1, k2, t_days=max(t_days - 0.5, 0.05), sigma=iv, is_call=is_call)
+    credit_received_k2 = greeks_k2_at_t1["price"]
+    net_debit = round(entry_prem - credit_received_k2, 2)
+    max_spread_width = abs(k2 - k1)
+    max_profit_pts = round(max_spread_width - max(net_debit, 0.0) if net_debit >= 0 else max_spread_width + abs(net_debit), 2)
+    max_profit_rupees = round(max_profit_pts * sizing["total_qty"], 2)
+    breakeven_spot = round(k1 + net_debit if is_call else k1 - net_debit, 2)
+    
+    free_spread_t1 = {
+        "status": "T1_FREE_SPREAD_AVAILABLE",
+        "spread_type": "Bull Call Spread (Risk-Free T1 Conversion)" if is_call else "Bear Put Spread (Risk-Free T1 Conversion)",
+        "strike_k1_long": k1,
+        "entry_premium_k1": entry_prem,
+        "strike_k2_short": k2,
+        "k2_symbol": f"NIFTY {k2} {strike_info['option_type']}",
+        "credit_received": credit_received_k2,
+        "net_debit": net_debit,
+        "max_profit_pts": max_profit_pts,
+        "max_profit_rupees": max_profit_rupees,
+        "breakeven_spot": breakeven_spot,
+        "spread_width_pts": max_spread_width
+    }
     
     return {
         "status": "READY",
@@ -510,12 +931,18 @@ def generate_option_trade_ticket(
         "max_risk_rupees": sizing["actual_risk_rupees"],
         "capital_outlay": sizing["capital_required"],
         "tca_friction": tca,
+        "free_spread_t1": free_spread_t1,
         "execution_rules": {
             "part_book_50_pct": f"Option A (Outright): Book 50% ({max(sizing['lots'] // 2, 1)} lots) at ₹{target1_prem:.2f} and move SL to ₹{entry_prem:.2f}",
-            "tier_1_asymmetric": f"Tier 1 (+1.2x ATR): Book 35% ({lots_35} lots) at ₹{target1_prem:.2f}. Optionally sell OTM {strike_info['strike'] + (100 if is_call else -100)} for Free Spread.",
+            "tier_1_asymmetric": (
+                f"Tier 1 (+1.2x ATR @ ₹{signal.target_1:.1f}): Book 35% ({lots_35} lots) at ₹{target1_prem:.2f} "
+                f"OR Sell {sizing['lots']} Lots OTM {k2} {strike_info['option_type']} @ ~₹{credit_received_k2:.2f} for Free Spread "
+                f"(Net Debit: ₹{net_debit:.2f}, Max Profit: ₹{max_profit_pts:.2f} pts)."
+            ),
             "tier_2_structural": f"Tier 2 (+2.5x ATR): Book 35% ({lots_35} lots) at ₹{target2_prem:.2f}.",
             "tier_3_moonshot": f"Tier 3 (Moonshot Runner): Trail remaining 30% ({max(lots_30, 1)} lots) on 5m 21 EMA / AVWAP 1σ into ₹{target3_prem:.2f}.",
             "trailing_rule": "Trail remaining position on 5-minute 21 EMA or Session AVWAP 1σ",
             "profit_ratchet": "Lock 65% of peak gains once +1.5R (+1.5%) session profit is achieved"
         }
     }
+

@@ -12,7 +12,8 @@ from src.config import (
 )
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
-    compute_hurst_exponent, compute_order_flow_imbalance, compute_volume_profile, compute_dealer_gex
+    compute_hurst_exponent, compute_order_flow_imbalance, compute_volume_profile,
+    compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers
 )
 
 class SignalType(Enum):
@@ -57,9 +58,17 @@ class StrategyEngine:
         current_idx: int = -1,
         df_daily: Optional[pd.DataFrame] = None,
         df_hourly: Optional[pd.DataFrame] = None,
-        live_iv: float = DEFAULT_IV
+        live_iv: float = DEFAULT_IV,
+        live_vix: Optional[float] = None,
+        pre_open_gap: Optional[Dict[str, Any]] = None,
+        prev_close: Optional[float] = None
     ) -> Signal:
-        """Evaluates JustNifty v3.1 institutional setups with 3-Tier Asymmetric Targets & Pyramiding Triggers."""
+        """
+        Evaluates JustNifty v3.2 institutional setups integrating:
+        1. Non-linear Live VIX VAKC Scaling
+        2. Pre-Open Market Gap Filter
+        3. 70% Value Area & POC AMT Triggers
+        """
         if df_5m.empty:
             return Signal(SignalType.WAIT, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "No data available", False, 0.0, {})
             
@@ -69,6 +78,7 @@ class StrategyEngine:
         bar = df_5m.iloc[current_idx]
         bar_time = bar.name.strftime("%H:%M") if hasattr(bar.name, "strftime") else "12:00"
         close = float(bar["close"])
+        bar_open = float(bar["open"])
         
         # 1. 09:15 - 09:30 AM Freak Candle Isolation Rule
         if "09:15" <= bar_time < "09:30":
@@ -126,17 +136,19 @@ class StrategyEngine:
         if len(df_5m) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
 
-        # Compute Indicators
+        # Compute Stochastic Indicators & Dynamic VAKC
+        sub_df = df_5m.iloc[:current_idx + 1]
         ema200_series = compute_ema(df_5m["close"], EMA_SLOW)
         ema55_series = compute_ema(df_5m["close"], EMA_MID)
         ema21_series = compute_ema(df_5m["close"], EMA_FAST)
         vakc_upper, vakc_lower = compute_vakc_envelopes(df_5m, iv=live_iv)
         vwap_series, vwap_up_2sd, vwap_low_2sd = compute_vwap(df_5m)
         
-        hurst_info = compute_hurst_exponent(df_5m["close"].iloc[:current_idx + 1])
-        ofi_info = compute_order_flow_imbalance(df_5m.iloc[:current_idx + 1])
+        hurst_info = compute_hurst_exponent(sub_df["close"])
+        ofi_info = compute_order_flow_imbalance(sub_df)
         gex_info = compute_dealer_gex(close)
-        vp_info = compute_volume_profile(df_5m.iloc[:current_idx + 1])
+        vp_info = compute_volume_profile(sub_df)
+        gap_info = compute_pre_open_gap_filter(sub_df, prev_close=prev_close, pre_open_data=pre_open_gap)
         
         ema200 = float(ema200_series.iloc[current_idx])
         ema55 = float(ema55_series.iloc[current_idx])
@@ -147,9 +159,46 @@ class StrategyEngine:
         upper_vakc_val = float(vakc_upper.iloc[current_idx])
         lower_vakc_val = float(vakc_lower.iloc[current_idx])
         
-        # Far-Away MA Crossover Filter
+        # ATR 14 proxy
+        atr_14 = float((df_5m["high"].iloc[max(0, current_idx-14):current_idx+1] - df_5m["low"].iloc[max(0, current_idx-14):current_idx+1]).mean())
+        atr_14 = max(atr_14, 25.0)
+
+        # 3. Auction Market Theory (AMT) Value Area Trigger Check
+        amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)
+        if amt_trigger["trigger"] in ["VAH_REJECTION", "VAL_REJECTION"] and amt_trigger["confidence"] >= 0.85:
+            if amt_trigger["side"] == "LONG" and close > ema55:
+                return Signal(
+                    signal_type=SignalType.LONG,
+                    entry_price=close,
+                    sl_price=amt_trigger["sl"],
+                    target_1=amt_trigger["target_1"],
+                    target_2=amt_trigger["target_2"],
+                    target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
+                    pyramid_trigger=round(vp_info.get("poc", close) + 5.0, 2),
+                    reason=f"AMT Setup: {amt_trigger['reason']}",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info}
+                )
+            elif amt_trigger["side"] == "SHORT" and close < ema55:
+                return Signal(
+                    signal_type=SignalType.SHORT,
+                    entry_price=close,
+                    sl_price=amt_trigger["sl"],
+                    target_1=amt_trigger["target_1"],
+                    target_2=amt_trigger["target_2"],
+                    target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
+                    pyramid_trigger=round(vp_info.get("poc", close) - 5.0, 2),
+                    reason=f"AMT Setup: {amt_trigger['reason']}",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info}
+                )
+
+        # 4. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
         dist_to_ema21 = abs(close - ema21) / close
-        if dist_to_ema21 > MA_STRETCH_THRESHOLD:
+        effective_stretch_threshold = MA_STRETCH_THRESHOLD * gap_info["slope_tolerance_mult"]
+        if dist_to_ema21 > effective_stretch_threshold:
             return Signal(
                 signal_type=SignalType.WAIT,
                 entry_price=close,
@@ -158,35 +207,34 @@ class StrategyEngine:
                 target_2=0.0,
                 target_3_moonshot=0.0,
                 pyramid_trigger=0.0,
-                reason=f"Price is overextended from 21 EMA ({dist_to_ema21*100:.2f}% vs {MA_STRETCH_THRESHOLD*100:.2f}% threshold). Wait for pullback.",
+                reason=f"Price is overextended from 21 EMA ({dist_to_ema21*100:.2f}% vs {effective_stretch_threshold*100:.2f}% threshold). Wait for pullback.",
                 htf_aligned=True,
                 fib_retracement=0.0,
                 details={"ema21": ema21, "dist_pct": dist_to_ema21, "hurst": hurst_info["hurst"]}
             )
 
-        # Dynamic Fibonacci Swings
-        lookback = min(40, current_idx)
-        prior_window = df_5m.iloc[current_idx - lookback : current_idx - 2]
-        if len(prior_window) < 5:
-            return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating swing history", True, 0.0, {})
-
-        swing_high = float(prior_window["high"].max())
-        swing_low = float(prior_window["low"].min())
+        # 5. Dynamic Fibonacci Swings & Pre-Open Gap Anchoring
+        if gap_info["is_large_gap"]:
+            swing_high = gap_info["anchor_high"]
+            swing_low = gap_info["anchor_low"]
+        else:
+            lookback = min(40, current_idx)
+            prior_window = df_5m.iloc[current_idx - lookback : current_idx - 2]
+            if len(prior_window) < 5:
+                return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating swing history", True, 0.0, {})
+            swing_high = float(prior_window["high"].max())
+            swing_low = float(prior_window["low"].min())
+            
         swing_range = swing_high - swing_low
-        
-        # Intraday ATR proxy (14 bars)
-        atr_14 = float((df_5m["high"].iloc[current_idx-14:current_idx+1] - df_5m["low"].iloc[current_idx-14:current_idx+1]).mean()) if current_idx >= 14 else 35.0
-        atr_14 = max(atr_14, 25.0)
-
-        bar_open = float(bar["open"])
         prev_bar = df_5m.iloc[current_idx - 1]
-        prev_close = float(prev_bar["close"])
+        prev_close_val = float(prev_bar["close"])
 
-        # LONG Setup (3-Tier Asymmetric Target Calculation)
-        if close > ema200 and close > current_vwap and swing_range >= 35.0 and ofi_info["buyer_defense"]:
+        # 6. LONG Setup (3-Tier Asymmetric Target Calculation)
+        long_avwap_cond = close > (current_vwap - 0.35 * (upper_2sd - current_vwap) / 2.0)
+        if close > ema200 and long_avwap_cond and swing_range >= 35.0 and ofi_info["buyer_defense"]:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=True)
             in_pocket = fib["fib_618"] <= min(close, bar_open) and max(close, bar_open) <= (fib["fib_500"] + 10.0)
-            bullish_trigger = (close > bar_open) or (close > prev_close)
+            bullish_trigger = (close > bar_open) or (close > prev_close_val)
             
             if in_pocket and bullish_trigger:
                 t1 = round(close + 1.2 * atr_14, 2)
@@ -202,21 +250,22 @@ class StrategyEngine:
                     target_2=t2,
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
-                    reason="LONG Setup Confirmed: Above 200 EMA + Above AVWAP + Golden Pocket + Bullish Candle + OFI Defense.",
+                    reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_high": swing_high, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14
+                        "atr_14": atr_14, "gap_info": gap_info
                     }
                 )
 
-        # SHORT Setup (3-Tier Asymmetric Target Calculation)
-        if close < ema200 and close < current_vwap and swing_range >= 35.0 and ofi_info["seller_defense"]:
+        # 7. SHORT Setup (3-Tier Asymmetric Target Calculation)
+        short_avwap_cond = close < (current_vwap + 0.35 * (current_vwap - lower_2sd) / 2.0)
+        if close < ema200 and short_avwap_cond and swing_range >= 35.0 and ofi_info["seller_defense"]:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=False)
             in_pocket = (fib["fib_500"] - 10.0) <= min(close, bar_open) and max(close, bar_open) <= fib["fib_618"]
-            bearish_trigger = (close < bar_open) or (close < prev_close)
+            bearish_trigger = (close < bar_open) or (close < prev_close_val)
             
             if in_pocket and bearish_trigger:
                 t1 = round(close - 1.2 * atr_14, 2)
@@ -232,13 +281,13 @@ class StrategyEngine:
                     target_2=t2,
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
-                    reason="SHORT Setup Confirmed: Below 200 EMA + Below AVWAP + Golden Pocket + Bearish Candle + OFI Defense.",
+                    reason=f"SHORT Setup Confirmed: Below 200 EMA + Below AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_low": swing_low, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14
+                        "atr_14": atr_14, "gap_info": gap_info
                     }
                 )
 
@@ -253,5 +302,6 @@ class StrategyEngine:
             reason="Market in consolidation / No confluence across core indicators.",
             htf_aligned=True,
             fib_retracement=0.0,
-            details={"ema200": ema200, "vwap": current_vwap, "ema21": ema21, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info}
+            details={"ema200": ema200, "vwap": current_vwap, "ema21": ema21, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info, "gap_info": gap_info}
         )
+
