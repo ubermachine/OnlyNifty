@@ -145,12 +145,31 @@ iv_input = st.sidebar.slider("Expected IV / India VIX (%)", min_value=8.0, max_v
 drawdown_input = st.sidebar.slider("Current Portfolio Drawdown (%)", min_value=0.0, max_value=15.0, value=0.0, step=0.5) / 100.0
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("📡 Live Market Feed")
 data_mode = st.sidebar.radio("Data Stream Source", ["Live / Latest Market Feed (yfinance + NSE)", "Synthetic Market Simulation"])
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
+if st.sidebar.button("🔄 Refresh Market Data Now", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+auto_refresh_choice = st.sidebar.selectbox("Auto-Refresh Feed", ["Off (Manual)", "Every 15 Seconds", "Every 30 Seconds", "Every 60 Seconds"], index=0)
+if auto_refresh_choice != "Off (Manual)":
+    sec_map = {"Every 15 Seconds": 15, "Every 30 Seconds": 30, "Every 60 Seconds": 60}
+    delay_secs = sec_map.get(auto_refresh_choice, 30)
+    st.sidebar.caption(f"⚡ Live feed auto-refresh active ({delay_secs}s)")
+    # Non-blocking client-side refresh timer
+    st.markdown(f"""
+    <script>
+        setTimeout(function() {{
+            window.location.reload();
+        }}, {delay_secs * 1000});
+    </script>
+    """, unsafe_allow_html=True)
+
 # ----------------- DATA INGESTION & CACHING -----------------
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = DataEngine(use_cache=True)
     if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
