@@ -1,0 +1,44 @@
+name: Market Data & Volatility Surface Health Check
+
+on:
+  schedule:
+    # Runs at 10:00 UTC (15:30 IST - Market Close) Monday through Friday
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  validate-market-data:
+    name: Market Feed & Volatility Surface Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Test Live Ingestion & Fallback Resiliency
+        run: |
+          python -c "
+          from src.data_engine import DataEngine
+          from src.options_engine import compute_strike_ladder_greeks
+          
+          engine = DataEngine()
+          # 1. Test live/synthetic fetch
+          df = engine.fetch_yfinance_nifty(interval='5m', period='5d')
+          print(f'Ingested {len(df)} candles. Latest Close: {df[\"close\"].iloc[-1]}')
+          assert len(df) >= 15, 'Insufficient candles fetched'
+          
+          # 2. Test Greeks & Strike Ladder computation
+          spot = float(df['close'].iloc[-1])
+          ladder = compute_strike_ladder_greeks(spot, iv=0.14)
+          assert not ladder.empty, 'Strike ladder computation failed'
+          print(f'Calculated {len(ladder)} strikes around spot ₹{spot:,.2f}')
+          "

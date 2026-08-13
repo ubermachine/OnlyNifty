@@ -1,0 +1,82 @@
+name: JustNifty CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test-and-verify:
+    name: Test & Mathematical Verification (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run Full Mathematical & Unit Test Suite
+        run: |
+          python -m pytest tests/ -v --cov=src --cov-report=term-missing
+
+      - name: Run Standalone Backtest Simulator & TCA Verification
+        run: |
+          python evaluate_backtest.py
+
+      - name: Verify App & Module Ingestion Integrity
+        run: |
+          python -c "
+          from src.data_engine import DataEngine
+          from src.indicators import compute_hurst_exponent, compute_vakc_envelopes
+          from src.options_engine import calculate_black_scholes_greeks, calculate_tca_friction
+          from src.strategy_rules import StrategyEngine
+          from src.backtest_engine import BacktestEngine
+          
+          de = DataEngine()
+          df = de.generate_synthetic_nifty(bars=100)
+          assert not df.empty, 'DataEngine failed to generate data'
+          
+          hurst = compute_hurst_exponent(df['close'])
+          assert 'hurst' in hurst, 'Hurst calculation failed'
+          
+          greeks = calculate_black_scholes_greeks(24500, 24500, 0.01, 0.07, 0.14, 'CE')
+          assert 0.45 <= greeks['delta'] <= 0.65, f'Delta out of range: {greeks[\"delta\"]}'
+          
+          print('All Core Modules & Mathematical Pipelines Verified Successfully!')
+          "
+
+  lint-and-docs:
+    name: Code Hygiene & Documentation Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify Documentation & Static Assets
+        run: |
+          test -f README.md && echo "README.md verified"
+          test -f LICENSE && echo "LICENSE verified"
+          test -f requirements.txt && echo "requirements.txt verified"
+          test -f index.html && echo "index.html verified"
