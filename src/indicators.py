@@ -15,27 +15,35 @@ def compute_envelopes(ema_series: pd.Series, pct: float = 0.015) -> Tuple[pd.Ser
     return upper, lower
 
 def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Computes Session Volume Weighted Average Price (VWAP) and ±2 standard deviation bands."""
+    """Computes Session Volume Weighted Average Price (VWAP) and ±2 standard deviation bands with zero-volume resilience."""
     df = df.copy()
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    tp_vol = typical_price * df["volume"]
+    
+    # Clean volume: If volume is 0 or all zeros (common for index feeds like ^NSEI), use price range as activity proxy
+    vol = df["volume"].copy().astype(float)
+    if vol.sum() == 0 or (vol == 0).all():
+        vol = (df["high"] - df["low"]).clip(lower=1.0)
+    else:
+        vol = vol.replace(0, 1.0)
+        
+    tp_vol = typical_price * vol
     
     if anchor_session:
         # Vectorized intraday session VWAP by date group
         dates = pd.Series(df.index.date, index=df.index)
-        cum_vol = df["volume"].groupby(dates).cumsum()
+        cum_vol = vol.groupby(dates).cumsum()
         cum_tp_vol = tp_vol.groupby(dates).cumsum()
-        vwap = cum_tp_vol / cum_vol
+        vwap = (cum_tp_vol / cum_vol.clip(lower=1.0)).fillna(typical_price)
         
         # Standard deviation bands
-        squared_diff = ((typical_price - vwap) ** 2) * df["volume"]
+        squared_diff = ((typical_price - vwap) ** 2) * vol
         cum_sq_diff = squared_diff.groupby(dates).cumsum()
-        std_dev = np.sqrt(np.maximum(cum_sq_diff / cum_vol, 0))
+        std_dev = np.sqrt(np.maximum(cum_sq_diff / cum_vol.clip(lower=1.0), 0)).fillna(0)
     else:
-        cum_vol = df["volume"].cumsum()
+        cum_vol = vol.cumsum().clip(lower=1.0)
         cum_tp_vol = tp_vol.cumsum()
-        vwap = cum_tp_vol / cum_vol
-        std_dev = np.sqrt((((typical_price - vwap) ** 2) * df["volume"]).cumsum() / cum_vol)
+        vwap = (cum_tp_vol / cum_vol).fillna(typical_price)
+        std_dev = np.sqrt((((typical_price - vwap) ** 2) * vol).cumsum() / cum_vol).fillna(0)
 
     upper_sd = vwap + (2.0 * std_dev)
     lower_sd = vwap - (2.0 * std_dev)

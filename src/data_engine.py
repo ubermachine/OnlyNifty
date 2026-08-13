@@ -44,11 +44,26 @@ class DataEngine:
         df = df.sort_index()
         return df
 
-    def fetch_yfinance_nifty(self, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
-        """Fetches Nifty 50 (^NSEI) OHLCV from Yahoo Finance with caching."""
+    def fetch_yfinance_nifty(
+        self,
+        interval: str = "5m",
+        period: str = "5d",
+        max_cache_age_seconds: int = 60
+    ) -> pd.DataFrame:
+        """Fetches Nifty 50 (^NSEI) OHLCV from Yahoo Finance with TTL-aware caching."""
         cache_key = f"nifty_{interval}_{period}.parquet"
         cache_path = os.path.join(self.cache_dir, cache_key)
         
+        # 1. Check if fresh cache exists within TTL
+        if self.use_cache and os.path.exists(cache_path):
+            try:
+                file_age = datetime.now().timestamp() - os.path.getmtime(cache_path)
+                if file_age < max_cache_age_seconds:
+                    return pd.read_parquet(cache_path)
+            except Exception:
+                pass
+
+        # 2. Attempt live network fetch
         try:
             ticker = yf.Ticker("^NSEI")
             df = ticker.history(period=period, interval=interval)
@@ -60,15 +75,14 @@ class DataEngine:
         except Exception:
             pass
 
-        # Try reading from cache if network fails
+        # 3. Fallback to existing cache if network fails
         if self.use_cache and os.path.exists(cache_path):
             try:
-                cached_df = pd.read_parquet(cache_path)
-                return cached_df
+                return pd.read_parquet(cache_path)
             except Exception:
                 pass
                 
-        # Generate clean synthetic data if both fail (e.g. offline/mock environment)
+        # 4. Generate clean synthetic data if both fail
         return self.generate_synthetic_nifty(bars=150, interval_mins=5 if interval == "5m" else 1)
 
     def fetch_jugaad_live_quote(self) -> Dict[str, Any]:
