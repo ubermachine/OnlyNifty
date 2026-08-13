@@ -238,25 +238,94 @@ class DataEngine:
         return 12.0
 
     def fetch_sectoral_pulse(self) -> Dict[str, Any]:
-        """Fetches benchmark and sectoral indices to check inter-market breadth."""
+        """
+        Fetches benchmark and key high-beta sectoral indices to evaluate inter-market breadth momentum:
+        - Nifty Bank (33.5% Nifty 50 impact)
+        - Nifty IT (14.2% Nifty 50 impact)
+        - Nifty Auto (7.1% Nifty 50 impact)
+        - Nifty Energy (11.4% Nifty 50 impact)
+        - Nifty Metal (3.8% Nifty 50 impact)
+        """
+        sectors = {
+            "NIFTY BANK": {"name": "Bank Nifty", "weight": 0.335, "fallback_last": 51380.0, "fallback_chg": 0.45},
+            "NIFTY IT": {"name": "Nifty IT", "weight": 0.142, "fallback_last": 31450.0, "fallback_chg": 0.30},
+            "NIFTY AUTO": {"name": "Nifty Auto", "weight": 0.071, "fallback_last": 24800.0, "fallback_chg": 0.60},
+            "NIFTY ENERGY": {"name": "Nifty Energy", "weight": 0.114, "fallback_last": 39500.0, "fallback_chg": 0.20},
+            "NIFTY METAL": {"name": "Nifty Metal", "weight": 0.038, "fallback_last": 9200.0, "fallback_chg": -0.10}
+        }
+        
+        source = "Synthetic Fallback"
         try:
             from jugaad_data.nse import NSELive
             n = NSELive()
             ai = n.all_indices()
             if ai and "data" in ai:
-                index_map = {x.get("index"): float(x.get("last", 0)) for x in ai["data"]}
-                return {
-                    "nifty_50": index_map.get("NIFTY 50", 24395.85),
-                    "nifty_bank": index_map.get("NIFTY BANK", 57635.25),
-                    "india_vix": index_map.get("INDIA VIX", 11.42),
-                    "nifty_it": index_map.get("NIFTY IT", 31453.90),
-                    "source": "jugaad-data (NSELive)"
-                }
+                source = "jugaad-data (NSELive)"
+                idx_data = {x.get("index"): x for x in ai["data"]}
+                for k, v in sectors.items():
+                    if k in idx_data:
+                        v["fallback_last"] = float(idx_data[k].get("last", v["fallback_last"]))
+                        v["fallback_chg"] = float(idx_data[k].get("percentChange", v["fallback_chg"]))
         except Exception:
             pass
+
+        sector_rows = []
+        weighted_sbm = 0.0
+        advances = 0
+        declines = 0
+
+        for k, v in sectors.items():
+            chg = v["fallback_chg"]
+            last_val = v["fallback_last"]
+            w = v["weight"]
+            weighted_sbm += (chg * w)
+            
+            if chg > 0:
+                advances += 1
+            elif chg < 0:
+                declines += 1
+                
+            sector_rows.append({
+                "sector": v["name"],
+                "index_code": k,
+                "last_price": last_val,
+                "change_pct": chg,
+                "weight_pct": round(w * 100.0, 1),
+                "bias": "BULLISH" if chg > 0.15 else ("BEARISH" if chg < -0.15 else "NEUTRAL")
+            })
+
+        bank_chg = sectors["NIFTY BANK"]["fallback_chg"]
+        it_chg = sectors["NIFTY IT"]["fallback_chg"]
+        
+        # Cross-hedging / divergence detection
+        is_bank_it_divergent = (bank_chg * it_chg < -0.05)
+        
+        if is_bank_it_divergent:
+            alignment = "BANK_IT_DIVERGENT (Cross-Sector Hedging / Chop)"
+            conviction = "LOW_CONVICTION"
+        elif bank_chg > 0.2 and it_chg > 0.2:
+            alignment = "STRONG_BULLISH_SECTORAL_EXPANSION"
+            conviction = "HIGH_CONVICTION"
+        elif bank_chg < -0.2 and it_chg < -0.2:
+            alignment = "STRONG_BEARISH_SECTORAL_BREAKDOWN"
+            conviction = "HIGH_CONVICTION"
+        else:
+            alignment = "MODERATE_OR_MIXED_BREADTH"
+            conviction = "MEDIUM_CONVICTION"
+
         return {
-            "nifty_50": 24395.85, "nifty_bank": 57635.25, "india_vix": 11.42, "nifty_it": 31453.90, "source": "Synthetic Fallback"
+            "sbm_score": round(weighted_sbm * 10.0, 2),
+            "alignment": alignment,
+            "conviction": conviction,
+            "is_bank_it_divergent": is_bank_it_divergent,
+            "bank_nifty_chg": bank_chg,
+            "nifty_it_chg": it_chg,
+            "advances": advances,
+            "declines": declines,
+            "sectors": sector_rows,
+            "source": source
         }
+
 
     def fetch_pre_open_gap(self) -> Dict[str, Any]:
         """Discovers 09:08 AM Pre-Open equilibrium price and gap %."""

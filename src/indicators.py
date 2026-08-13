@@ -838,4 +838,202 @@ def detect_stacked_order_flow_imbalances(
     }
 
 
+def detect_iceberg_orders_and_liquidity_sweeps(
+    df: pd.DataFrame,
+    lookback_swing: int = 20,
+    volume_surge_mult: float = 1.8,
+    narrow_range_mult: float = 0.50
+) -> Dict[str, Any]:
+    """
+    Microstructure Order Book Liquidity Engine:
+    
+    1. Algorithmic Iceberg Detection:
+       Identifies hidden block orders where Volume / Average Volume >= 1.8x but Candle Range <= 0.50x ATR.
+       Indicates heavy passive limit orders soaking up market velocity.
+       
+    2. Liquidity Sweep (Stop Hunt / False Breakout) Detection:
+       Identifies price probing above prior 20-bar Swing High or below Swing Low, followed by aggressive
+       intra-bar rejection and closing back inside the range with >= 40% wick.
+    """
+    if df.empty or len(df) < lookback_swing + 5:
+        return {
+            "iceberg_detected": False,
+            "liquidity_sweep_detected": False,
+            "iceberg_side": "NONE",
+            "sweep_side": "NONE",
+            "sweep_event": None,
+            "iceberg_event": None,
+            "microstructure_status": "NORMAL_LIQUIDITY"
+        }
+
+    sub = df.tail(lookback_swing + 5)
+    bar = sub.iloc[-1]
+    prev_bars = sub.iloc[:-1]
+
+    c_open = float(bar["open"])
+    c_high = float(bar["high"])
+    c_low = float(bar["low"])
+    c_close = float(bar["close"])
+    c_vol = float(bar["volume"])
+    
+    candle_range = max(c_high - c_low, 1.0)
+    atr = float((sub["high"] - sub["low"]).mean())
+    avg_vol = float(prev_bars["volume"].mean()) if not prev_bars.empty else c_vol
+    
+    vol_ratio = c_vol / max(avg_vol, 1.0)
+    range_ratio = candle_range / max(atr, 1.0)
+    
+    # 1. Iceberg Logic
+    is_iceberg = (vol_ratio >= volume_surge_mult) and (range_ratio <= narrow_range_mult)
+    iceberg_side = "NONE"
+    iceberg_event = None
+
+    if is_iceberg:
+        if c_close >= c_open:
+            iceberg_side = "BUY_ICEBERG_ACCUMULATION"
+            thesis = f"Hidden Buyer Iceberg: {vol_ratio:.1f}x Vol absorbed within tight {candle_range:.1f} pt range."
+        else:
+            iceberg_side = "SELL_ICEBERG_DISTRIBUTION"
+            thesis = f"Hidden Seller Iceberg: {vol_ratio:.1f}x Vol absorbed within tight {candle_range:.1f} pt range."
+            
+        iceberg_event = {
+            "side": iceberg_side,
+            "volume_multiple": round(vol_ratio, 2),
+            "candle_range_pts": round(candle_range, 1),
+            "range_atr_ratio": round(range_ratio, 2),
+            "price_level": round((c_high + c_low) / 2.0, 2),
+            "thesis": thesis
+        }
+
+    # 2. Liquidity Sweep Logic
+    swing_high = float(prev_bars["high"].tail(lookback_swing).max())
+    swing_low = float(prev_bars["low"].tail(lookback_swing).min())
+    
+    upper_wick = c_high - max(c_open, c_close)
+    lower_wick = min(c_open, c_close) - c_low
+    upper_wick_ratio = upper_wick / candle_range
+    lower_wick_ratio = lower_wick / candle_range
+    
+    sweep_side = "NONE"
+    sweep_event = None
+    
+    # Bearish Sweep: Pierced Swing High, closed back below with >= 40% upper wick
+    if c_high > (swing_high + 1.5) and c_close < swing_high and upper_wick_ratio >= 0.40:
+        sweep_side = "BEARISH_BUY_SIDE_LIQUIDITY_SWEEP (BSL Trap)"
+        sweep_event = {
+            "type": "BSL_SWEEP",
+            "side": "SHORT",
+            "swept_swing_high": round(swing_high, 2),
+            "probe_high": round(c_high, 2),
+            "wick_ratio_pct": round(upper_wick_ratio * 100.0, 1),
+            "suggested_sl": round(c_high + 4.0, 2),
+            "thesis": f"Buy-Side Liquidity Purged at {c_high:.1f} (+{c_high - swing_high:.1f} pts above swing high). Trapped breakout buyers."
+        }
+    # Bullish Sweep: Pierced Swing Low, closed back above with >= 40% lower wick
+    elif c_low < (swing_low - 1.5) and c_close > swing_low and lower_wick_ratio >= 0.40:
+        sweep_side = "BULLISH_SELL_SIDE_LIQUIDITY_SWEEP (SSL Trap)"
+        sweep_event = {
+            "type": "SSL_SWEEP",
+            "side": "LONG",
+            "swept_swing_low": round(swing_low, 2),
+            "probe_low": round(c_low, 2),
+            "wick_ratio_pct": round(lower_wick_ratio * 100.0, 1),
+            "suggested_sl": round(c_low - 4.0, 2),
+            "thesis": f"Sell-Side Liquidity Purged at {c_low:.1f} (-{swing_low - c_low:.1f} pts below swing low). Trapped breakdown sellers."
+        }
+
+    status_str = "NORMAL_LIQUIDITY"
+    if sweep_event:
+        status_str = sweep_side
+    elif iceberg_event:
+        status_str = iceberg_side
+
+    return {
+        "iceberg_detected": is_iceberg,
+        "liquidity_sweep_detected": sweep_event is not None,
+        "iceberg_side": iceberg_side,
+        "sweep_side": sweep_side,
+        "sweep_event": sweep_event,
+        "iceberg_event": iceberg_event,
+        "microstructure_status": status_str
+    }
+
+
+def compute_initial_balance_and_day_type(
+    df_5m: pd.DataFrame,
+    ib_bars: int = 12
+) -> Dict[str, Any]:
+    """
+    Market Profile Initial Balance (IB: 09:15 - 10:15 IST) & Day Type Classification:
+    
+    Identifies:
+    1. Initial Balance High, Low, and Range.
+    2. Unilateral / Bilateral Range Expansion multiples (1.5x, 2.0x, 3.0x).
+    3. Day Type:
+       - TREND_DAY: Unilateral expansion >= 1.5x IB Range (Hold runners for T3).
+       - NORMAL_VARIATION_DAY: Unilateral expansion between 0.5x and 1.5x.
+       - NEUTRAL_DAY (Chop): Bilateral expansion on both sides (mean-reversion bracket).
+       - NORMAL_DAY: Price contained strictly within Initial Balance.
+    """
+    if df_5m.empty:
+        return {
+            "ib_established": False, "ib_high": 0.0, "ib_low": 0.0, "ib_range": 0.0,
+            "day_type": "ACCUMULATING_IB", "expansion_multiple": 0.0, "strategy_mode": "WAIT_FOR_IB"
+        }
+
+    ib_df = df_5m.iloc[:ib_bars] if len(df_5m) >= ib_bars else df_5m
+    ib_high = float(ib_df["high"].max())
+    ib_low = float(ib_df["low"].min())
+    ib_range = max(ib_high - ib_low, 5.0)
+    
+    if len(df_5m) < ib_bars:
+        return {
+            "ib_established": False,
+            "ib_high": round(ib_high, 2),
+            "ib_low": round(ib_low, 2),
+            "ib_range": round(ib_range, 2),
+            "day_type": "ACCUMULATING_INITIAL_BALANCE (09:15-10:15 IST)",
+            "expansion_multiple": 0.0,
+            "strategy_mode": "STANDARD_5M_PULLBACKS"
+        }
+
+    curr_high = float(df_5m["high"].max())
+    curr_low = float(df_5m["low"].min())
+    
+    exp_up = max(curr_high - ib_high, 0.0) / ib_range
+    exp_down = max(ib_low - curr_low, 0.0) / ib_range
+    total_exp = exp_up + exp_down
+
+    if exp_up >= 1.0 and exp_down < 0.25:
+        day_type = "BULLISH_TREND_DAY (Unilateral Upward Expansion)"
+        strategy_mode = "HOLD_RUNNERS_FOR_T3_MOONSHOT"
+    elif exp_down >= 1.0 and exp_up < 0.25:
+        day_type = "BEARISH_TREND_DAY (Unilateral Downward Expansion)"
+        strategy_mode = "HOLD_RUNNERS_FOR_T3_MOONSHOT"
+    elif exp_up >= 0.40 and exp_down >= 0.40:
+        day_type = "NEUTRAL_DAY (Bilateral Expansion / Whipsaw Bracket)"
+        strategy_mode = "SCALP_AT_T1_AVOID_RUNNERS"
+    elif exp_up >= 0.40 or exp_down >= 0.40:
+        side_str = "Upward" if exp_up > exp_down else "Downward"
+        day_type = f"NORMAL_VARIATION_DAY ({side_str} 1.5x IB Extension)"
+        strategy_mode = "STANDARD_3TIER_LADDER"
+    else:
+        day_type = "NORMAL_DAY (Contained Within Initial Balance)"
+        strategy_mode = "MEAN_REVERSION_AT_IB_EXTREMES"
+
+    return {
+        "ib_established": True,
+        "ib_high": round(ib_high, 2),
+        "ib_low": round(ib_low, 2),
+        "ib_range": round(ib_range, 2),
+        "day_type": day_type,
+        "expansion_up_mult": round(exp_up, 2),
+        "expansion_down_mult": round(exp_down, 2),
+        "total_expansion_mult": round(total_exp, 2),
+        "strategy_mode": strategy_mode
+    }
+
+
+
+
 

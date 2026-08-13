@@ -14,9 +14,12 @@ from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
     compute_hurst_exponent, compute_order_flow_imbalance, compute_volume_profile,
     compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers,
-    compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances
+    compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
+    detect_iceberg_orders_and_liquidity_sweeps
 )
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
+from src.macro_engine import GlobalMacroEngine
+
 
 
 class SignalType(Enum):
@@ -53,12 +56,14 @@ class Signal:
             self.pyramid_trigger = round(self.entry_price + 25.0, 2)
 
 class StrategyEngine:
-    """Vectorized and streaming bar-by-bar JustNifty v3.4 institutional strategy rules evaluator."""
+    """Vectorized and streaming bar-by-bar JustNifty v3.5 institutional strategy rules evaluator."""
     def __init__(self):
         self.kalman_filter = KalmanFilterTrendEstimator()
         self.markov_switcher = MarkovRegimeSwitcher()
+        self.macro_engine = GlobalMacroEngine()
         self.session_losses: int = 0
         self.last_session_date: Optional[Any] = None
+
 
     def evaluate_bar(
         self,
@@ -201,6 +206,45 @@ class StrategyEngine:
             "AVWAP_LOWER_2SD": lower_2sd
         }
         order_flow = detect_stacked_order_flow_imbalances(sub_df, key_levels=key_levels)
+        microstructure = detect_iceberg_orders_and_liquidity_sweeps(sub_df)
+        
+        # Realized Volatility / Implied Volatility Ratio
+        log_rets = np.diff(np.log(np.maximum(sub_df["close"].tail(30).values, 1.0)))
+        realized_vol = float(np.std(log_rets, ddof=1) * np.sqrt(252 * 75)) if len(log_rets) > 5 else live_iv
+        vol_ratio = round(realized_vol / max(live_iv, 0.05), 2)
+
+        # 4.1 Liquidity Sweep Trap Strategy (SSL / BSL Purges)
+        if microstructure["liquidity_sweep_detected"] and microstructure["sweep_event"]:
+            sw = microstructure["sweep_event"]
+            if sw["side"] == "LONG" and htf_aligned_long:
+                return Signal(
+                    signal_type=SignalType.LONG_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=sw["suggested_sl"],
+                    target_1=round(close + 1.2 * atr_14, 2),
+                    target_2=round(close + 2.5 * atr_14, 2),
+                    target_3_moonshot=round(close + 4.0 * atr_14, 2),
+                    pyramid_trigger=round(sw["swept_swing_low"] + 15.0, 2),
+                    reason=f"Bullish SSL Liquidity Sweep Trap: {sw['thesis']} | HTF Aligned.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
+                )
+            elif sw["side"] == "SHORT" and htf_aligned_short:
+                return Signal(
+                    signal_type=SignalType.SHORT_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=sw["suggested_sl"],
+                    target_1=round(close - 1.2 * atr_14, 2),
+                    target_2=round(close - 2.5 * atr_14, 2),
+                    target_3_moonshot=round(close - 4.0 * atr_14, 2),
+                    pyramid_trigger=round(sw["swept_swing_high"] - 15.0, 2),
+                    reason=f"Bearish BSL Liquidity Sweep Trap: {sw['thesis']} | HTF Aligned.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
+                )
+
 
         # 5. Auction Market Theory (AMT) Value Area Trigger Check (HTF Gated)
         amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)

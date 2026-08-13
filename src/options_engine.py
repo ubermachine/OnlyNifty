@@ -50,6 +50,63 @@ def compute_volatility_surface(
     return max(float(sigma), 0.01)
 
 
+def compute_svi_volatility_skew(
+    spot: float,
+    strike: float,
+    base_iv: float = DEFAULT_IV,
+    is_call: bool = True,
+    a: float = 0.015,
+    b: float = 0.08,
+    rho: float = -0.45,
+    m: float = 0.0,
+    sigma_svi: float = 0.12
+) -> float:
+    """
+    Stochastic Volatility Inspired (SVI) Parametric Volatility Smile:
+    w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma_svi^2))
+    where k = ln(K / S) is log-moneyness.
+    """
+    k = math.log(max(strike, 1.0) / max(spot, 1.0))
+    disc = math.sqrt((k - m) ** 2 + sigma_svi ** 2)
+    total_var = a + b * (rho * (k - m) + disc)
+    
+    sigma = math.sqrt(max(total_var, 0.0004))
+    # Calibrate to base_iv level
+    iv_calibrated = (sigma / 0.20) * base_iv
+    
+    if not is_call and strike <= spot:
+        iv_calibrated = max(iv_calibrated, base_iv + PUT_SKEW_PREMIUM)
+        
+    return round(max(float(iv_calibrated), 0.05), 4)
+
+
+def generate_svi_smile_curve(
+    spot: float,
+    base_iv: float = DEFAULT_IV,
+    strike_span: int = 500,
+    step: int = 50
+) -> pd.DataFrame:
+    """Generates full SVI volatility smile & skew distribution across strikes."""
+    atm_base = int(round(spot / 50.0) * 50)
+    strikes = range(atm_base - strike_span, atm_base + strike_span + step, step)
+    
+    records = []
+    for k in strikes:
+        iv_ce = compute_svi_volatility_skew(spot, k, base_iv=base_iv, is_call=True)
+        iv_pe = compute_svi_volatility_skew(spot, k, base_iv=base_iv, is_call=False)
+        moneyness = (k - spot) / spot * 100.0
+        records.append({
+            "strike": k,
+            "moneyness_pct": round(moneyness, 2),
+            "call_iv_pct": round(iv_ce * 100.0, 2),
+            "put_iv_pct": round(iv_pe * 100.0, 2),
+            "skew_spread_bps": round((iv_pe - iv_ce) * 10000.0, 1)
+        })
+        
+    return pd.DataFrame(records)
+
+
+
 def black_scholes_greeks(
     spot: float,
     strike: float,

@@ -18,15 +18,18 @@ from src.indicators import (
     compute_fibonacci_levels, compute_vf_trade_table, compute_volume_profile,
     compute_hurst_exponent, compute_order_flow_imbalance, compute_dealer_gex,
     compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
-    compute_pre_open_gap_filter, detect_volume_profile_triggers
+    compute_pre_open_gap_filter, detect_volume_profile_triggers,
+    detect_iceberg_orders_and_liquidity_sweeps, compute_initial_balance_and_day_type
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
     generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks,
     calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
-    calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread
+    calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
+    generate_svi_smile_curve
 )
+
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
@@ -241,12 +244,14 @@ kalman_engine = KalmanFilterTrendEstimator()
 df_kalman = kalman_engine.filter_series(df["close"])
 markov_engine = MarkovRegimeSwitcher()
 regime_state = markov_engine.infer_regimes(df)
+ib_state = compute_initial_balance_and_day_type(df)
+sector_pulse = data_engine.fetch_sectoral_pulse()
 
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v3.4</span>
+        <span class="badge-pro">PRO v3.6</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
@@ -264,7 +269,7 @@ with cockpit_col1:
     <div class="cockpit-box">
         <div class="cockpit-header">
             <span class="{sig_badge_class}">{sig_badge_text}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">REGIME: {regime_state['active_regime']} • HTF: {htf_data['confluence_regime']}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">IB: {ib_state['day_type'][:20]} • REGIME: {regime_state['active_regime']}</span>
         </div>
         <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
             <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
@@ -289,8 +294,10 @@ with cockpit_col1:
                 </div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">3. Order Flow Delta</div>
-                <div class="c-val" style="color: {'#05df72' if ofi_data['buyer_defense'] else '#ff3355'};">Z={ofi_data['ofi_zscore']:.2f} ({order_flow_data['order_flow_bias'][:8]})</div>
+                <div class="c-lbl">3. Sectoral Pulse</div>
+                <div class="c-val" style="color: {'#05df72' if sector_pulse['sbm_score'] >= 0 else '#ff3355'};">
+                    SBM={sector_pulse['sbm_score']:+.1f} ({sector_pulse['alignment'][:7]})
+                </div>
             </div>
             <div class="confluence-cell">
                 <div class="c-lbl">4. Dealer GEX Flip</div>
@@ -299,6 +306,7 @@ with cockpit_col1:
         </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 
 
@@ -777,22 +785,35 @@ with tab_sizer:
 
 # ----- TAB 3: PARTICIPANT OI & LIVE OPTION CHAIN -----
 with tab_oi:
-    st.subheader("🏛️ Institutional Heavyweight Breadth & Participant-Wise Open Interest")
+    st.subheader("🏛️ Institutional Heavyweight Breadth, Sectoral Pulse & Option Chain")
     
-    # Heavyweight Flow Index (HFI)
+    # Heavyweight Flow Index (HFI) and Sectoral Pulse (SBM)
     hfi_res = data_engine.fetch_heavyweight_flow_index()
-    hfi_col1, hfi_col2, hfi_col3 = st.columns([1.2, 1.0, 1.0])
-    hfi_col1.metric("Heavyweight Flow Index (HFI)", f"{hfi_res['hfi_score']:+.2f}", hfi_res["breadth_bias"][:25])
-    hfi_col2.metric("Top 5 Advances / Declines", f"{hfi_res['advances']} Adv / {hfi_res['declines']} Dec", f"Top 5 Weight: {hfi_res['total_top5_weight_pct']}%")
-    hfi_col3.metric("Institutional Confluence Confidence", hfi_res["confidence"], "Inter-Market Confluence")
+    sec_res = data_engine.fetch_sectoral_pulse()
     
-    with st.expander("📊 Top 5 Nifty Heavyweight Real-Time Constituent Monitor (41.2% Index Weight)", expanded=False):
-        st.dataframe(pd.DataFrame(hfi_res["constituents"]), hide_index=True, use_container_width=True)
+    hfi_col1, hfi_col2, hfi_col3, hfi_col4 = st.columns(4)
+    hfi_col1.metric("Heavyweight Flow Index (HFI)", f"{hfi_res['hfi_score']:+.2f}", hfi_res["breadth_bias"][:20])
+    hfi_col2.metric("Sector Breadth Momentum (SBM)", f"{sec_res['sbm_score']:+.2f}", sec_res["alignment"][:20])
+    hfi_col3.metric("Top 5 Advances / Declines", f"{hfi_res['advances']} Adv / {hfi_res['declines']} Dec", f"Weight: 41.2%")
+    hfi_col4.metric("Confluence Conviction", sec_res["conviction"], "Inter-Market State")
+    
+    sec_c1, sec_c2 = st.columns([1.0, 1.0])
+    with sec_c1:
+        with st.expander("📊 Top 5 Nifty Heavyweight Monitor (41.2% Weight)", expanded=False):
+            st.dataframe(pd.DataFrame(hfi_res["constituents"]), hide_index=True, use_container_width=True)
+    with sec_c2:
+        with st.expander("🚀 High-Beta Sectoral Drivers (Bank, IT, Auto, Energy)", expanded=False):
+            st.dataframe(pd.DataFrame(sec_res["sectors"]), hide_index=True, use_container_width=True)
         
     st.markdown("#### 🏛️ Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), use_container_width=True)
     
     st.markdown("---")
+    
+    # SVI Volatility Smile Curve Table
+    with st.expander("📈 Parametric SVI Volatility Smile & Put-Call Skew Surface", expanded=False):
+        df_svi_curve = generate_svi_smile_curve(current_spot, base_iv=iv_input)
+        st.dataframe(df_svi_curve, hide_index=True, use_container_width=True)
     
     # Toggle between Official Live NSE Option Chain and BSM Surface Simulation
     oc_mode = st.radio(
@@ -800,6 +821,7 @@ with tab_oi:
         ["Official NSE Live Option Chain (jugaad-data)", "Black-Scholes Greek Surface Simulation"],
         horizontal=True
     )
+
 
     
     if "Official" in oc_mode:
