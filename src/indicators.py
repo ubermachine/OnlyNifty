@@ -107,7 +107,7 @@ def compute_fibonacci_levels(high: float, low: float, is_uptrend: bool) -> Dict[
             "fib_500": round(low + 0.500 * diff, 2),
             "fib_618": round(low + 0.618 * diff, 2),
             "fib_786": round(low + 0.786 * diff, 2),
-            "sl_level": round(low + 0.382 * diff + 5.0, 2)
+            "sl_level": round(low + 0.786 * diff + 5.0, 2)
         }
 
 def compute_vf_trade_table(open_price: float, atr: float = 60.0) -> Dict[str, float]:

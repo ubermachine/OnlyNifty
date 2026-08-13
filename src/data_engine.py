@@ -132,8 +132,13 @@ class DataEngine:
         # Realistic intraday volatility with drift
         returns = np.random.normal(0.00015, 0.0012, bars)
         # Create an intraday pullback to test 50-61.8% Fibonacci
-        returns[30:45] = -np.abs(np.random.normal(0.001, 0.0008, 15)) # Pullback
-        returns[45:65] = np.abs(np.random.normal(0.0015, 0.001, 20))  # Trend resumption
+        if bars >= 65:
+            returns[30:45] = -np.abs(np.random.normal(0.001, 0.0008, 15)) # Pullback
+            returns[45:65] = np.abs(np.random.normal(0.0015, 0.001, 20))  # Trend resumption
+        elif bars >= 30:
+            half = bars // 2
+            returns[half-5:half] = -np.abs(np.random.normal(0.001, 0.0008, 5))
+            returns[half:half+5] = np.abs(np.random.normal(0.0015, 0.001, 5))
         
         price = start_price * np.exp(np.cumsum(returns))
         highs = price * (1 + np.abs(np.random.normal(0, 0.0008, bars)))
