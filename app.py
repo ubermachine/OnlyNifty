@@ -329,40 +329,75 @@ tab_chart, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
 
 # ----- TAB 1: INTERACTIVE CHART -----
 with tab_chart:
-    st.subheader("Nifty 50 Multi-Indicator Technical & Stochastic Chart")
+    st.subheader("📈 Nifty 50 Multi-Indicator Technical & Stochastic Chart")
     
-    t1_c1, t1_c2, t1_c3, t1_c4, t1_c5 = st.columns(5)
-    show_emas = t1_c1.checkbox("200 / 55 / 21 EMAs", value=True)
-    show_vakc = t1_c2.checkbox("Adaptive Keltner (VAKC)", value=True)
-    show_vwap = t1_c3.checkbox("Session AVWAP ±2σ", value=True)
-    show_fib = t1_c4.checkbox("Fib Golden Pocket (50-61.8%)", value=True)
+    # Intuitive Visual Guide Expander
+    with st.expander("💡 **How to Read This Chart (Instant Visual Key & Trading Guide)**", expanded=False):
+        g_c1, g_c2, g_c3, g_c4 = st.columns(4)
+        with g_c1:
+            st.markdown("""
+            <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 6px; padding: 10px;">
+                <div style="color: #05df72; font-weight: 700; font-size: 12px; margin-bottom: 4px;">🟢 200 EMA (Macro Referee)</div>
+                <div style="font-size: 11px; color: #8e9fb5;">• <strong>Above line:</strong> Only Buy Calls (CE)<br>• <strong>Below line:</strong> Only Buy Puts (PE)</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g_c2:
+            st.markdown("""
+            <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 6px; padding: 10px;">
+                <div style="color: #fbb024; font-weight: 700; font-size: 12px; margin-bottom: 4px;">🟡 Golden Pocket (50-61.8%)</div>
+                <div style="font-size: 11px; color: #8e9fb5;">• <strong>Wholesale discount zone:</strong> Wait for price pullback into this box before entering.</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g_c3:
+            st.markdown("""
+            <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 6px; padding: 10px;">
+                <div style="color: #a855f7; font-weight: 700; font-size: 12px; margin-bottom: 4px;">🟣 Session AVWAP (Fair Value)</div>
+                <div style="font-size: 11px; color: #8e9fb5;">• <strong>09:15 VWAP Base:</strong> Bullish when price holds above; acts as dynamic bounce support.</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g_c4:
+            st.markdown("""
+            <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 6px; padding: 10px;">
+                <div style="color: #00d2ff; font-weight: 700; font-size: 12px; margin-bottom: 4px;">🔵 21 EMA (Trailing Seatbelt)</div>
+                <div style="font-size: 11px; color: #8e9fb5;">• <strong>Runner Trailing:</strong> Stay in winning trades until candle closes across 21 EMA.</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    t1_c1, t1_c2, t1_c3, t1_c4, t1_c5, t1_c6 = st.columns(6)
+    show_emas = t1_c1.checkbox("200/55/21 EMAs", value=True)
+    show_vakc = t1_c2.checkbox("Keltner (VAKC)", value=True)
+    show_vwap = t1_c3.checkbox("AVWAP ±2σ", value=True)
+    show_fib = t1_c4.checkbox("Golden Pocket", value=True)
     show_cpr = t1_c5.checkbox("CPR Pivots", value=False)
+    show_levels = t1_c6.checkbox("Trade SL/TP Pins", value=True)
     
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.78, 0.22], vertical_spacing=0.03,
-        subplot_titles=("Price Action & Confluence Overlays", "Intraday Volume")
+        row_heights=[0.80, 0.20], vertical_spacing=0.03,
+        subplot_titles=("Nifty 50 Spot Price & Institutional Overlays", "Volume & Delta Imbalance")
     )
     
-    # Candlestick
+    # Candlestick chart
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        name="Nifty 50", increasing_line_color="#05df72", decreasing_line_color="#ff3355"
+        name="Nifty 50",
+        increasing_line_color="#05df72", increasing_fillcolor="rgba(5, 223, 114, 0.2)",
+        decreasing_line_color="#ff3355", decreasing_fillcolor="rgba(255, 51, 85, 0.2)"
     ), row=1, col=1)
     
     if show_emas:
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema200"], name="200 EMA (Regime)", line=dict(color="#05df72", width=2.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema55"], name="55 EMA (Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Trailing)", line=dict(color="#00d2ff", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["ema200"], name="200 EMA (Macro Referee)", line=dict(color="#05df72", width=2.4)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["ema55"], name="55 EMA (Intermediate Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Dynamic Trailing SL)", line=dict(color="#00d2ff", width=1.6)), row=1, col=1)
         
     if show_vakc:
-        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_upper"], name="Upper VAKC Band", line=dict(color="#ff3355", width=1.2, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_lower"], name="Lower VAKC Band", line=dict(color="#05df72", width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_upper"], name="Upper VAKC Envelope (Profit Zone)", line=dict(color="#ff3355", width=1.2, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_lower"], name="Lower VAKC Envelope (Profit Zone)", line=dict(color="#05df72", width=1.2, dash="dash")), row=1, col=1)
         
     if show_vwap:
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP (09:15)", line=dict(color="#a855f7", width=2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_upper"], name="+2σ AVWAP Band", line=dict(color="rgba(168,85,247,0.35)", width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_lower"], name="-2σ AVWAP Band", line=dict(color="rgba(168,85,247,0.35)", width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP (09:15 Fair Value)", line=dict(color="#a855f7", width=2.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_upper"], name="+2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_lower"], name="-2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
         
     if show_cpr and cpr["pivot"] > 0:
         fig.add_hline(y=cpr["pivot"], line_dash="dash", line_color="#ffd600", annotation_text="CPR Pivot", row=1, col=1)
@@ -376,25 +411,59 @@ with tab_chart:
         fig.add_hrect(
             y0=min(fib["fib_500"], fib["fib_618"]),
             y1=max(fib["fib_500"], fib["fib_618"]),
-            fillcolor="rgba(251, 176, 36, 0.12)",
-            line_width=1, line_color="#fbb024",
-            annotation_text="Golden Pocket (50% - 61.8%)",
+            fillcolor="rgba(251, 176, 36, 0.14)",
+            line_width=1.5, line_color="#fbb024",
+            annotation_text="🎯 50% - 61.8% Golden Pocket Entry Zone",
             annotation_position="top left",
+            annotation_font=dict(color="#fbb024", size=11),
             row=1, col=1
         )
+
+    # Trade Level Overlays (Entry, Stop Loss, T1, T2)
+    if show_levels and signal.signal_type != SignalType.WAIT:
+        if signal.entry_price:
+            fig.add_hline(y=signal.entry_price, line_dash="solid", line_color="#00d2ff", line_width=1.5,
+                          annotation_text=f"ENTRY: ₹{signal.entry_price:.1f}", annotation_position="bottom right",
+                          annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
+        if signal.stop_loss:
+            fig.add_hline(y=signal.stop_loss, line_dash="dash", line_color="#ff3355", line_width=1.5,
+                          annotation_text=f"STOP LOSS: ₹{signal.stop_loss:.1f}", annotation_position="top right",
+                          annotation_font=dict(color="#ff3355", size=10), row=1, col=1)
+        if signal.target1:
+            fig.add_hline(y=signal.target1, line_dash="dash", line_color="#05df72", line_width=1.5,
+                          annotation_text=f"T1 (+1.2x ATR): ₹{signal.target1:.1f}", annotation_position="bottom right",
+                          annotation_font=dict(color="#05df72", size=10), row=1, col=1)
+        if signal.target2:
+            fig.add_hline(y=signal.target2, line_dash="dot", line_color="#00d2ff", line_width=1.5,
+                          annotation_text=f"T2 (+2.5x ATR): ₹{signal.target2:.1f}", annotation_position="bottom right",
+                          annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
         
-    # Volume subplot
+    # Volume subplot with dynamic delta styling
     vol_colors = ["#05df72" if c >= o else "#ff3355" for c, o in zip(df["close"], df["open"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color=vol_colors, opacity=0.7), row=2, col=1)
+    fig.add_trace(go.Bar(
+        x=df.index, y=df["volume"], name="Volume", marker_color=vol_colors, opacity=0.75
+    ), row=2, col=1)
     
+    # Layout and UX Polishing
     fig.update_layout(
-        height=680,
+        height=700,
         template="plotly_dark",
+        paper_bgcolor="#080c14",
+        plot_bgcolor="#080c14",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=30, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        margin=dict(l=20, r=20, t=35, b=20),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(size=11, color="#8e9fb5"),
+            bgcolor="rgba(14, 20, 34, 0.7)"
+        ),
+        hovermode="x unified"
     )
+    fig.update_xaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
+    
     st.plotly_chart(fig, use_container_width=True)
+
 
 # ----- TAB 2: RISK & POSITION SIZER -----
 with tab_sizer:
