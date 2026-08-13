@@ -1,11 +1,11 @@
-"""Bar-by-bar historical replay and backtesting engine for JustNifty v2.0."""
+"""JustNifty v3.0 Institutional Bar-by-Bar Historical Simulator with TCA Friction & Quarter-Kelly Sizing."""
 
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 import pandas as pd
 from src.config import DEFAULT_CAPITAL, LOT_SIZE
 from src.strategy_rules import StrategyEngine, SignalType
-from src.options_engine import generate_option_trade_ticket
+from src.options_engine import generate_option_trade_ticket, calculate_tca_friction
 
 @dataclass
 class BacktestResults:
@@ -19,12 +19,14 @@ class BacktestEngine:
         self.strategy = StrategyEngine()
 
     def run_backtest(self, df_5m: pd.DataFrame) -> BacktestResults:
-        """Executes a chronological bar-by-bar simulation with 50% part-booking and breakeven trailing."""
+        """Executes a chronological bar-by-bar simulation with TCA friction deductions, 50% part-booking and breakeven trailing."""
         if df_5m.empty or len(df_5m) < 25:
             return BacktestResults(
                 summary={
                     "initial_capital": self.initial_capital,
                     "final_capital": self.initial_capital,
+                    "gross_pnl": 0.0,
+                    "total_tca": 0.0,
                     "pnl_rupees": 0.0,
                     "return_pct": 0.0,
                     "total_trades": 0,
@@ -39,12 +41,16 @@ class BacktestEngine:
         capital = self.initial_capital
         equity_curve = [capital]
         trade_log = []
+        total_tca_accumulated = 0.0
+        gross_pnl_accumulated = 0.0
         
         in_trade = False
         active_ticket: Optional[Dict[str, Any]] = None
         part_booked = False
         entry_time = None
         entry_idx = 0
+        
+        peak_capital = capital
         
         for i in range(25, len(df_5m)):
             bar = df_5m.iloc[i]
@@ -53,10 +59,13 @@ class BacktestEngine:
             low = float(bar["low"])
             bar_time_str = bar.name.strftime("%H:%M") if hasattr(bar.name, "strftime") else "12:00"
             
+            # Current drawdown for Kelly dampening
+            current_dd_pct = max((peak_capital - capital) / peak_capital, 0.0) if peak_capital > 0 else 0.0
+            
             if not in_trade:
                 signal = self.strategy.evaluate_bar(df_5m, current_idx=i)
                 if signal.signal_type in [SignalType.LONG, SignalType.SHORT, SignalType.LONG_3PM, SignalType.SHORT_3PM]:
-                    ticket = generate_option_trade_ticket(close, signal, capital)
+                    ticket = generate_option_trade_ticket(close, signal, capital, current_dd_pct)
                     if ticket.get("status") == "READY" and ticket.get("lots", 0) > 0:
                         in_trade = True
                         active_ticket = ticket
@@ -86,6 +95,7 @@ class BacktestEngine:
                     booked_lots = max(lots // 2, 1)
                     pnl_50 = (t1_prem - entry_prem) * booked_lots * LOT_SIZE
                     capital += pnl_50
+                    gross_pnl_accumulated += pnl_50
                     # Shift SL to Break-Even (entry premium)
                     active_ticket["sl_premium"] = entry_prem
                     
@@ -100,9 +110,21 @@ class BacktestEngine:
                     
                     pnl_rem = (exit_prem - entry_prem) * remaining_lots * LOT_SIZE
                     capital += pnl_rem
+                    gross_pnl_accumulated += pnl_rem
                     
                     pnl_first_half = (t1_prem - entry_prem) * booked_lots * LOT_SIZE if part_booked else 0.0
-                    trade_total_pnl = pnl_first_half + pnl_rem
+                    gross_trade_pnl = pnl_first_half + pnl_rem
+                    
+                    # Deduct full Indian Market TCA Friction (STT, Brokerage, GST, Slippage)
+                    tca = calculate_tca_friction(entry_prem, exit_prem, lots * LOT_SIZE, lots)
+                    friction = tca["total_friction"]
+                    net_trade_pnl = gross_trade_pnl - friction
+                    
+                    capital -= friction  # Deduct friction from account
+                    total_tca_accumulated += friction
+                    
+                    if capital > peak_capital:
+                        peak_capital = capital
                     
                     trade_log.append({
                         "entry_time": entry_time.strftime("%Y-%m-%d %H:%M") if hasattr(entry_time, "strftime") else str(entry_time),
@@ -112,8 +134,10 @@ class BacktestEngine:
                         "entry_prem": round(entry_prem, 2),
                         "exit_prem": round(exit_prem, 2),
                         "lots": lots,
-                        "pnl": round(trade_total_pnl, 2),
-                        "result": "WIN" if trade_total_pnl > 0 else "LOSS",
+                        "gross_pnl": round(gross_trade_pnl, 2),
+                        "tca_fees": round(friction, 2),
+                        "net_pnl": round(net_trade_pnl, 2),
+                        "result": "WIN" if net_trade_pnl > 0 else "LOSS",
                         "part_booked": part_booked
                     })
                     
@@ -121,16 +145,18 @@ class BacktestEngine:
                     in_trade = False
                     active_ticket = None
 
-        wins = [t for t in trade_log if t["pnl"] > 0]
-        losses = [t for t in trade_log if t["pnl"] <= 0]
+        wins = [t for t in trade_log if t["net_pnl"] > 0]
+        losses = [t for t in trade_log if t["net_pnl"] <= 0]
         win_rate = (len(wins) / len(trade_log) * 100.0) if trade_log else 0.0
-        total_pnl = capital - self.initial_capital
+        net_total_pnl = capital - self.initial_capital
         
         summary = {
             "initial_capital": round(self.initial_capital, 2),
             "final_capital": round(capital, 2),
-            "pnl_rupees": round(total_pnl, 2),
-            "return_pct": round((total_pnl / self.initial_capital) * 100.0, 2),
+            "gross_pnl": round(gross_pnl_accumulated, 2),
+            "total_tca": round(total_tca_accumulated, 2),
+            "pnl_rupees": round(net_total_pnl, 2),
+            "return_pct": round((net_total_pnl / self.initial_capital) * 100.0, 2),
             "total_trades": len(trade_log),
             "wins": len(wins),
             "losses": len(losses),

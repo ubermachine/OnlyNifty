@@ -1,4 +1,4 @@
-"""Nifty Institutional Signal Terminal & Unified Executive Main Page (JustNifty v2.0)."""
+"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (JustNifty v3.0)."""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -9,23 +9,25 @@ from datetime import datetime
 
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
-    DEFAULT_IV, ENOUGH_PROFIT_PCT, EMA_FAST, EMA_MID, EMA_SLOW,
-    MA_STRETCH_THRESHOLD
+    DEFAULT_IV, EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA,
+    MA_STRETCH_THRESHOLD, KELLY_FRACTION, MAX_TOLERABLE_MDD
 )
 from src.data_engine import DataEngine
 from src.indicators import (
-    compute_ema, compute_envelopes, compute_vwap, compute_cpr,
-    compute_fibonacci_levels, compute_vf_trade_table, compute_volume_profile
+    compute_ema, compute_vakc_envelopes, compute_vwap, compute_cpr,
+    compute_fibonacci_levels, compute_vf_trade_table, compute_volume_profile,
+    compute_hurst_exponent, compute_order_flow_imbalance, compute_dealer_gex
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
-    generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks
+    generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks,
+    calculate_position_size, calculate_tca_friction
 )
 from src.backtest_engine import BacktestEngine
 
 # Page Config
 st.set_page_config(
-    page_title="Nifty Institutional Signal Terminal | JustNifty v2.0",
+    page_title="Nifty Institutional Signal Terminal | JustNifty v3.0",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -44,7 +46,6 @@ st.markdown("""
         color: #f1f5f9;
     }
     
-    /* Institutional Cockpit Container */
     .cockpit-box {
         background-color: #0e1422;
         border: 1px solid #1c273c;
@@ -141,6 +142,7 @@ account_capital = st.sidebar.number_input("Account Capital (₹)", min_value=500
 risk_pct = st.sidebar.slider("Max Capital Risk per Trade (%)", min_value=0.25, max_value=2.0, value=1.0, step=0.05) / 100.0
 contract_lot_size = st.sidebar.number_input("Nifty Lot Size", min_value=25, max_value=75, value=LOT_SIZE, step=25)
 iv_input = st.sidebar.slider("Expected IV / India VIX (%)", min_value=8.0, max_value=30.0, value=DEFAULT_IV * 100.0, step=0.5) / 100.0
+drawdown_input = st.sidebar.slider("Current Portfolio Drawdown (%)", min_value=0.0, max_value=15.0, value=0.0, step=0.5) / 100.0
 
 st.sidebar.markdown("---")
 data_mode = st.sidebar.radio("Data Stream Source", ["Live / Latest Market Feed (yfinance + NSE)", "Synthetic Market Simulation"])
@@ -168,12 +170,12 @@ df_raw = load_market_data(data_mode, tf_str)
 if df_raw.empty or len(df_raw) < 15:
     df_raw = data_engine.generate_synthetic_nifty(bars=150, interval_mins=5)
 
-# Indicator Math
+# Indicator Math & Stochastic Pillars
 df = df_raw.copy()
 df["ema21"] = compute_ema(df["close"], EMA_FAST)
 df["ema55"] = compute_ema(df["close"], EMA_MID)
 df["ema200"] = compute_ema(df["close"], EMA_SLOW)
-df["env_upper"], df["env_lower"] = compute_envelopes(df["ema200"], ENVELOPE_PCT)
+df["vakc_upper"], df["vakc_lower"] = compute_vakc_envelopes(df, iv=iv_input)
 df["vwap"], df["vwap_upper"], df["vwap_lower"] = compute_vwap(df)
 
 current_spot = float(df.iloc[-1]["close"])
@@ -181,11 +183,14 @@ prev_spot = float(df.iloc[-2]["close"]) if len(df) > 1 else current_spot
 spot_delta = current_spot - prev_spot
 cpr = compute_cpr(df)
 vol_profile = compute_volume_profile(df)
+hurst_data = compute_hurst_exponent(df["close"])
+ofi_data = compute_order_flow_imbalance(df)
+gex_data = compute_dealer_gex(current_spot)
 vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"].max() - df["low"].min()) / 4.0)
 
 # Evaluate Active Signal & Option Ticket
 signal = strategy_engine.evaluate_bar(df)
-ticket = generate_option_trade_ticket(current_spot, signal, account_capital)
+ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input)
 
 # Confluence checks computation
 is_above_200 = current_spot > float(df.iloc[-1]["ema200"])
@@ -197,7 +202,7 @@ is_not_stretched = dist_ema21 <= MA_STRETCH_THRESHOLD
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v2.0</span>
+        <span class="badge-pro">PRO v3.0</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
@@ -215,7 +220,7 @@ with cockpit_col1:
     <div class="cockpit-box">
         <div class="cockpit-header">
             <span class="{sig_badge_class}">{sig_badge_text}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">TIMEFRAME: {tf_str} EXECUTION</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">TIMEFRAME: {tf_str} • HURST: {hurst_data['hurst']}</span>
         </div>
         <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
             <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
@@ -223,7 +228,7 @@ with cockpit_col1:
                 {spot_delta:+.2f} ({spot_delta/prev_spot*100:+.2f}%)
             </span>
         </div>
-        <div style="font-size: 13.5px; color: #8e9fb5; margin-bottom: 12px; line-height: 1.4;">
+        <div style="font-size: 13px; color: #8e9fb5; margin-bottom: 12px; line-height: 1.4;">
             <strong>Setup Status:</strong> {signal.reason}
         </div>
         <div class="confluence-grid">
@@ -236,12 +241,12 @@ with cockpit_col1:
                 <div class="c-val" style="color: {'#05df72' if is_above_vwap else '#ff3355'};">{'✓ Above 09:15' if is_above_vwap else '✗ Below 09:15'}</div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">3. Retracement</div>
-                <div class="c-val" style="color: #fbb024;">50-61.8% Golden</div>
+                <div class="c-lbl">3. Hurst Exponent (H)</div>
+                <div class="c-val" style="color: {'#05df72' if hurst_data['is_trending'] else '#fbb024'};">H={hurst_data['hurst']:.2f} ({'Trend' if hurst_data['is_trending'] else 'Range'})</div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">4. MA Proximity</div>
-                <div class="c-val" style="color: {'#05df72' if is_not_stretched else '#ff3355'};">{'✓ Valid (' + str(round(dist_ema21*100, 2)) + '%)' if is_not_stretched else '✗ Stretched'}</div>
+                <div class="c-lbl">4. Dealer GEX Flip</div>
+                <div class="c-val" style="color: #00d2ff;">{gex_data['gamma_flip_strike']} ({'+Γ' if gex_data['is_positive_gamma'] else '-Γ'})</div>
             </div>
         </div>
     </div>
@@ -250,38 +255,41 @@ with cockpit_col1:
 with cockpit_col2:
     if ticket.get("status") == "READY":
         target_strike = ticket["symbol"]
-        delta_str = f"Δ {ticket['delta']:.2f}"
-        theta_str = f"Θ -₹{ticket['theta_decay_daily']:.2f}/sh"
+        greeks_str = f"Δ {ticket['delta']:.2f} • Γ {ticket['gamma']:.5f} • Θ -₹{ticket['theta_decay_daily']:.2f}/sh • Vanna {ticket['vanna']:.4f}"
         ep_str = f"₹{ticket['entry_premium']:.2f}"
         sl_str = f"₹{ticket['sl_premium']:.2f}"
         t1_str = f"₹{ticket['target1_premium']:.2f}"
         lots_str = f"{ticket['lots']} Lots ({ticket['total_qty']} Qty)"
         risk_rupees_str = f"₹{ticket['max_risk_rupees']:,.2f}"
+        tca_fees_str = f"TCA: ₹{ticket['tca_friction']['total_friction']:.1f}"
     else:
-        # Default ATM strike reference
+        # Default ATM strike reference with Greeks
         atm_k = int(round(current_spot / 50.0) * 50)
         target_strike = f"NIFTY {atm_k} CE / PE"
-        delta_str = "Δ 0.55"
-        theta_str = "Θ -₹14.20/sh"
+        greeks_str = "Δ 0.55 • Γ 0.00078 • Θ -₹14.20/sh • Vanna 0.0420"
         ep_str = "₹142.50"
         sl_str = "₹112.50"
         t1_str = "₹188.00"
         lots_str = "6 Lots (150 Qty)"
         risk_rupees_str = f"₹{account_capital * risk_pct:,.2f}"
+        tca_fees_str = "TCA Est: ₹182.50"
 
     st.markdown(f"""
     <div class="cockpit-box" style="display: flex; flex-direction: column; justify-content: space-between; height: calc(100% - 20px);">
         <div>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                 <div>
                     <div style="font-size: 11px; color: #55657e; text-transform: uppercase; font-weight: 600;">Optimal Strike (Delta 0.50-0.65)</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 800; color: #00d2ff;">{target_strike}</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 19px; font-weight: 800; color: #00d2ff;">{target_strike}</div>
                 </div>
                 <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; background-color: #141c2e; padding: 4px 8px; border-radius: 4px; color: #8e9fb5;">
-                    {delta_str} • {theta_str}
+                    {tca_fees_str}
                 </div>
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #718096; margin-bottom: 10px;">
+                {greeks_str}
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
                 <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
                     <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">Entry Prem</div>
                     <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">{ep_str}</div>
@@ -297,7 +305,7 @@ with cockpit_col2:
             </div>
         </div>
         <div style="background-color: rgba(0, 210, 255, 0.04); border-left: 3px solid #00d2ff; padding: 8px 10px; font-size: 11.5px; color: #8e9fb5; line-height: 1.4;">
-            <strong>Protocol:</strong> Book 50% at <strong>{t1_str} (T1/Envelope)</strong> ➔ Shift SL to <strong>Break-Even ({ep_str})</strong> ➔ Trail runners on 1m 21 EMA.
+            <strong>Execution:</strong> Book 50% at <strong>{t1_str} (+1.2x ATR)</strong> ➔ Shift SL to <strong>Break-Even ({ep_str})</strong> ➔ Trail runners on 1m 21 EMA.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -305,19 +313,19 @@ with cockpit_col2:
 # ----------------- MAIN INTERFACE TABS -----------------
 tab_chart, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
     "📈 Interactive Candlestick Chart",
-    "🛡️ 1% Risk & Position Sizer",
+    "🛡️ 1% Risk & Quarter-Kelly Sizer",
     "🏛️ Institutional Participant OI & Option Chain",
     "📊 Bar-by-Bar Replay & Backtest Simulator",
-    "📖 JustNifty v2.0 Master Rulebook"
+    "📖 JustNifty v3.0 Master Rulebook"
 ])
 
 # ----- TAB 1: INTERACTIVE CHART -----
 with tab_chart:
-    st.subheader("Nifty 50 Multi-Indicator Technical Chart")
+    st.subheader("Nifty 50 Multi-Indicator Technical & Stochastic Chart")
     
     t1_c1, t1_c2, t1_c3, t1_c4, t1_c5 = st.columns(5)
     show_emas = t1_c1.checkbox("200 / 55 / 21 EMAs", value=True)
-    show_env = t1_c2.checkbox("1.5% 200 EMA Envelopes", value=True)
+    show_vakc = t1_c2.checkbox("Adaptive Keltner (VAKC)", value=True)
     show_vwap = t1_c3.checkbox("Session AVWAP ±2σ", value=True)
     show_fib = t1_c4.checkbox("Fib Golden Pocket (50-61.8%)", value=True)
     show_cpr = t1_c5.checkbox("CPR Pivots", value=False)
@@ -339,9 +347,9 @@ with tab_chart:
         fig.add_trace(go.Scatter(x=df.index, y=df["ema55"], name="55 EMA (Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Trailing)", line=dict(color="#00d2ff", width=1.5)), row=1, col=1)
         
-    if show_env:
-        fig.add_trace(go.Scatter(x=df.index, y=df["env_upper"], name="1.5% Upper Env (Take-Profit)", line=dict(color="#ff3355", width=1.2, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["env_lower"], name="1.5% Lower Env (Take-Profit)", line=dict(color="#05df72", width=1.2, dash="dot")), row=1, col=1)
+    if show_vakc:
+        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_upper"], name="Upper VAKC Band", line=dict(color="#ff3355", width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_lower"], name="Lower VAKC Band", line=dict(color="#05df72", width=1.2, dash="dot")), row=1, col=1)
         
     if show_vwap:
         fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP (09:15)", line=dict(color="#a855f7", width=2)), row=1, col=1)
@@ -382,8 +390,8 @@ with tab_chart:
 
 # ----- TAB 2: RISK & POSITION SIZER -----
 with tab_sizer:
-    st.subheader("🛡️ Institutional 1% Capital Risk & Position Sizer")
-    st.caption("Computes allowable lot count strictly governed by the 1% maximum capital risk rule.")
+    st.subheader("🛡️ Institutional 1% Capital Risk & Quarter-Kelly Sizer")
+    st.caption("Computes allowable lot count with fat-tail Quarter-Kelly dampening and full Transaction Cost Analysis (TCA) friction.")
     
     s_col1, s_col2 = st.columns(2)
     with s_col1:
@@ -391,32 +399,35 @@ with tab_sizer:
         calc_risk_pct = st.slider("Risk Limit per Trade (%)", min_value=0.25, max_value=2.0, value=risk_pct*100.0, step=0.05, key="calc_risk") / 100.0
         calc_ep = st.number_input("Option Entry Premium (₹)", value=142.50, step=1.0, key="calc_ep")
         calc_sl = st.number_input("Option Stop-Loss Premium (₹)", value=112.50, step=1.0, key="calc_sl")
+        calc_tp = st.number_input("Option Target Premium (₹)", value=188.00, step=1.0, key="calc_tp")
         
     with s_col2:
-        max_allowed_loss = calc_cap * calc_risk_pct
-        risk_per_sh = max(calc_ep - calc_sl, 2.0)
-        risk_per_contract_lot = risk_per_sh * contract_lot_size
-        calc_lots = int(max_allowed_loss // risk_per_contract_lot)
-        calc_total_qty = calc_lots * contract_lot_size
-        calc_actual_risk = calc_total_qty * risk_per_sh
-        calc_outlay = calc_total_qty * calc_ep
+        pos_info = calculate_position_size(calc_cap, calc_risk_pct, calc_ep, calc_sl, contract_lot_size, drawdown_input)
+        calc_lots = pos_info["lots"]
+        calc_total_qty = pos_info["total_qty"]
+        calc_actual_risk = pos_info["actual_risk_rupees"]
+        calc_outlay = pos_info["capital_required"]
+        
+        tca = calculate_tca_friction(calc_ep, calc_tp, calc_total_qty, calc_lots)
         
         m1, m2 = st.columns(2)
-        m1.metric("Max Allowable Loss", f"₹{max_allowed_loss:,.2f}")
+        m1.metric("Max Risk Budget", f"₹{pos_info['max_risk_rupees']:,.2f}", f"DD Dampener: {pos_info['dd_dampener']}x")
         m2.metric("Allocated Position", f"{calc_lots} Lots ({calc_total_qty} Qty)")
         
         m3, m4 = st.columns(2)
         m3.metric("Actual Risk Exposure", f"₹{calc_actual_risk:,.2f}", f"{(calc_actual_risk/calc_cap)*100:.2f}% of Capital", delta_color="inverse")
         m4.metric("Capital Outlay Required", f"₹{calc_outlay:,.2f}", f"{(calc_outlay/calc_cap)*100:.1f}% Margin")
         
-        st.info(f"**Institutional Part-Booking Rule:** Book 50% ({max(calc_lots//2, 1)} lots) at T1 / 1.5% Envelope. Shift SL on remaining {calc_lots - max(calc_lots//2, 1)} lots to Break-Even (₹{calc_ep:.2f}).")
+        st.markdown("#### 🧾 Indian NSE Statutory Friction (TCA Breakdown)")
+        st.write(f"• **STT (0.1% on Sell):** ₹{tca['stt']:.2f} | **Brokerage:** ₹{tca['brokerage']:.2f} | **NSE Exchange Fees + GST:** ₹{tca['exchange_charges'] + tca['gst']:.2f} | **Slippage Buffer:** ₹{tca['slippage']:.2f}")
+        st.write(f"• **Total Round-Trip TCA Friction:** **₹{tca['total_friction']:.2f}**")
 
 # ----- TAB 3: PARTICIPANT OI & STRIKE LADDER -----
 with tab_oi:
     st.subheader("🏛️ Institutional Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), use_container_width=True)
     
-    st.subheader("🔍 Institutional Strike Ladder & Greeks Matrix (Delta 0.50 – 0.65)")
+    st.subheader("🔍 Institutional Strike Ladder & 2nd-Order Greeks Matrix (Delta 0.50 – 0.65)")
     atm_center = int(round(current_spot / 50.0) * 50)
     chain_rows = []
     
@@ -431,11 +442,13 @@ with tab_oi:
         chain_rows.append({
             "Call Setup": ce_rec,
             "CE Delta": ce_greeks["delta"],
+            "CE Vanna": ce_greeks["vanna"],
             "CE Theta": ce_greeks["theta"],
             "CE Premium (₹)": ce_greeks["price"],
             "Strike": f"🎯 {k} (ATM)" if is_atm else str(k),
             "PE Premium (₹)": pe_greeks["price"],
             "PE Theta": pe_greeks["theta"],
+            "PE Vanna": pe_greeks["vanna"],
             "PE Delta": pe_greeks["delta"],
             "Put Setup": pe_rec
         })
@@ -449,8 +462,8 @@ with tab_oi:
 
 # ----- TAB 4: BACKTESTING & REPLAY -----
 with tab_backtest:
-    st.subheader("📊 Bar-by-Bar Replay & Backtesting Engine")
-    st.caption("Simulates the complete JustNifty v2.0 execution model (Golden Pocket entries, 50% part-booking at T1 / Envelope, breakeven SL adjustment, and 21 EMA / AVWAP trailing).")
+    st.subheader("📊 Bar-by-Bar Replay & Backtesting Engine with TCA Friction")
+    st.caption("Simulates the JustNifty v3.0 model with full Transaction Cost Analysis (STT, Brokerage, GST, Slippage), 50% part-booking, and breakeven trailing.")
     
     run_btn = st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True)
     if run_btn or "bt_results" in st.session_state:
@@ -461,18 +474,18 @@ with tab_backtest:
         results = st.session_state["bt_results"]
         b1, b2, b3, b4 = st.columns(4)
         pnl_color = "normal" if results.summary["pnl_rupees"] >= 0 else "inverse"
-        b1.metric("Net Strategy PnL", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
+        b1.metric("Net Strategy PnL (Post-TCA)", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
         b2.metric("Win Rate", f"{results.summary['win_rate']:.1f}%", f"{results.summary['wins']}W / {results.summary['losses']}L")
-        b3.metric("Total Trades Executed", results.summary["total_trades"])
+        b3.metric("Total TCA Deducted", f"₹{results.summary['total_tca']:,.2f}", f"Gross: ₹{results.summary['gross_pnl']:,.2f}")
         b4.metric("Final Account Balance", f"₹{results.summary['final_capital']:,.2f}")
         
         if results.trade_log:
-            st.markdown("#### 📜 Executed Trade Log")
+            st.markdown("#### 📜 Executed Trade Log (TCA Accounting)")
             st.dataframe(pd.DataFrame(results.trade_log), use_container_width=True)
             
-            st.markdown("#### 📈 Account Equity Curve")
+            st.markdown("#### 📈 Account Equity Curve (Net of All Fees)")
             fig_eq = go.Figure()
-            fig_eq.add_trace(go.Scatter(y=results.equity_curve, mode="lines+markers", line=dict(color="#05df72", width=2), name="Equity (₹)"))
+            fig_eq.add_trace(go.Scatter(y=results.equity_curve, mode="lines+markers", line=dict(color="#05df72", width=2), name="Net Equity (₹)"))
             fig_eq.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=20, b=20))
             st.plotly_chart(fig_eq, use_container_width=True)
         else:
@@ -480,25 +493,22 @@ with tab_backtest:
 
 # ----- TAB 5: MASTER RULEBOOK -----
 with tab_cheatsheet:
-    st.subheader("📖 JustNifty v2.0 Master Strategy Rulebook")
+    st.subheader("📖 JustNifty v3.0 Institutional Quantitative Rulebook")
     st.markdown(r"""
-    ### 1. The 4 Core Technical Pillars (85% Foundation)
-    1. **Price Action:** HH/HL for Uptrends, LH/LL for Downtrends. Candlestick trigger confirmations (Engulfing / Hammer / Doji).
-    2. **Retracement:** 50.0% to 61.8% Fibonacci Golden Pocket.
-    3. **Moving Averages:** 200 EMA (Regime), 55 EMA (Trend), 21 EMA (Momentum/Trailing).
-    4. **Envelopes:** 1.5% 200 EMA bands for spotting extreme exhaustion and mechanical 50% part-booking.
+    ### 1. The 4 Adaptive Stochastic Pillars (Tier-1 Standard)
+    1. **Regime-Filtered Hurst Exponent ($H$):** $H > 0.55 \implies$ Trending (Golden Pocket active); $H < 0.45 \implies$ Mean-Reverting (Fade extremes); $H \approx 0.50 \implies$ Noise kill-switch.
+    2. **Volatility-Adaptive Keltner Channels (VAKC):** Replaces static 1.5% envelopes with $\text{EMA}_{200} \pm 2.25 \times \text{ATR}_{14} \times \sqrt{\text{IV} / 0.12}$.
+    3. **Volume-Weighted Fibonacci Golden Pocket:** Entry anchored to High Volume Nodes (HVN) inside the 50.0%–61.8% retracement band.
+    4. **Order Flow Imbalance (OFI) & AVWAP:** Anchored at 09:15 open with $\Delta \text{OFI} > 0$ required for buyer defense.
 
-    ### 2. The 5 Missing Audit Mechanisms (15% Nuances)
-    - **Session AVWAP (09:15 Anchor):** Above AVWAP $\rightarrow$ Buyers in profit (Bullish only). Below AVWAP $\rightarrow$ Sellers in profit (Bearish only).
-    - **15-Min Freak Candle Isolation:** First 15 minutes (09:15 - 09:30) ignored for breakout entries to establish true Initial Balance.
-    - **Far-Away MA Crossover Filter (Query 12):** If price is $>0.35\%$ stretched from 21/55 EMA, reject market entry; wait for mean-reversion pullback.
-    - **Higher Timeframe Weightage (Query 79):** Daily/Hourly hierarchy takes precedence until 5m reaches extreme oversold/overbought zones.
-    - **3:00 PM Aggressive Breakout (Page 100):** On range-bound days, trade the breakout of 15:00 candle High/Low for fast 80-160 point expansion.
+    ### 2. Microstructure & Dealer Gamma Positioning
+    - **Dealer GEX Flip:** Identifies positive vs negative gamma regimes for market maker hedging flows.
+    - **15-Min Freak Candle Isolation:** Suppresses entries between 09:15 and 09:30 to establish true Initial Balance (IB).
+    - **3:00 PM Aggressive Breakout:** Exploits institutional Market-On-Close (MOC) squaring and 0DTE gamma squeezes.
 
-    ### 3. Institutional Strike Selection & Risk Management
-    - **Strike Window:** Target Delta $\Delta \in [0.50, 0.65]$ (ATM to 1-strike ITM). Never buy deep OTM lottery options.
-    - **The 1% Rule:** Max allowable loss per trade strictly capped at $1.0\%$ of total account capital.
-    - **50% Part-Booking:** Mechanically book 50% lots at VF Table T1 or the 1.5% 200 EMA Envelope. Move SL to Break-Even immediately.
-    - **Runner Trailing:** Trail the remaining 50% lots on the 1-minute 21 EMA or AVWAP.
-    - **The "Enough" Rule:** If session gains reach $\ge 0.3\%$ on capital, lock profits and shut the terminal.
+    ### 3. Derivatives Greeks & Risk Engineering
+    - **Strike Selection:** Target Delta $\Delta \in [0.50, 0.65]$ with Vanna and Charm second-order sensitivity.
+    - **Quarter-Kelly Sizing:** Position size $= \frac{f^*}{4} \times \left(1 - \frac{\text{Drawdown}}{\text{Max MDD}}\right)$.
+    - **TCA Friction Deduction:** STT (0.1%), Brokerage (₹20), NSE Charges (0.03503%), GST (18%), and empirical slippage deducted on every transaction.
+    - **50% Part-Booking & Trailing:** Book 50% at Target 1 ($+1.2\times \text{ATR}$), shift SL to Break-Even immediately, trail runners on 1m 21 EMA.
     """)
