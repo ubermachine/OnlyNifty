@@ -16,6 +16,8 @@ from src.indicators import (
     compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers,
     compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances
 )
+from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
+
 
 class SignalType(Enum):
     WAIT = "WAIT"
@@ -51,7 +53,10 @@ class Signal:
             self.pyramid_trigger = round(self.entry_price + 25.0, 2)
 
 class StrategyEngine:
+    """Vectorized and streaming bar-by-bar JustNifty v3.4 institutional strategy rules evaluator."""
     def __init__(self):
+        self.kalman_filter = KalmanFilterTrendEstimator()
+        self.markov_switcher = MarkovRegimeSwitcher()
         self.session_losses: int = 0
         self.last_session_date: Optional[Any] = None
 
@@ -159,9 +164,14 @@ class StrategyEngine:
         gap_info = compute_pre_open_gap_filter(sub_df, prev_close=prev_close, pre_open_data=pre_open_gap)
         cpr_info = compute_cpr(df_daily if df_daily is not None else sub_df)
         
+        # Latent Kalman Spot Velocity & Markov Regime Model
+        kalman_price, kalman_vel, kalman_z = self.kalman_filter.update(close)
+        markov_info = self.markov_switcher.infer_regimes(sub_df)
+        
         ema200 = float(ema200_series.iloc[-1])
         ema55 = float(ema55_series.iloc[-1])
         ema21 = float(ema21_series.iloc[-1])
+
         current_vwap = float(vwap_series.iloc[-1])
         upper_2sd = float(vwap_up_2sd.iloc[-1])
         lower_2sd = float(vwap_low_2sd.iloc[-1])
@@ -412,8 +422,11 @@ class StrategyEngine:
             details={
                 "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                 "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
+                "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow,
+                "kalman_price": kalman_price, "kalman_velocity": kalman_vel, "kalman_vel_zscore": kalman_z,
+                "markov_regime": markov_info
             }
         )
+
 
 

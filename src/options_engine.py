@@ -871,8 +871,137 @@ def calculate_pcr_and_max_pain(option_chain_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def compute_full_chain_gex_profile(
+    option_chain_df: pd.DataFrame,
+    spot: float,
+    iv: float = DEFAULT_IV,
+    t_days: float = 3.5
+) -> Dict[str, Any]:
+    """
+    Vectorized Institutional Dealer Gamma Exposure (GEX) Profile across full Option Chain:
+    
+    Call GEX ($) = Gamma_C * Call_OI * Spot * Lot_Size * 0.01 / 10^7 (Cr ₹)
+    Put GEX ($) = - Gamma_P * Put_OI * Spot * Lot_Size * 0.01 / 10^7 (Cr ₹)
+    Net GEX = Call GEX + Put GEX
+    
+    Identifies:
+    1. Call Wall (Major Resistance / Dealer Short Gamma supply).
+    2. Put Wall (Major Support / Dealer Short Put peg).
+    3. Zero-GEX Level (Regime switch from positive mean-reverting gamma to negative accelerating gamma).
+    """
+    if option_chain_df.empty or "strike" not in option_chain_df.columns:
+        return {
+            "call_wall": round(spot + 150.0, 2),
+            "put_wall": round(spot - 150.0, 2),
+            "zero_gex_strike": round(spot, 2),
+            "net_gex_cr": 0.0,
+            "is_positive_gamma": True,
+            "gex_df": pd.DataFrame()
+        }
+
+    strikes = option_chain_df["strike"].values
+    ce_ois = option_chain_df.get("ce_oi", pd.Series(np.zeros(len(strikes)))).fillna(0).values
+    pe_ois = option_chain_df.get("pe_oi", pd.Series(np.zeros(len(strikes)))).fillna(0).values
+
+    gex_records = []
+    total_net_gex = 0.0
+    zero_gex_strike = spot
+    min_abs_net_gex = float("inf")
+
+    for s, c_oi, p_oi in zip(strikes, ce_ois, pe_ois):
+        g_c = black_scholes_greeks(spot, s, t_days=t_days, sigma=iv, is_call=True)["gamma"]
+        g_p = black_scholes_greeks(spot, s, t_days=t_days, sigma=iv, is_call=False)["gamma"]
+
+        call_gex_cr = (g_c * c_oi * spot * LOT_SIZE * 0.01) / 1e7
+        put_gex_cr = - (g_p * p_oi * spot * LOT_SIZE * 0.01) / 1e7
+        net_gex_cr = call_gex_cr + put_gex_cr
+        total_net_gex += net_gex_cr
+
+        if abs(net_gex_cr) < min_abs_net_gex:
+            min_abs_net_gex = abs(net_gex_cr)
+            zero_gex_strike = s
+
+        gex_records.append({
+            "strike": float(s),
+            "call_oi": int(c_oi),
+            "put_oi": int(p_oi),
+            "call_gex_cr": round(float(call_gex_cr), 3),
+            "put_gex_cr": round(float(put_gex_cr), 3),
+            "net_gex_cr": round(float(net_gex_cr), 3)
+        })
+
+    gex_df = pd.DataFrame(gex_records)
+    
+    # Identify Walls
+    max_ce_idx = gex_df["call_oi"].idxmax() if not gex_df.empty else 0
+    max_pe_idx = gex_df["put_oi"].idxmax() if not gex_df.empty else 0
+    call_wall = float(gex_df.loc[max_ce_idx, "strike"]) if not gex_df.empty else spot + 100.0
+    put_wall = float(gex_df.loc[max_pe_idx, "strike"]) if not gex_df.empty else spot - 100.0
+
+    return {
+        "call_wall": round(call_wall, 2),
+        "put_wall": round(put_wall, 2),
+        "zero_gex_strike": round(zero_gex_strike, 2),
+        "total_net_gex_cr": round(total_net_gex, 2),
+        "is_positive_gamma": total_net_gex >= 0,
+        "gamma_regime": "DEALER_LONG_GAMMA (Mean-Reverting & Low Volatility)" if total_net_gex >= 0 else "DEALER_SHORT_GAMMA (High Volatility & Accelerating Velocity)",
+        "gex_df": gex_df
+    }
+
+
+def construct_ratio_spread(
+    spot: float,
+    is_call: bool = True,
+    lots: int = 2,
+    t_days: float = 3.5,
+    iv: float = DEFAULT_IV
+) -> Dict[str, Any]:
+    """
+    Constructs an Institutional 1:2 Ratio Spread (Buy 1 ATM, Sell 2 OTM):
+    Used when IV is elevated (> 14%) to achieve zero theta decay and wide breakeven wings.
+    """
+    atm_k = int(round(spot / 50.0) * 50)
+    wing_offset = 100 if is_call else -100
+    otm_k = atm_k + wing_offset
+
+    long_greeks = black_scholes_greeks(spot, atm_k, t_days=t_days, sigma=iv, is_call=is_call)
+    short_greeks = black_scholes_greeks(spot, otm_k, t_days=t_days, sigma=iv, is_call=is_call)
+
+    p_long = long_greeks["price"]
+    p_short = short_greeks["price"]
+
+    # 1 Long : 2 Short
+    net_premium_cost = p_long - (2.0 * p_short)
+    is_net_credit = net_premium_cost <= 0
+    spread_width = abs(otm_k - atm_k)
+
+    max_profit_pts = spread_width - net_premium_cost if not is_net_credit else spread_width + abs(net_premium_cost)
+    upper_breakeven = otm_k + max_profit_pts if is_call else otm_k - max_profit_pts
+
+    net_delta = long_greeks["delta"] - (2.0 * short_greeks["delta"])
+    net_theta = long_greeks["theta"] - (2.0 * short_greeks["theta"])
+    net_vega = long_greeks["vega"] - (2.0 * short_greeks["vega"])
+
+    opt_type = "CE" if is_call else "PE"
+
+    return {
+        "spread_name": f"1:2 {opt_type} Ratio Spread",
+        "long_leg": {"strike": atm_k, "qty_multiplier": 1, "premium": p_long, "symbol": f"NIFTY {atm_k} {opt_type}"},
+        "short_leg": {"strike": otm_k, "qty_multiplier": 2, "premium": p_short, "symbol": f"NIFTY {otm_k} {opt_type}"},
+        "net_entry_cost_pts": round(net_premium_cost, 2),
+        "is_net_credit": is_net_credit,
+        "max_profit_pts": round(max_profit_pts, 2),
+        "max_profit_strike": otm_k,
+        "breakeven_point": round(upper_breakeven, 2),
+        "net_delta": round(net_delta, 3),
+        "net_theta_daily": round(net_theta, 2),
+        "net_vega": round(net_vega, 2)
+    }
+
+
 def select_institutional_strike(
     spot: float,
+
     is_call: bool,
     t_days: float = 4.0,
     iv: float = DEFAULT_IV,

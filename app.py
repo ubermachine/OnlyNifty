@@ -25,10 +25,12 @@ from src.options_engine import (
     generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks,
     calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
-    calculate_adaptive_tca_friction_multi_tier
+    calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread
 )
+from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
+
 
 
 
@@ -234,11 +236,17 @@ is_above_vwap = current_spot > float(df.iloc[-1]["vwap"])
 dist_ema21 = abs(current_spot - float(df.iloc[-1]["ema21"])) / current_spot
 is_not_stretched = dist_ema21 <= MA_STRETCH_THRESHOLD
 
+# Latent Kalman & Markov Regime inference
+kalman_engine = KalmanFilterTrendEstimator()
+df_kalman = kalman_engine.filter_series(df["close"])
+markov_engine = MarkovRegimeSwitcher()
+regime_state = markov_engine.infer_regimes(df)
+
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v3.3</span>
+        <span class="badge-pro">PRO v3.4</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
@@ -256,7 +264,7 @@ with cockpit_col1:
     <div class="cockpit-box">
         <div class="cockpit-header">
             <span class="{sig_badge_class}">{sig_badge_text}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">HTF: {htf_data['confluence_regime']} • HURST: {hurst_data['hurst']}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">REGIME: {regime_state['active_regime']} • HTF: {htf_data['confluence_regime']}</span>
         </div>
         <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
             <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
@@ -275,8 +283,10 @@ with cockpit_col1:
                 </div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">2. Session AVWAP</div>
-                <div class="c-val" style="color: {'#05df72' if is_above_vwap else '#ff3355'};">{'✓ Above 09:15' if is_above_vwap else '✗ Below 09:15'}</div>
+                <div class="c-lbl">2. Kalman Velocity</div>
+                <div class="c-val" style="color: {'#05df72' if df_kalman['kalman_velocity'].iloc[-1] >= 0 else '#ff3355'};">
+                    V={df_kalman['kalman_velocity'].iloc[-1]:+.2f} pts (Z={df_kalman['kalman_vel_zscore'].iloc[-1]:.1f})
+                </div>
             </div>
             <div class="confluence-cell">
                 <div class="c-lbl">3. Order Flow Delta</div>
@@ -289,6 +299,7 @@ with cockpit_col1:
         </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 
 with cockpit_col2:
@@ -766,7 +777,19 @@ with tab_sizer:
 
 # ----- TAB 3: PARTICIPANT OI & LIVE OPTION CHAIN -----
 with tab_oi:
-    st.subheader("🏛️ Institutional Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
+    st.subheader("🏛️ Institutional Heavyweight Breadth & Participant-Wise Open Interest")
+    
+    # Heavyweight Flow Index (HFI)
+    hfi_res = data_engine.fetch_heavyweight_flow_index()
+    hfi_col1, hfi_col2, hfi_col3 = st.columns([1.2, 1.0, 1.0])
+    hfi_col1.metric("Heavyweight Flow Index (HFI)", f"{hfi_res['hfi_score']:+.2f}", hfi_res["breadth_bias"][:25])
+    hfi_col2.metric("Top 5 Advances / Declines", f"{hfi_res['advances']} Adv / {hfi_res['declines']} Dec", f"Top 5 Weight: {hfi_res['total_top5_weight_pct']}%")
+    hfi_col3.metric("Institutional Confluence Confidence", hfi_res["confidence"], "Inter-Market Confluence")
+    
+    with st.expander("📊 Top 5 Nifty Heavyweight Real-Time Constituent Monitor (41.2% Index Weight)", expanded=False):
+        st.dataframe(pd.DataFrame(hfi_res["constituents"]), hide_index=True, use_container_width=True)
+        
+    st.markdown("#### 🏛️ Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), use_container_width=True)
     
     st.markdown("---")
@@ -777,6 +800,7 @@ with tab_oi:
         ["Official NSE Live Option Chain (jugaad-data)", "Black-Scholes Greek Surface Simulation"],
         horizontal=True
     )
+
     
     if "Official" in oc_mode:
         live_oc_data = load_live_option_chain_data()
@@ -904,14 +928,22 @@ with tab_backtest:
         b3.metric("Profit Factor", f"{s.get('profit_factor', 0):.2f}", f"Payoff: {s.get('payoff_ratio', 0):.2f}x")
         b4.metric("Total TCA Deducted", f"₹{s.get('total_tca', 0):,.2f}", f"Gross: ₹{s.get('gross_pnl', 0):,.2f}")
         
-        # Row 2: Institutional Risk Ratios
+        # Row 2: Institutional Risk Ratios & VaR
         r1, r2, r3, r4 = st.columns(4)
         r1.metric("Sharpe Ratio (Annualized)", f"{s.get('sharpe_ratio', 0):.2f}", "Zero-Risk Benchmark")
         r2.metric("Sortino Ratio", f"{s.get('sortino_ratio', 0):.2f}", "Downside Semi-Dev")
         r3.metric("Calmar Ratio", f"{s.get('calmar_ratio', 0):.2f}", f"MDD: {s.get('max_drawdown_pct', 0):.1f}%")
         r4.metric("Ulcer Index (UI)", f"{s.get('ulcer_index', 0):.2f}", f"Martin: {s.get('martin_ratio', 0):.2f}")
         
+        # Row 3: Parametric & Historical Value at Risk (VaR)
+        v1, v2, v3, v4 = st.columns(4)
+        v1.metric("VaR 95% (1-Trade)", f"{s.get('var_95_pct', 1.0):.2f}%", f"-₹{s.get('var_95_rupees', 5000):,.0f}")
+        v2.metric("CVaR 95% (Expected Shortfall)", f"{s.get('cvar_95_pct', 1.5):.2f}%", f"-₹{s.get('cvar_95_rupees', 7500):,.0f}")
+        v3.metric("VaR 99% (Tail Risk)", f"{s.get('var_99_pct', 2.0):.2f}%", f"-₹{s.get('var_99_rupees', 10000):,.0f}")
+        v4.metric("CVaR 99% (Black Swan)", f"{s.get('cvar_99_pct', 2.8):.2f}%", f"-₹{s.get('cvar_99_rupees', 14000):,.0f}")
+        
         if results.trade_log:
+
             st.markdown("#### 📜 Executed Trade Log (TCA Accounting)")
             st.dataframe(pd.DataFrame(results.trade_log), use_container_width=True)
             

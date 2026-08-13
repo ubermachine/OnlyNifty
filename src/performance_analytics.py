@@ -266,6 +266,59 @@ def calculate_consecutive_streaks_distribution(
     }
 
 
+def calculate_value_at_risk_and_cvar(
+    returns: List[float],
+    initial_capital: float = 500000.0,
+    confidence: float = 0.95
+) -> Dict[str, float]:
+    """
+    Computes Parametric & Historical Value-at-Risk (VaR) and Expected Shortfall (CVaR).
+    
+    VaR_95%: Maximum expected loss at 95% confidence over a single trade/day.
+    CVaR_95%: Expected loss conditional on breaching VaR threshold (Tail Risk).
+    """
+    if len(returns) < 5:
+        return {
+            "var_95_pct": 1.0, "var_95_rupees": initial_capital * 0.01,
+            "cvar_95_pct": 1.5, "cvar_95_rupees": initial_capital * 0.015,
+            "var_99_pct": 2.0, "var_99_rupees": initial_capital * 0.02,
+            "cvar_99_pct": 2.8, "cvar_99_rupees": initial_capital * 0.028
+        }
+
+    arr = np.array(returns, dtype=np.float64)
+    # Historical VaR
+    var_95_hist = - float(np.percentile(arr, (1.0 - 0.95) * 100.0))
+    var_99_hist = - float(np.percentile(arr, (1.0 - 0.99) * 100.0))
+
+    # Parametric Gaussian VaR
+    mu = float(np.mean(arr))
+    sigma = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.01
+    var_95_param = - (mu - 1.645 * sigma)
+    var_99_param = - (mu - 2.326 * sigma)
+
+    var_95 = max(round(max(var_95_hist, var_95_param) * 100.0, 2), 0.1)
+    var_99 = max(round(max(var_99_hist, var_99_param) * 100.0, 2), 0.2)
+
+    # Conditional VaR (Expected Shortfall)
+    tail_losses_95 = [r for r in arr if r <= - (var_95 / 100.0)]
+    cvar_95 = abs(float(np.mean(tail_losses_95)) * 100.0) if tail_losses_95 else var_95 * 1.3
+
+    tail_losses_99 = [r for r in arr if r <= - (var_99 / 100.0)]
+    cvar_99 = abs(float(np.mean(tail_losses_99)) * 100.0) if tail_losses_99 else var_99 * 1.4
+
+    return {
+        "var_95_pct": round(var_95, 2),
+        "var_95_rupees": round((var_95 / 100.0) * initial_capital, 2),
+        "cvar_95_pct": round(cvar_95, 2),
+        "cvar_95_rupees": round((cvar_95 / 100.0) * initial_capital, 2),
+        "var_99_pct": round(var_99, 2),
+        "var_99_rupees": round((var_99 / 100.0) * initial_capital, 2),
+        "cvar_99_pct": round(cvar_99, 2),
+        "cvar_99_rupees": round((cvar_99 / 100.0) * initial_capital, 2)
+    }
+
+
+
 def compute_institutional_performance_suite(
     equity_curve: List[float],
     trade_log: List[Dict[str, Any]],
@@ -290,6 +343,7 @@ def compute_institutional_performance_suite(
     pf_data = calculate_profit_factor(trade_pnls)
     payoff_data = calculate_payoff_ratio(trade_pnls)
     streak_data = calculate_consecutive_streaks_distribution(trade_pnls)
+    var_cvar_data = calculate_value_at_risk_and_cvar(pct_returns, initial_capital=initial_capital)
     
     net_pnl = round(equity_curve[-1] - initial_capital, 2) if equity_curve else 0.0
     return {
@@ -318,8 +372,17 @@ def compute_institutional_performance_suite(
         "avg_win_streak": streak_data["avg_win_streak"],
         "avg_loss_streak": streak_data["avg_loss_streak"],
         "win_streak_distribution": streak_data["win_streak_distribution"],
-        "loss_streak_distribution": streak_data["loss_streak_distribution"]
+        "loss_streak_distribution": streak_data["loss_streak_distribution"],
+        "var_95_pct": var_cvar_data["var_95_pct"],
+        "var_95_rupees": var_cvar_data["var_95_rupees"],
+        "cvar_95_pct": var_cvar_data["cvar_95_pct"],
+        "cvar_95_rupees": var_cvar_data["cvar_95_rupees"],
+        "var_99_pct": var_cvar_data["var_99_pct"],
+        "var_99_rupees": var_cvar_data["var_99_rupees"],
+        "cvar_99_pct": var_cvar_data["cvar_99_pct"],
+        "cvar_99_rupees": var_cvar_data["cvar_99_rupees"]
     }
+
 
 
 # ----------------- CAPITAL DRAWDOWN RECOVERY PROTOCOL -----------------
