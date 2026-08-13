@@ -171,6 +171,61 @@ class DataEngine:
         except Exception:
             return {"marketState": [{"market": "Capital Market", "marketStatus": "Closed"}]}
 
+    def fetch_live_vix(self) -> float:
+        """Fetches real-time India VIX directly from NSE."""
+        try:
+            from jugaad_data.nse import NSELive
+            n = NSELive()
+            ai = n.all_indices()
+            if ai and "data" in ai:
+                for idx in ai["data"]:
+                    if "INDIA VIX" in idx.get("index", ""):
+                        return float(idx.get("last", 12.0))
+        except Exception:
+            pass
+        return 12.0
+
+    def fetch_sectoral_pulse(self) -> Dict[str, Any]:
+        """Fetches benchmark and sectoral indices to check inter-market breadth."""
+        try:
+            from jugaad_data.nse import NSELive
+            n = NSELive()
+            ai = n.all_indices()
+            if ai and "data" in ai:
+                index_map = {x.get("index"): float(x.get("last", 0)) for x in ai["data"]}
+                return {
+                    "nifty_50": index_map.get("NIFTY 50", 24395.85),
+                    "nifty_bank": index_map.get("NIFTY BANK", 57635.25),
+                    "india_vix": index_map.get("INDIA VIX", 11.42),
+                    "nifty_it": index_map.get("NIFTY IT", 31453.90),
+                    "source": "jugaad-data (NSELive)"
+                }
+        except Exception:
+            pass
+        return {
+            "nifty_50": 24395.85, "nifty_bank": 57635.25, "india_vix": 11.42, "nifty_it": 31453.90, "source": "Synthetic Fallback"
+        }
+
+    def fetch_pre_open_gap(self) -> Dict[str, Any]:
+        """Discovers 09:08 AM Pre-Open equilibrium price and gap %."""
+        try:
+            from jugaad_data.nse import NSELive
+            n = NSELive()
+            po = n.pre_open_market("NIFTY")
+            if po and "data" in po and len(po["data"]) > 0:
+                d = po["data"][0]
+                return {
+                    "iep": float(d.get("iep", 0)),
+                    "pChange": float(d.get("pChange", 0)),
+                    "advances": int(po.get("advances", 0)),
+                    "declines": int(po.get("declines", 0)),
+                    "source": "jugaad-data (Pre-Open)"
+                }
+        except Exception:
+            pass
+        return {"iep": 24395.85, "pChange": 0.0, "advances": 25, "declines": 25, "source": "Fallback"}
+
+
 
     def generate_synthetic_nifty(
         self,
