@@ -499,24 +499,99 @@ with tab_backtest:
         else:
             st.info("No completed trade setups triggered within this specific historical slice.")
 
-# ----- TAB 5: MASTER RULEBOOK -----
+# ----- TAB 5: MASTER RULEBOOK & SETUP SUMMARIES -----
 with tab_cheatsheet:
-    st.subheader("📖 JustNifty v3.0 Institutional Quantitative Rulebook")
+    st.subheader("📖 JustNifty v3.1 Institutional Setup Summaries & Quantitative Rulebook")
+    st.caption("Complete institutional playbooks, entry triggers, stop-loss formulas, 3-tier profit ladders, and execution protocols in summary form.")
+    
+    st.markdown("### 🎯 Institutional Buy / Sell Setup Summaries (Playbook Matrix)")
+    pb_c1, pb_c2, pb_c3 = st.columns(3)
+    
+    with pb_c1:
+        st.markdown("""
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="background-color: rgba(5,223,114,0.1); color: #05df72; border: 1px solid rgba(5,223,114,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 1</span>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #05df72; font-weight: 600;">BULLISH CONFLUENCE</span>
+            </div>
+            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">🟢 Golden Pocket Long (Buy CE)</h4>
+            <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
+                <p style="margin-bottom: 6px;"><strong>1. Macro Regime:</strong> 5m Spot > 200 EMA + 200 EMA slope positive (<code>dEMA/dt &gt; 0</code>).</p>
+                <p style="margin-bottom: 6px;"><strong>2. Value Anchor:</strong> Price holds above 09:15 Session AVWAP (<code>0.15σ ≤ Z_AVWAP ≤ 1.10σ</code>).</p>
+                <p style="margin-bottom: 6px;"><strong>3. Golden Pocket:</strong> Pullback into <strong>50.0% to 61.8% Fibonacci zone</strong>.</p>
+                <p style="margin-bottom: 6px;"><strong>4. Entry Trigger:</strong> Bullish candle close + positive OFI Z-Score defense.</p>
+                <p style="margin-bottom: 6px;"><strong>5. Stop-Loss:</strong> Spot 78.6% Fib retracement - 5.0 pts (Delta-Gamma option SL).</p>
+            </div>
+            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+                <div style="color: #05df72;">• T1 (35%): +1.2x ATR (Sell OTM CE for Free Spread)</div>
+                <div style="color: #00d2ff;">• T2 (35%): +2.5x ATR (Structural Extension)</div>
+                <div style="color: #a855f7;">• T3 (30%): Moonshot Runner (Trail on 5m 21 EMA)</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with pb_c2:
+        st.markdown("""
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="background-color: rgba(255,51,85,0.1); color: #ff3355; border: 1px solid rgba(255,51,85,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 2</span>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #ff3355; font-weight: 600;">BEARISH CONFLUENCE</span>
+            </div>
+            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">🔴 Golden Pocket Short (Buy PE)</h4>
+            <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
+                <p style="margin-bottom: 6px;"><strong>1. Macro Regime:</strong> 5m Spot < 200 EMA + 200 EMA slope negative (<code>dEMA/dt &lt; 0</code>).</p>
+                <p style="margin-bottom: 6px;"><strong>2. Value Anchor:</strong> Price holds below 09:15 Session AVWAP (<code>-1.10σ ≤ Z_AVWAP ≤ -0.15σ</code>).</p>
+                <p style="margin-bottom: 6px;"><strong>3. Golden Pocket:</strong> Rally into <strong>50.0% to 61.8% Fibonacci zone</strong>.</p>
+                <p style="margin-bottom: 6px;"><strong>4. Entry Trigger:</strong> Bearish candle close + negative OFI Z-Score defense.</p>
+                <p style="margin-bottom: 6px;"><strong>5. Stop-Loss:</strong> Spot 78.6% Fib retracement + 5.0 pts (Delta-Gamma option SL).</p>
+            </div>
+            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+                <div style="color: #05df72;">• T1 (35%): -1.2x ATR (Sell OTM PE for Free Spread)</div>
+                <div style="color: #00d2ff;">• T2 (35%): -2.5x ATR (Structural Extension)</div>
+                <div style="color: #a855f7;">• T3 (30%): Moonshot Runner (Trail on 5m 21 EMA)</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with pb_c3:
+        st.markdown("""
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="background-color: rgba(168,85,247,0.1); color: #a855f7; border: 1px solid rgba(168,85,247,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 3</span>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #a855f7; font-weight: 600;">MOC SQUEEZE</span>
+            </div>
+            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">⚡ 3:00 PM Breakout</h4>
+            <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
+                <p style="margin-bottom: 6px;"><strong>1. Reference Range:</strong> Note exact High & Low of the 15:00-15:05 IST candle.</p>
+                <p style="margin-bottom: 6px;"><strong>2. Breakout Trigger:</strong> Enter on 15:05 close beyond 15:00 candle extreme.</p>
+                <p style="margin-bottom: 6px;"><strong>3. 0DTE Strike Shift:</strong> Select <strong>Deep ITM (Δ ≥ 0.75)</strong> to eliminate theta decay.</p>
+                <p style="margin-bottom: 6px;"><strong>4. Stop-Loss:</strong> Invalidation set at opposite extreme of 15:00 candle.</p>
+                <p style="margin-bottom: 6px;"><strong>5. Hard Execution Close:</strong> <strong>15:15 IST Mandatory Square-Off</strong>.</p>
+            </div>
+            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+                <div style="color: #05df72;">• T1 (50%): +40 to +50 points gamma expansion</div>
+                <div style="color: #00d2ff;">• T2 (50%): +75 to +100 points MOC squeeze</div>
+                <div style="color: #ff3355;">• Hard Stop: 15:15 IST terminal clock liquidation</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
     st.markdown(r"""
-    ### 1. The 4 Adaptive Stochastic Pillars (Tier-1 Standard)
-    1. **Regime-Filtered Hurst Exponent ($H$):** $H > 0.55 \implies$ Trending (Golden Pocket active); $H < 0.45 \implies$ Mean-Reverting (Fade extremes); $H \approx 0.50 \implies$ Noise kill-switch.
-    2. **Volatility-Adaptive Keltner Channels (VAKC):** Replaces static 1.5% envelopes with $\text{EMA}_{200} \pm 2.25 \times \text{ATR}_{14} \times \sqrt{\text{IV} / 0.12}$.
-    3. **Volume-Weighted Fibonacci Golden Pocket:** Entry anchored to High Volume Nodes (HVN) inside the 50.0%–61.8% retracement band.
-    4. **Order Flow Imbalance (OFI) & AVWAP:** Anchored at 09:15 open with $\Delta \text{OFI} > 0$ required for buyer defense.
+    ### 🏛️ The 4 Adaptive Stochastic Pillars (Mathematical Formulations)
+    1. **Anis-Lloyd Bias-Corrected Hurst Exponent ($H$):**
+       $$H > 0.52 \implies \text{Trending State (Pillars Active)}; \quad H < 0.45 \implies \text{Mean-Reverting}; \quad H \in [0.45, 0.52] \implies \text{Noise Filter Kill-Switch}$$
+    2. **Volatility-Adaptive Keltner Channels (VAKC):**
+       $$\text{VAKC}_{\text{Upper/Lower}} = \text{EMA}_{200} \pm 2.25 \times \text{ATR}_{14} \times \sqrt{\frac{\text{IV}}{0.12}}$$
+    3. **Session AVWAP 2nd-Moment Dispersion Corridor:**
+       $$\text{AVWAP}_t = \frac{\sum P_i V_i}{\sum V_i}, \quad \sigma_{\text{AVWAP}} = \sqrt{\frac{\sum V_i (P_i - \text{AVWAP})^2}{\sum V_i}}, \quad \text{Gate: } 0.15\sigma \le |Z| \le 1.10\sigma$$
+    4. **Composite Wick-Adjusted Bar Delta & 20-bar OFI Z-Score:**
+       $$\Delta_{\text{Bar}} = V \times \left[\left(\frac{C - L}{H - L}\right) - \left(\frac{H - C}{H - L}\right)\right], \quad Z_{\text{OFI}} = \frac{\text{OFI}_t - \mu_{\text{OFI}}}{\sigma_{\text{OFI}}}$$
 
-    ### 2. Microstructure & Dealer Gamma Positioning
-    - **Dealer GEX Flip:** Identifies positive vs negative gamma regimes for market maker hedging flows.
-    - **15-Min Freak Candle Isolation:** Suppresses entries between 09:15 and 09:30 to establish true Initial Balance (IB).
-    - **3:00 PM Aggressive Breakout:** Exploits institutional Market-On-Close (MOC) squaring and 0DTE gamma squeezes.
-
-    ### 3. Derivatives Greeks & Risk Engineering
-    - **Strike Selection:** Target Delta $\Delta \in [0.50, 0.65]$ with Vanna and Charm second-order sensitivity.
-    - **Quarter-Kelly Sizing:** Position size $= \frac{f^*}{4} \times \left(1 - \frac{\text{Drawdown}}{\text{Max MDD}}\right)$.
-    - **TCA Friction Deduction:** STT (0.1%), Brokerage (₹20), NSE Charges (0.03503%), GST (18%), and empirical slippage deducted on every transaction.
-    - **50% Part-Booking & Trailing:** Book 50% at Target 1 ($+1.2\times \text{ATR}$), shift SL to Break-Even immediately, trail runners on 1m 21 EMA.
+    ### 🛡️ Risk Management & Capital Defense Architecture
+    - **1% Quarter-Kelly Position Sizer:** $f^* = \frac{p \cdot b - q}{b}, \quad \text{Lots} = \lfloor \frac{1}{4} f^* \times \frac{\text{Capital}}{\text{Risk Per Lot}} \rfloor \times (1 - \frac{\text{DD}}{\text{Max MDD}})$.
+    - **Intraday 2-Strike Rule:** Trading halts automatically for the session upon recording 2 consecutive losses.
+    - **Daily Loss Limit (DLL):** Maximum daily drawdown strictly capped at $1.5\%$ of account equity.
+    - **Full Indian Statutory TCA:** STT ($0.1\%$ on sell), Brokerage (₹20/order), NSE Charges ($0.03503\%$), GST ($18\%$), and empirical slippage ($0.75$ pts) deducted on every transaction.
     """)
+
