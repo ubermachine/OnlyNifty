@@ -108,14 +108,69 @@ class DataEngine:
             
         return {
             "symbol": "NIFTY 50",
-            "last_price": 24535.50,
-            "change": 142.30,
-            "pChange": 0.58,
-            "open": 24410.00,
-            "high": 24565.00,
-            "low": 24390.00,
+            "last_price": 24395.85,
+            "change": -40.10,
+            "pChange": -0.16,
+            "open": 24431.60,
+            "high": 24431.60,
+            "low": 24311.40,
+            "source": "Fallback Snap"
+        }
+
+    def fetch_live_nse_option_chain(self, symbol: str = "NIFTY") -> Dict[str, Any]:
+        """Fetches live official NSE Option Chain using jugaad-data with fallback."""
+        try:
+            from jugaad_data.nse import NSELive
+            n = NSELive()
+            oc = n.index_option_chain(symbol)
+            if oc and "records" in oc:
+                records = oc["records"]
+                underlying = float(records.get("underlyingValue", 0))
+                expiry_dates = records.get("expiryDates", [])
+                raw_data = records.get("data", [])
+                
+                rows = []
+                for item in raw_data:
+                    strike = item.get("strikePrice")
+                    ce = item.get("CE", {})
+                    pe = item.get("PE", {})
+                    rows.append({
+                        "strike": strike,
+                        "expiry": item.get("expiryDate"),
+                        "ce_ltp": ce.get("lastPrice", 0.0),
+                        "ce_oi": ce.get("openInterest", 0),
+                        "ce_change_oi": ce.get("changeinOpenInterest", 0),
+                        "ce_iv": ce.get("impliedVolatility", 0.0),
+                        "pe_ltp": pe.get("lastPrice", 0.0),
+                        "pe_oi": pe.get("openInterest", 0),
+                        "pe_change_oi": pe.get("changeinOpenInterest", 0),
+                        "pe_iv": pe.get("impliedVolatility", 0.0),
+                    })
+                return {
+                    "underlying_value": underlying,
+                    "expiry_dates": expiry_dates,
+                    "dataframe": pd.DataFrame(rows),
+                    "source": "jugaad-data (NSELive)"
+                }
+        except Exception:
+            pass
+            
+        return {
+            "underlying_value": 24395.85,
+            "expiry_dates": ["18-Aug-2026", "25-Aug-2026"],
+            "dataframe": pd.DataFrame(),
             "source": "Synthetic Fallback"
         }
+
+    def fetch_market_status(self) -> Dict[str, Any]:
+        """Fetches live NSE exchange trading status (Open/Closed)."""
+        try:
+            from jugaad_data.nse import NSELive
+            n = NSELive()
+            return n.market_status()
+        except Exception:
+            return {"marketState": [{"market": "Capital Market", "marketStatus": "Closed"}]}
+
 
     def generate_synthetic_nifty(
         self,
