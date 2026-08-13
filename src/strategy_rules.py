@@ -131,42 +131,74 @@ class StrategyEngine:
                 details={"ema21": ema21, "dist_pct": dist_to_ema21}
             )
 
-        # 4. Dynamic Fibonacci Swings
-        lookback = min(35, current_idx)
+        # 4. Dynamic Fibonacci Swings (Require swing extrema from established prior impulse, at least 3 bars ago)
+        lookback = min(40, current_idx)
         window = df_5m.iloc[current_idx - lookback : current_idx + 1]
-        swing_high = float(window["high"].max())
-        swing_low = float(window["low"].min())
+        prior_window = df_5m.iloc[current_idx - lookback : current_idx - 2]
         
-        # 5. LONG Setup Check (Above 200 EMA + Above AVWAP + 50-61.8% Golden Pocket)
-        if close > ema200 and close > current_vwap:
+        if len(prior_window) < 5:
+            return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, "Accumulating swing history", True, 0.0, {})
+
+        swing_high = float(prior_window["high"].max())
+        swing_low = float(prior_window["low"].min())
+        swing_range = swing_high - swing_low
+        
+        # Calculate intraday ATR proxy (14 bars)
+        atr_14 = float((df_5m["high"].iloc[current_idx-14:current_idx+1] - df_5m["low"].iloc[current_idx-14:current_idx+1]).mean()) if current_idx >= 14 else 35.0
+        atr_14 = max(atr_14, 25.0)
+
+        bar_open = float(bar["open"])
+        prev_bar = df_5m.iloc[current_idx - 1]
+        prev_close = float(prev_bar["close"])
+
+        # 5. LONG Setup Check (Above 200 EMA + Above AVWAP + 50-61.8% Golden Pocket + Bullish Confirmation Candle)
+        if close > ema200 and close > current_vwap and swing_range >= 35.0:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=True)
-            if fib["fib_618"] <= close <= fib["fib_500"]:
+            in_pocket = fib["fib_618"] <= min(close, bar_open) and max(close, bar_open) <= (fib["fib_500"] + 10.0)
+            
+            # Candlestick Confirmation: Green candle or bullish rejection close
+            bullish_trigger = (close > bar_open) or (close > prev_close)
+            
+            if in_pocket and bullish_trigger:
+                # Target 1: Previous Swing High or +1.2x ATR (realistic intraday 50% part-booking)
+                t1 = round(min(swing_high, close + 1.2 * atr_14), 2)
+                t2 = round(max(float(env_upper.iloc[current_idx]), swing_high + 0.618 * swing_range), 2)
+                
                 return Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=fib["sl_level"],
-                    target_1=round(float(env_upper.iloc[current_idx]), 2),
-                    target_2=round(swing_high + (swing_high - fib["fib_500"]), 2),
-                    reason="LONG Setup Confirmed: Above 200 EMA + Above AVWAP + 50.0% to 61.8% Golden Pocket Retracement.",
+                    target_1=t1,
+                    target_2=t2,
+                    reason="LONG Setup Confirmed: Above 200 EMA + Above AVWAP + Golden Pocket (50-61.8%) + Bullish Confirmation Candle.",
                     htf_aligned=True,
                     fib_retracement=0.55,
-                    details={"fib": fib, "ema200": ema200, "vwap": current_vwap}
+                    details={"fib": fib, "ema200": ema200, "vwap": current_vwap, "swing_high": swing_high}
                 )
 
-        # 6. SHORT Setup Check (Below 200 EMA + Below AVWAP + 50-61.8% Golden Pocket)
-        if close < ema200 and close < current_vwap:
+        # 6. SHORT Setup Check (Below 200 EMA + Below AVWAP + 50-61.8% Golden Pocket + Bearish Confirmation Candle)
+        if close < ema200 and close < current_vwap and swing_range >= 35.0:
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=False)
-            if fib["fib_500"] <= close <= fib["fib_618"]:
+            in_pocket = (fib["fib_500"] - 10.0) <= min(close, bar_open) and max(close, bar_open) <= fib["fib_618"]
+            
+            # Candlestick Confirmation: Red candle or bearish rejection close
+            bearish_trigger = (close < bar_open) or (close < prev_close)
+            
+            if in_pocket and bearish_trigger:
+                # Target 1: Previous Swing Low or -1.2x ATR (realistic intraday 50% part-booking)
+                t1 = round(max(swing_low, close - 1.2 * atr_14), 2)
+                t2 = round(min(float(env_lower.iloc[current_idx]), swing_low - 0.618 * swing_range), 2)
+                
                 return Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=fib["sl_level"],
-                    target_1=round(float(env_lower.iloc[current_idx]), 2),
-                    target_2=round(swing_low - (fib["fib_500"] - swing_low), 2),
-                    reason="SHORT Setup Confirmed: Below 200 EMA + Below AVWAP + 50.0% to 61.8% Golden Pocket Retracement.",
+                    target_1=t1,
+                    target_2=t2,
+                    reason="SHORT Setup Confirmed: Below 200 EMA + Below AVWAP + Golden Pocket (50-61.8%) + Bearish Confirmation Candle.",
                     htf_aligned=True,
                     fib_retracement=0.55,
-                    details={"fib": fib, "ema200": ema200, "vwap": current_vwap}
+                    details={"fib": fib, "ema200": ema200, "vwap": current_vwap, "swing_low": swing_low}
                 )
 
         return Signal(

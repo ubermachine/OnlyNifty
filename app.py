@@ -452,10 +452,13 @@ with tab_backtest:
     st.subheader("📊 Bar-by-Bar Replay & Backtesting Engine")
     st.caption("Simulates the complete JustNifty v2.0 execution model (Golden Pocket entries, 50% part-booking at T1 / Envelope, breakeven SL adjustment, and 21 EMA / AVWAP trailing).")
     
-    if st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True):
-        bt_engine = BacktestEngine(initial_capital=account_capital)
-        results = bt_engine.run_backtest(df)
-        
+    run_btn = st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True)
+    if run_btn or "bt_results" in st.session_state:
+        if run_btn:
+            bt_engine = BacktestEngine(initial_capital=account_capital)
+            st.session_state["bt_results"] = bt_engine.run_backtest(df)
+            
+        results = st.session_state["bt_results"]
         b1, b2, b3, b4 = st.columns(4)
         pnl_color = "normal" if results.summary["pnl_rupees"] >= 0 else "inverse"
         b1.metric("Net Strategy PnL", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
