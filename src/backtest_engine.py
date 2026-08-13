@@ -13,6 +13,8 @@ from src.options_engine import (
     calculate_adaptive_tca_friction_multi_tier,
     compute_dynamic_trailing_option_sl
 )
+from src.performance_analytics import compute_institutional_performance_suite
+
 
 @dataclass
 class BacktestResults:
@@ -254,20 +256,23 @@ class BacktestEngine:
 
         wins = [t for t in trade_log if t["net_pnl"] > 0]
         losses = [t for t in trade_log if t["net_pnl"] <= 0]
-        win_rate = (len(wins) / len(trade_log) * 100.0) if trade_log else 0.0
-        net_total_pnl = capital - self.initial_capital
+        
+        perf_metrics = compute_institutional_performance_suite(
+            equity_curve=equity_curve,
+            trade_log=trade_log,
+            initial_capital=self.initial_capital,
+            trading_days=max(len(df_5m) // 75, 1)
+        )
         
         summary = {
-            "initial_capital": round(self.initial_capital, 2),
-            "final_capital": round(capital, 2),
+            **perf_metrics,
             "gross_pnl": round(gross_pnl_accumulated, 2),
             "total_tca": round(total_tca_accumulated, 2),
-            "pnl_rupees": round(net_total_pnl, 2),
-            "return_pct": round((net_total_pnl / self.initial_capital) * 100.0, 2),
             "total_trades": len(trade_log),
             "wins": len(wins),
             "losses": len(losses),
-            "win_rate": round(win_rate, 2)
+            "win_rate": round(perf_metrics["win_rate_pct"], 2)
         }
 
         return BacktestResults(summary=summary, trade_log=trade_log, equity_curve=equity_curve)
+

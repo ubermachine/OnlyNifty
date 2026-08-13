@@ -130,6 +130,130 @@ def black_scholes_greeks(
     }
 
 
+def compute_0dte_gamma_scalp_parameters(
+    spot: float,
+    strike: float,
+    dte_days: float = 0.10,
+    iv: float = DEFAULT_IV,
+    is_call: bool = True,
+    current_time_str: Optional[str] = None,
+    mode: str = "AUTO",
+    atr: float = 25.0,
+    r: float = RISK_FREE_RATE,
+    q: float = 0.0
+) -> Dict[str, Any]:
+    """
+    0DTE Expiry Day Gamma Scalper & Microstructure Shield Engine:
+    
+    Models post-13:00 IST expiry dynamics where Gamma (∂²P/∂S²) explodes and Charm (∂Δ/∂t) accelerates:
+    1. Adjusts SL to tighter delta stops (max 15-20 spot points / 20% option premium ceiling).
+    2. Provides dual-strike recommendations: Deep ITM (Delta >= 0.70) or ATM High-Gamma Scalp.
+    3. Calculates 3-tier gamma surge profit targets (+25%, +65%, +120%) and locks in gains before 15:15 IST.
+    4. Enforces a 15-minute time-decay circuit breaker to avoid Charm rot.
+    """
+    if current_time_str:
+        try:
+            parts = current_time_str.split(":")
+            h, m = int(parts[0]), int(parts[1])
+            curr_mins = h * 60 + m
+            sq_mins = 15 * 60 + 15  # 15:15 IST Hard Square-Off
+            rem_mins = max(sq_mins - curr_mins, 1)
+            t_eff_days = max(rem_mins / 375.0 * (1.0 / 365.0) * 365.0, 0.005)
+        except Exception:
+            t_eff_days = max(dte_days, 0.005)
+    else:
+        t_eff_days = max(dte_days, 0.005)
+
+    greeks = black_scholes_greeks(spot, strike, t_days=t_eff_days, r=r, q=q, sigma=iv, is_call=is_call)
+    greeks_ref = black_scholes_greeks(spot, strike, t_days=4.0, r=r, q=q, sigma=iv, is_call=is_call)
+    gamma_multiplier = round(greeks["gamma"] / max(greeks_ref["gamma"], 0.00001), 2)
+    charm_hourly = round(greeks["charm"] / 6.25, 5)
+    
+    atm_center = int(round(spot / 50.0) * 50)
+    deep_itm_offset = -150 if is_call else 150
+    deep_itm_strike = atm_center + deep_itm_offset
+    
+    greeks_deep_itm = black_scholes_greeks(spot, deep_itm_strike, t_days=t_eff_days, r=r, q=q, sigma=iv, is_call=is_call)
+    greeks_atm = black_scholes_greeks(spot, atm_center, t_days=t_eff_days, r=r, q=q, sigma=iv, is_call=is_call)
+
+    entry_prem = greeks["price"]
+    delta_mag = abs(greeks["delta"])
+    gamma_val = greeks["gamma"]
+    
+    max_spot_sl_pts = min(round(0.60 * atr, 1), 18.0)
+    option_loss_at_spot_sl = (max_spot_sl_pts * delta_mag) - (0.5 * gamma_val * (max_spot_sl_pts ** 2))
+    max_prem_sl_pts = max(round(min(option_loss_at_spot_sl, entry_prem * 0.20), 2), 2.0)
+    option_sl_prem = max(round(entry_prem - max_prem_sl_pts, 2), 1.0)
+    
+    spot_move_t1 = round(0.80 * atr, 1)
+    prem_gain_t1 = (spot_move_t1 * delta_mag) + (0.5 * gamma_val * (spot_move_t1 ** 2))
+    t1_prem = round(entry_prem + max(prem_gain_t1, entry_prem * 0.25), 2)
+    
+    spot_move_t2 = round(1.80 * atr, 1)
+    prem_gain_t2 = (spot_move_t2 * delta_mag) + (0.5 * gamma_val * (spot_move_t2 ** 2))
+    t2_prem = round(entry_prem + max(prem_gain_t2, entry_prem * 0.65), 2)
+    
+    spot_move_t3 = round(3.00 * atr, 1)
+    prem_gain_t3 = (spot_move_t3 * delta_mag) + (0.5 * gamma_val * (spot_move_t3 ** 2))
+    t3_prem = round(entry_prem + max(prem_gain_t3, entry_prem * 1.20), 2)
+
+    is_afternoon_0dte = (t_eff_days <= 0.15) or (current_time_str is not None and current_time_str >= "13:00")
+    regime_name = "0DTE_GAMMA_SQUEEZE_AFTERNOON" if is_afternoon_0dte else "0DTE_MORNING_TRANSITION"
+
+    return {
+        "regime": regime_name,
+        "is_0dte_afternoon": is_afternoon_0dte,
+        "t_effective_days": round(t_eff_days, 4),
+        "spot": spot,
+        "strike": strike,
+        "option_type": "CE" if is_call else "PE",
+        "entry_premium": entry_prem,
+        "greeks": greeks,
+        "gamma_explosion_multiplier": gamma_multiplier,
+        "charm_hourly_drift": charm_hourly,
+        "speed": greeks.get("speed", 0.0),
+        "color": greeks.get("color", 0.0),
+        "tightened_sl": {
+            "max_spot_sl_pts": max_spot_sl_pts,
+            "max_option_loss_pts": max_prem_sl_pts,
+            "sl_premium": option_sl_prem,
+            "max_risk_pct_ceiling": "20.0% Premium Floor"
+        },
+        "gamma_surge_targets": {
+            "target_1_premium": t1_prem,
+            "target_1_gain_pct": round(((t1_prem - entry_prem) / entry_prem) * 100.0, 1),
+            "target_2_premium": t2_prem,
+            "target_2_gain_pct": round(((t2_prem - entry_prem) / entry_prem) * 100.0, 1),
+            "target_3_moonshot_premium": t3_prem,
+            "target_3_gain_pct": round(((t3_prem - entry_prem) / entry_prem) * 100.0, 1)
+        },
+        "strike_playbook": {
+            "deep_itm_synthetic": {
+                "strike": deep_itm_strike,
+                "symbol": f"NIFTY {deep_itm_strike} {'CE' if is_call else 'PE'}",
+                "delta": round(greeks_deep_itm["delta"], 3),
+                "premium": greeks_deep_itm["price"],
+                "thesis": "Synthetic Future (Delta >= 0.70) with minimal theta decay & high directional linearity."
+            },
+            "atm_momentum_scalp": {
+                "strike": atm_center,
+                "symbol": f"NIFTY {atm_center} {'CE' if is_call else 'PE'}",
+                "delta": round(greeks_atm["delta"], 3),
+                "gamma": round(greeks_atm["gamma"], 5),
+                "premium": greeks_atm["price"],
+                "thesis": "Maximum Gamma Exploit for rapid 2x-3x surge on velocity breakouts."
+            }
+        },
+        "execution_mandates": {
+            "time_stop_minutes": 15,
+            "time_stop_rule": "Exit trade if spot momentum stalls after 3 consecutive 5m bars (15 mins) to prevent Charm decay.",
+            "breakeven_trigger": "Ratchet SL to Entry + ₹1.00 immediately once T1 (+25%) is achieved.",
+            "hard_squareoff_time": "15:15 IST",
+            "hard_squareoff_rule": "Mandatory market sweep liquidation before 15:15 IST. Zero overnight/delivery risk."
+        }
+    }
+
+
 def compute_dynamic_trailing_option_sl(
     entry_prem: float,
     spot_entry: float,
@@ -204,6 +328,72 @@ def calculate_adaptive_tca_friction(
         "slippage": round(slippage, 2),
         "effective_slippage_pts": round(effective_slippage_pts, 2)
     }
+
+
+def calculate_adaptive_tca_friction_multi_tier(
+    entry_prem: float,
+    t1_prem: float,
+    t2_prem: float,
+    final_exit_prem: float,
+    total_qty: int,
+    lots: int,
+    t1_hit: bool = False,
+    t2_hit: bool = False,
+    is_pyramided: bool = False,
+    iv: float = DEFAULT_IV,
+    is_0dte_afternoon: bool = False
+) -> Dict[str, float]:
+    """Accurately calculates statutory NSE TCA friction across 1, 2, 3, or 4 exit tranches."""
+    if total_qty <= 0:
+        return {"total_friction": 0.0, "stt": 0.0, "brokerage": 0.0, "exchange_charges": 0.0, "gst": 0.0, "slippage": 0.0}
+        
+    orders_count = 2.0
+    if is_pyramided:
+        orders_count += 1.0
+    if t1_hit and t2_hit:
+        orders_count += 2.0
+    elif t1_hit:
+        orders_count += 1.0
+        
+    brokerage = BROKERAGE_PER_ORDER * orders_count
+    turnover_buy = entry_prem * total_qty
+    
+    if t1_hit and t2_hit:
+        qty_35_1 = int(round(lots * 0.35)) * LOT_SIZE
+        qty_35_2 = int(round(lots * 0.35)) * LOT_SIZE
+        qty_30 = total_qty - qty_35_1 - qty_35_2
+        turnover_sell = (qty_35_1 * t1_prem) + (qty_35_2 * t2_prem) + (qty_30 * final_exit_prem)
+    elif t1_hit:
+        qty_35_1 = int(round(lots * 0.35)) * LOT_SIZE
+        qty_rem = total_qty - qty_35_1
+        turnover_sell = (qty_35_1 * t1_prem) + (qty_rem * final_exit_prem)
+    else:
+        turnover_sell = total_qty * final_exit_prem
+        
+    stt = turnover_sell * STT_SELL_PCT
+    exchange_charges = (turnover_buy + turnover_sell) * NSE_TURNOVER_PCT
+    sebi_fees = (turnover_buy + turnover_sell) * SEBI_CHARGES_PCT
+    stamp_duty = turnover_buy * STAMP_DUTY_BUY_PCT
+    gst = (brokerage + exchange_charges + sebi_fees) * GST_PCT
+    
+    vol_multiplier = math.sqrt(max(iv, 0.08) / 0.12)
+    time_multiplier = 1.40 if is_0dte_afternoon else 1.0
+    effective_slippage_pts = DEFAULT_SLIPPAGE_PTS * vol_multiplier * time_multiplier
+    slippage = effective_slippage_pts * total_qty
+    
+    total_friction = brokerage + stt + exchange_charges + sebi_fees + stamp_duty + gst + slippage
+    return {
+        "total_friction": round(total_friction, 2),
+        "stt": round(stt, 2),
+        "brokerage": round(brokerage, 2),
+        "exchange_charges": round(exchange_charges, 2),
+        "gst": round(gst, 2),
+        "stamp_duty": round(stamp_duty, 2),
+        "slippage": round(slippage, 2),
+        "effective_slippage_pts": round(effective_slippage_pts, 2),
+        "orders_count": int(orders_count)
+    }
+
 
 
 def calculate_adaptive_tca_friction_multi_tier(
@@ -899,6 +1089,18 @@ def generate_option_trade_ticket(
         "breakeven_spot": breakeven_spot,
         "spread_width_pts": max_spread_width
     }
+
+    gamma_scalp_meta = None
+    if is_0dte_afternoon or t_days <= 0.5:
+        gamma_scalp_meta = compute_0dte_gamma_scalp_parameters(
+            spot=spot,
+            strike=k1,
+            dte_days=t_days,
+            iv=iv,
+            is_call=is_call,
+            atr=diff_t1 / 1.2 if diff_t1 > 0 else 25.0
+        )
+
     
     return {
         "status": "READY",
@@ -932,6 +1134,7 @@ def generate_option_trade_ticket(
         "capital_outlay": sizing["capital_required"],
         "tca_friction": tca,
         "free_spread_t1": free_spread_t1,
+        "gamma_scalp_meta": gamma_scalp_meta,
         "execution_rules": {
             "part_book_50_pct": f"Option A (Outright): Book 50% ({max(sizing['lots'] // 2, 1)} lots) at ₹{target1_prem:.2f} and move SL to ₹{entry_prem:.2f}",
             "tier_1_asymmetric": (
@@ -945,4 +1148,5 @@ def generate_option_trade_ticket(
             "profit_ratchet": "Lock 65% of peak gains once +1.5R (+1.5%) session profit is achieved"
         }
     }
+
 

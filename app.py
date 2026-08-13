@@ -16,14 +16,21 @@ from src.data_engine import DataEngine
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_cpr,
     compute_fibonacci_levels, compute_vf_trade_table, compute_volume_profile,
-    compute_hurst_exponent, compute_order_flow_imbalance, compute_dealer_gex
+    compute_hurst_exponent, compute_order_flow_imbalance, compute_dealer_gex,
+    compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
+    compute_pre_open_gap_filter, detect_volume_profile_triggers
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
     generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks,
-    calculate_position_size, calculate_tca_friction
+    calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
+    evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
+    calculate_adaptive_tca_friction_multi_tier
 )
+from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
+
+
 
 # Page Config
 st.set_page_config(
@@ -143,6 +150,7 @@ risk_pct = st.sidebar.slider("Max Capital Risk per Trade (%)", min_value=0.25, m
 contract_lot_size = st.sidebar.number_input("Nifty Lot Size", min_value=25, max_value=75, value=LOT_SIZE, step=25)
 iv_input = st.sidebar.slider("Expected IV / India VIX (%)", min_value=8.0, max_value=30.0, value=DEFAULT_IV * 100.0, step=0.5) / 100.0
 drawdown_input = st.sidebar.slider("Current Portfolio Drawdown (%)", min_value=0.0, max_value=15.0, value=0.0, step=0.5) / 100.0
+is_0dte_mode = st.sidebar.checkbox("⚡ 0DTE Expiry Thursday Mode (Post-13:00 IST)", value=False, help="Activates sub-minute singularity shield, tightened 18pt stops, and gamma explosion scalper.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📡 Live Market Feed")
@@ -153,6 +161,7 @@ tf_str = "5m" if "5m" in timeframe else "1m"
 if st.sidebar.button("🔄 Refresh Market Data Now", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
+
 
 auto_refresh_choice = st.sidebar.selectbox("Auto-Refresh Feed", ["Off (Manual)", "Every 15 Seconds", "Every 30 Seconds", "Every 60 Seconds"], index=0)
 if auto_refresh_choice != "Off (Manual)":
@@ -182,6 +191,12 @@ def get_institutional_oi_data() -> pd.DataFrame:
     engine = DataEngine(use_cache=True)
     return engine.get_participant_oi_snapshot()
 
+@st.cache_data(ttl=30)
+def load_live_option_chain_data() -> dict:
+    engine = DataEngine(use_cache=True)
+    return engine.fetch_live_nse_option_chain(symbol="NIFTY")
+
+
 data_engine = DataEngine(use_cache=True)
 strategy_engine = StrategyEngine()
 
@@ -205,11 +220,13 @@ vol_profile = compute_volume_profile(df)
 hurst_data = compute_hurst_exponent(df["close"])
 ofi_data = compute_order_flow_imbalance(df)
 gex_data = compute_dealer_gex(current_spot)
+htf_data = compute_multi_timeframe_regime(df)
+order_flow_data = detect_stacked_order_flow_imbalances(df, key_levels={"CPR_PIVOT": cpr["pivot"], "VAH": vol_profile["vah"], "VAL": vol_profile["val"], "AVWAP": float(df.iloc[-1]["vwap"])})
 vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"].max() - df["low"].min()) / 4.0)
 
 # Evaluate Active Signal & Option Ticket
-signal = strategy_engine.evaluate_bar(df)
-ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input)
+signal = strategy_engine.evaluate_bar(df, live_iv=iv_input)
+ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input, iv=iv_input, is_0dte_afternoon=is_0dte_mode)
 
 # Confluence checks computation
 is_above_200 = current_spot > float(df.iloc[-1]["ema200"])
@@ -218,10 +235,10 @@ dist_ema21 = abs(current_spot - float(df.iloc[-1]["ema21"])) / current_spot
 is_not_stretched = dist_ema21 <= MA_STRETCH_THRESHOLD
 
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
-st.markdown("""
+st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v3.0</span>
+        <span class="badge-pro">PRO v3.3</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
@@ -239,7 +256,7 @@ with cockpit_col1:
     <div class="cockpit-box">
         <div class="cockpit-header">
             <span class="{sig_badge_class}">{sig_badge_text}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">TIMEFRAME: {tf_str} • HURST: {hurst_data['hurst']}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">HTF: {htf_data['confluence_regime']} • HURST: {hurst_data['hurst']}</span>
         </div>
         <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
             <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
@@ -252,16 +269,18 @@ with cockpit_col1:
         </div>
         <div class="confluence-grid">
             <div class="confluence-cell">
-                <div class="c-lbl">1. 200 EMA (5m)</div>
-                <div class="c-val" style="color: {'#05df72' if is_above_200 else '#ff3355'};">{'✓ Above (Bull)' if is_above_200 else '✗ Below (Bear)'}</div>
+                <div class="c-lbl">1. HTF Alignment</div>
+                <div class="c-val" style="color: {'#05df72' if htf_data['htf_aligned_long'] else ('#ff3355' if htf_data['htf_aligned_short'] else '#fbb024')};">
+                    1H: {htf_data['tf_1h'].get('bias', 'N/A')[:4]} | 15m: {htf_data['tf_15m'].get('bias', 'N/A')[:4]}
+                </div>
             </div>
             <div class="confluence-cell">
                 <div class="c-lbl">2. Session AVWAP</div>
                 <div class="c-val" style="color: {'#05df72' if is_above_vwap else '#ff3355'};">{'✓ Above 09:15' if is_above_vwap else '✗ Below 09:15'}</div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">3. Hurst Exponent (H)</div>
-                <div class="c-val" style="color: {'#05df72' if hurst_data['is_trending'] else '#fbb024'};">H={hurst_data['hurst']:.2f} ({'Trend' if hurst_data['is_trending'] else 'Range'})</div>
+                <div class="c-lbl">3. Order Flow Delta</div>
+                <div class="c-val" style="color: {'#05df72' if ofi_data['buyer_defense'] else '#ff3355'};">Z={ofi_data['ofi_zscore']:.2f} ({order_flow_data['order_flow_bias'][:8]})</div>
             </div>
             <div class="confluence-cell">
                 <div class="c-lbl">4. Dealer GEX Flip</div>
@@ -270,6 +289,7 @@ with cockpit_col1:
         </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 with cockpit_col2:
     if ticket.get("status") == "READY":
@@ -529,8 +549,6 @@ with tab_sizer:
         enforce_vault = st.checkbox("🔒 Enforce 75% Profit Lock (Golden Vault)", value=True)
         
     with s_col2:
-        from src.options_engine import evaluate_golden_vault_lock, run_monte_carlo_simulation
-        
         pos_info = calculate_position_size(
             capital=calc_cap,
             risk_pct=calc_risk_pct,
@@ -866,8 +884,8 @@ with tab_oi:
 
 # ----- TAB 4: BACKTESTING & REPLAY -----
 with tab_backtest:
-    st.subheader("📊 Bar-by-Bar Replay & Backtesting Engine with TCA Friction")
-    st.caption("Simulates the JustNifty v3.0 model with full Transaction Cost Analysis (STT, Brokerage, GST, Slippage), 50% part-booking, and breakeven trailing.")
+    st.subheader("📊 Bar-by-Bar Replay & Institutional Performance Suite")
+    st.caption("Simulates the JustNifty v3.3 model with 4-leg TCA friction, Sharpe, Sortino, Calmar, and Ulcer Index.")
     
     run_btn = st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True)
     if run_btn or "bt_results" in st.session_state:
@@ -876,12 +894,22 @@ with tab_backtest:
             st.session_state["bt_results"] = bt_engine.run_backtest(df)
             
         results = st.session_state["bt_results"]
+        s = results.summary
+        
+        # Row 1: Core PnL & Return
         b1, b2, b3, b4 = st.columns(4)
-        pnl_color = "normal" if results.summary["pnl_rupees"] >= 0 else "inverse"
-        b1.metric("Net Strategy PnL (Post-TCA)", f"₹{results.summary['pnl_rupees']:,.2f}", f"{results.summary['return_pct']:+.2f}%", delta_color=pnl_color)
-        b2.metric("Win Rate", f"{results.summary['win_rate']:.1f}%", f"{results.summary['wins']}W / {results.summary['losses']}L")
-        b3.metric("Total TCA Deducted", f"₹{results.summary['total_tca']:,.2f}", f"Gross: ₹{results.summary['gross_pnl']:,.2f}")
-        b4.metric("Final Account Balance", f"₹{results.summary['final_capital']:,.2f}")
+        pnl_color = "normal" if s.get("pnl_rupees", 0) >= 0 else "inverse"
+        b1.metric("Net Strategy PnL", f"₹{s.get('pnl_rupees', 0):,.2f}", f"{s.get('return_pct', 0):+.2f}%", delta_color=pnl_color)
+        b2.metric("Win Rate", f"{s.get('win_rate', 0):.1f}%", f"{s.get('wins', 0)}W / {s.get('losses', 0)}L")
+        b3.metric("Profit Factor", f"{s.get('profit_factor', 0):.2f}", f"Payoff: {s.get('payoff_ratio', 0):.2f}x")
+        b4.metric("Total TCA Deducted", f"₹{s.get('total_tca', 0):,.2f}", f"Gross: ₹{s.get('gross_pnl', 0):,.2f}")
+        
+        # Row 2: Institutional Risk Ratios
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Sharpe Ratio (Annualized)", f"{s.get('sharpe_ratio', 0):.2f}", "Zero-Risk Benchmark")
+        r2.metric("Sortino Ratio", f"{s.get('sortino_ratio', 0):.2f}", "Downside Semi-Dev")
+        r3.metric("Calmar Ratio", f"{s.get('calmar_ratio', 0):.2f}", f"MDD: {s.get('max_drawdown_pct', 0):.1f}%")
+        r4.metric("Ulcer Index (UI)", f"{s.get('ulcer_index', 0):.2f}", f"Martin: {s.get('martin_ratio', 0):.2f}")
         
         if results.trade_log:
             st.markdown("#### 📜 Executed Trade Log (TCA Accounting)")
@@ -894,6 +922,7 @@ with tab_backtest:
             st.plotly_chart(fig_eq, use_container_width=True)
         else:
             st.info("No completed trade setups triggered within this specific historical slice.")
+
 
 # ----- TAB 5: MASTER RULEBOOK & SETUP SUMMARIES -----
 with tab_cheatsheet:

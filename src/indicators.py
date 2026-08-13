@@ -501,3 +501,341 @@ def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float =
     }
 
 
+# =====================================================================
+# ONLYNIFTY v3.3: MULTI-TIMEFRAME CONFLUENCE & FOOTPRINT IMBALANCES
+# =====================================================================
+
+def _resample_ohlcv_if_needed(df_source: pd.DataFrame, freq: str, bar_multiplier: int) -> pd.DataFrame:
+    """Safely resamples OHLCV DataFrame using DateTimeIndex or integer grouping fallback."""
+    if df_source.empty:
+        return df_source
+    if isinstance(df_source.index, pd.DatetimeIndex):
+        resampled = df_source.resample(freq).agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna()
+        return resampled
+    else:
+        chunk_ids = np.arange(len(df_source)) // bar_multiplier
+        grouped = df_source.groupby(chunk_ids).agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        })
+        return grouped
+
+
+def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, Any]:
+    """Evaluates EMA200, EMA55, EMA21, AVWAP, and Hurst Exponent for a single timeframe."""
+    if df_tf.empty or len(df_tf) < 1:
+        return {
+            "tf": tf_name,
+            "bias": "NEUTRAL",
+            "close": 0.0,
+            "ema200": 0.0,
+            "ema55": 0.0,
+            "ema21": 0.0,
+            "vwap": 0.0,
+            "hurst": 0.50,
+            "is_trending": False,
+            "ema_slope": 0.0,
+            "summary": f"{tf_name}: Insufficient data"
+        }
+        
+    close = float(df_tf["close"].iloc[-1])
+    n = len(df_tf)
+    
+    ema200_span = min(EMA_SLOW, max(n, 5))
+    ema55_span = min(EMA_MID, max(n, 5))
+    ema21_span = min(EMA_FAST, max(n, 3))
+    
+    ema200_s = compute_ema(df_tf["close"], ema200_span)
+    ema55_s = compute_ema(df_tf["close"], ema55_span)
+    ema21_s = compute_ema(df_tf["close"], ema21_span)
+    
+    ema200 = float(ema200_s.iloc[-1])
+    ema55 = float(ema55_s.iloc[-1])
+    ema21 = float(ema21_s.iloc[-1])
+    
+    if n >= 2:
+        ema_slope = float((ema21_s.iloc[-1] - ema21_s.iloc[-2]) / max(ema21_s.iloc[-2], 1.0))
+    else:
+        ema_slope = 0.0
+        
+    vwap_s, _, _ = compute_vwap(df_tf, anchor_session=True)
+    vwap = float(vwap_s.iloc[-1])
+    
+    hurst_info = compute_hurst_exponent(df_tf["close"])
+    hurst_val = hurst_info.get("hurst", 0.50)
+    is_trending = hurst_info.get("is_trending", False)
+    
+    is_above_200 = close >= ema200
+    is_above_vwap = close >= vwap
+    is_bullish_ma_stack = ema21 >= ema55
+    
+    if is_above_200 and is_above_vwap and (is_bullish_ma_stack or ema_slope >= 0):
+        bias = "BULLISH"
+    elif is_above_200 or (is_above_vwap and ema_slope >= 0):
+        bias = "NEUTRAL_BULLISH"
+    elif (not is_above_200) and (not is_above_vwap) and ((not is_bullish_ma_stack) or ema_slope <= 0):
+        bias = "BEARISH"
+    elif (not is_above_200) or ((not is_above_vwap) and ema_slope <= 0):
+        bias = "NEUTRAL_BEARISH"
+    else:
+        bias = "NEUTRAL"
+        
+    return {
+        "tf": tf_name,
+        "bias": bias,
+        "close": round(close, 2),
+        "ema200": round(ema200, 2),
+        "ema55": round(ema55, 2),
+        "ema21": round(ema21, 2),
+        "vwap": round(vwap, 2),
+        "hurst": round(hurst_val, 4),
+        "is_trending": is_trending,
+        "ema_slope": round(ema_slope * 1000.0, 4),
+        "summary": f"{tf_name}: {bias} | C={close:.2f}, EMA200={ema200:.2f}, AVWAP={vwap:.2f}, H={hurst_val:.2f}"
+    }
+
+
+def compute_multi_timeframe_regime(
+    df_5m: pd.DataFrame,
+    df_15m: Optional[pd.DataFrame] = None,
+    df_1h: Optional[pd.DataFrame] = None
+) -> Dict[str, Any]:
+    """
+    Formulates OnlyNifty v3.3 Multi-Timeframe Alignment Engine (1H + 15m + 5m Confluence).
+    Computes higher timeframe 1H/15m trend bias (EMA200, AVWAP, and Hurst exponent H).
+    Enforces HTF alignment:
+    - 5m Longs allowed ONLY if 15m and 1H trends are Bullish or Neutral-Bullish.
+    - 5m Shorts allowed ONLY if 15m and 1H trends are Bearish or Neutral-Bearish.
+    """
+    if df_5m.empty:
+        return {
+            "htf_aligned_long": False,
+            "htf_aligned_short": False,
+            "confluence_regime": "INSUFFICIENT_DATA",
+            "tf_1h": {},
+            "tf_15m": {},
+            "tf_5m": {},
+            "alignment_score": 0.0,
+            "reason": "Empty 5m DataFrame provided."
+        }
+        
+    if df_15m is None or df_15m.empty:
+        df_15m = _resample_ohlcv_if_needed(df_5m, freq="15min", bar_multiplier=3)
+    if df_1h is None or df_1h.empty:
+        df_1h = _resample_ohlcv_if_needed(df_5m, freq="1h", bar_multiplier=12)
+        
+    tf_1h_regime = _evaluate_single_tf_regime(df_1h, "1H")
+    tf_15m_regime = _evaluate_single_tf_regime(df_15m, "15m")
+    tf_5m_regime = _evaluate_single_tf_regime(df_5m, "5m")
+    
+    bias_1h = tf_1h_regime["bias"]
+    bias_15m = tf_15m_regime["bias"]
+    bias_5m = tf_5m_regime["bias"]
+    
+    bullish_biases = {"BULLISH", "NEUTRAL_BULLISH"}
+    bearish_biases = {"BEARISH", "NEUTRAL_BEARISH"}
+    
+    htf_aligned_long = (bias_1h in bullish_biases) and (bias_15m in bullish_biases)
+    htf_aligned_short = (bias_1h in bearish_biases) and (bias_15m in bearish_biases)
+    
+    score = 0.0
+    if bias_1h == "BULLISH": score += 0.40
+    elif bias_1h == "NEUTRAL_BULLISH": score += 0.20
+    elif bias_1h == "BEARISH": score -= 0.40
+    elif bias_1h == "NEUTRAL_BEARISH": score -= 0.20
+    
+    if bias_15m == "BULLISH": score += 0.35
+    elif bias_15m == "NEUTRAL_BULLISH": score += 0.175
+    elif bias_15m == "BEARISH": score -= 0.35
+    elif bias_15m == "NEUTRAL_BEARISH": score -= 0.175
+    
+    if bias_5m == "BULLISH": score += 0.25
+    elif bias_5m == "NEUTRAL_BULLISH": score += 0.125
+    elif bias_5m == "BEARISH": score -= 0.25
+    elif bias_5m == "NEUTRAL_BEARISH": score -= 0.125
+    
+    if htf_aligned_long and bias_5m in bullish_biases:
+        confluence_regime = "FULL_BULLISH_CONFLUENCE (1H + 15m + 5m)"
+    elif htf_aligned_short and bias_5m in bearish_biases:
+        confluence_regime = "FULL_BEARISH_CONFLUENCE (1H + 15m + 5m)"
+    elif htf_aligned_long:
+        confluence_regime = "HTF_BULLISH_ALIGNMENT (1H + 15m Bullish | 5m Pullback)"
+    elif htf_aligned_short:
+        confluence_regime = "HTF_BEARISH_ALIGNMENT (1H + 15m Bearish | 5m Pullback)"
+    else:
+        confluence_regime = "HTF_MIXED_OR_CHOP (Conflicting 1H vs 15m Regimes)"
+        
+    reason = (
+        f"Multi-Timeframe Alignment: 1H={bias_1h}, 15m={bias_15m}, 5m={bias_5m}. "
+        f"Long Permitted={htf_aligned_long}, Short Permitted={htf_aligned_short}."
+    )
+    
+    return {
+        "htf_aligned_long": htf_aligned_long,
+        "htf_aligned_short": htf_aligned_short,
+        "confluence_regime": confluence_regime,
+        "alignment_score": round(score, 3),
+        "tf_1h": tf_1h_regime,
+        "tf_15m": tf_15m_regime,
+        "tf_5m": tf_5m_regime,
+        "reason": reason
+    }
+
+
+def detect_stacked_order_flow_imbalances(
+    df: pd.DataFrame,
+    key_levels: Optional[Dict[str, float]] = None,
+    imbalance_ratio_threshold: float = 2.5,
+    min_stacked_bars: int = 3,
+    lookback: int = 15
+) -> Dict[str, Any]:
+    """
+    Formulates OnlyNifty v3.3 Stacked Footprint Order Flow Imbalance & Absorption Detector.
+    1. Reconstructs bar-by-bar aggressive buy vs sell volume via microstructure body/wick decomposition.
+    2. Identifies consecutive stacked aggressive buy/sell deltas (Stacked Order Flow Imbalances).
+    3. Detects footprint absorption wicks at Key Levels (CPR, VAH, VAL, AVWAP, +/-2SD).
+    """
+    if df.empty or len(df) < 2:
+        return {
+            "has_stacked_buy": False,
+            "has_stacked_sell": False,
+            "stacked_buy_count": 0,
+            "stacked_sell_count": 0,
+            "stacked_support_zone": None,
+            "stacked_resistance_zone": None,
+            "absorption_event": None,
+            "order_flow_bias": "NEUTRAL",
+            "recent_delta": 0.0,
+            "summary": "Insufficient data for Order Flow Footprint analysis."
+        }
+        
+    sub = df.tail(lookback).copy()
+    vol = sub["volume"].copy().astype(float)
+    if vol.sum() == 0 or (vol == 0).all():
+        vol = (sub["high"] - sub["low"]).clip(lower=1.0) * 1000.0
+    else:
+        vol = vol.replace(0, 1.0)
+        
+    c_range = (sub["high"] - sub["low"]).replace(0, 1.0)
+    body = sub["close"] - sub["open"]
+    close_pos = (sub["close"] - sub["low"]) / c_range
+    
+    buy_frac = np.clip(0.50 + 0.35 * (body / c_range) + 0.15 * (2.0 * close_pos - 1.0), 0.05, 0.95)
+    buy_vol = vol * buy_frac
+    sell_vol = vol * (1.0 - buy_frac)
+    bar_deltas = buy_vol - sell_vol
+    
+    buy_imbalance_ratio = buy_vol / np.maximum(sell_vol, 1.0)
+    sell_imbalance_ratio = sell_vol / np.maximum(buy_vol, 1.0)
+    
+    n_bars = len(sub)
+    buy_stacked_count = 0
+    sell_stacked_count = 0
+    
+    for i in range(n_bars - 1, -1, -1):
+        if buy_imbalance_ratio.iloc[i] >= imbalance_ratio_threshold or (bar_deltas.iloc[i] > 0 and buy_frac.iloc[i] >= 0.70):
+            buy_stacked_count += 1
+        else:
+            break
+            
+    for i in range(n_bars - 1, -1, -1):
+        if sell_imbalance_ratio.iloc[i] >= imbalance_ratio_threshold or (bar_deltas.iloc[i] < 0 and buy_frac.iloc[i] <= 0.30):
+            sell_stacked_count += 1
+        else:
+            break
+            
+    has_stacked_buy = buy_stacked_count >= min_stacked_bars or (buy_stacked_count >= 2 and buy_imbalance_ratio.iloc[-1] >= 3.0)
+    has_stacked_sell = sell_stacked_count >= min_stacked_bars or (sell_stacked_count >= 2 and sell_imbalance_ratio.iloc[-1] >= 3.0)
+    
+    stacked_support_zone = None
+    if has_stacked_buy:
+        recent_buy_bars = sub.iloc[-buy_stacked_count:]
+        stacked_support_zone = (
+            round(float(recent_buy_bars["low"].min()), 2),
+            round(float(recent_buy_bars["open"].mean()), 2)
+        )
+        
+    stacked_resistance_zone = None
+    if has_stacked_sell:
+        recent_sell_bars = sub.iloc[-sell_stacked_count:]
+        stacked_resistance_zone = (
+            round(float(recent_sell_bars["open"].mean()), 2),
+            round(float(recent_sell_bars["high"].max()), 2)
+        )
+        
+    absorption_event = None
+    if key_levels:
+        last_bar = sub.iloc[-1]
+        c_open, c_high, c_low, c_close = float(last_bar["open"]), float(last_bar["high"]), float(last_bar["low"]), float(last_bar["close"])
+        bar_range = max(c_high - c_low, 1.0)
+        upper_wick_ratio = (c_high - max(c_open, c_close)) / bar_range
+        lower_wick_ratio = (min(c_open, c_close) - c_low) / bar_range
+        last_delta = float(bar_deltas.iloc[-1])
+        
+        for lvl_name, lvl_price in key_levels.items():
+            if lvl_price <= 0:
+                continue
+                
+            if c_low <= (lvl_price + 3.0) and c_close >= (lvl_price - 2.0) and lower_wick_ratio >= 0.35:
+                absorption_event = {
+                    "type": "BUYER_ABSORPTION",
+                    "side": "LONG",
+                    "level_name": lvl_name,
+                    "level_price": round(lvl_price, 2),
+                    "wick_ratio": round(lower_wick_ratio * 100.0, 1),
+                    "delta": round(last_delta, 1),
+                    "suggested_sl": round(c_low - 5.0, 2),
+                    "reason": f"Buyer Absorption at {lvl_name} ({lvl_price:.2f}): {lower_wick_ratio*100.0:.1f}% lower wick absorption."
+                }
+                break
+                
+            if c_high >= (lvl_price - 3.0) and c_close <= (lvl_price + 2.0) and upper_wick_ratio >= 0.35:
+                absorption_event = {
+                    "type": "SELLER_ABSORPTION",
+                    "side": "SHORT",
+                    "level_name": lvl_name,
+                    "level_price": round(lvl_price, 2),
+                    "wick_ratio": round(upper_wick_ratio * 100.0, 1),
+                    "delta": round(last_delta, 1),
+                    "suggested_sl": round(c_high + 5.0, 2),
+                    "reason": f"Seller Absorption at {lvl_name} ({lvl_price:.2f}): {upper_wick_ratio*100.0:.1f}% upper wick absorption."
+                }
+                break
+
+    if absorption_event and absorption_event["type"] == "BUYER_ABSORPTION":
+        order_flow_bias = "BULLISH_ABSORPTION"
+    elif absorption_event and absorption_event["type"] == "SELLER_ABSORPTION":
+        order_flow_bias = "BEARISH_ABSORPTION"
+    elif has_stacked_buy:
+        order_flow_bias = "AGGRESSIVE_BUYING_IMBALANCE"
+    elif has_stacked_sell:
+        order_flow_bias = "AGGRESSIVE_SELLING_IMBALANCE"
+    else:
+        order_flow_bias = "BALANCED_OR_NEUTRAL"
+
+    summary_parts = []
+    if has_stacked_buy:
+        summary_parts.append(f"{buy_stacked_count} Stacked Buy Bars (Shelf: {stacked_support_zone})")
+    if has_stacked_sell:
+        summary_parts.append(f"{sell_stacked_count} Stacked Sell Bars (Shelf: {stacked_resistance_zone})")
+    if absorption_event:
+        summary_parts.append(absorption_event["reason"])
+    if not summary_parts:
+        summary_parts.append(f"Delta Balanced ({bar_deltas.iloc[-1]:.0f})")
+        
+    return {
+        "has_stacked_buy": has_stacked_buy,
+        "has_stacked_sell": has_stacked_sell,
+        "stacked_buy_count": buy_stacked_count,
+        "stacked_sell_count": sell_stacked_count,
+        "stacked_support_zone": stacked_support_zone,
+        "stacked_resistance_zone": stacked_resistance_zone,
+        "absorption_event": absorption_event,
+        "order_flow_bias": order_flow_bias,
+        "recent_delta": round(float(bar_deltas.iloc[-1]), 2),
+        "summary": " | ".join(summary_parts)
+    }
+
+
+

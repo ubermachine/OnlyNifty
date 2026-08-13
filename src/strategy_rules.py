@@ -1,8 +1,8 @@
-"""JustNifty v3.1 Institutional Strategy Engine with 3-Tier Targets, AVWAP Corridor Gating, and Pyramiding Triggers."""
+"""JustNifty v3.3 Institutional Strategy Engine with Multi-Timeframe Alignment & Stacked Order Flow Gating."""
 
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import numpy as np
 import pandas as pd
 from src.config import (
@@ -13,7 +13,8 @@ from src.config import (
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
     compute_hurst_exponent, compute_order_flow_imbalance, compute_volume_profile,
-    compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers
+    compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers,
+    compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances
 )
 
 class SignalType(Enum):
@@ -23,6 +24,8 @@ class SignalType(Enum):
     LONG_3PM = "LONG_3PM"
     SHORT_3PM = "SHORT_3PM"
     SHORT_LAAF = "SHORT_LAAF"
+    LONG_ORDER_FLOW = "LONG_ORDER_FLOW"
+    SHORT_ORDER_FLOW = "SHORT_ORDER_FLOW"
 
 @dataclass
 class Signal:
@@ -58,16 +61,21 @@ class StrategyEngine:
         current_idx: int = -1,
         df_daily: Optional[pd.DataFrame] = None,
         df_hourly: Optional[pd.DataFrame] = None,
+        df_15m: Optional[pd.DataFrame] = None,
+        df_1h: Optional[pd.DataFrame] = None,
         live_iv: float = DEFAULT_IV,
         live_vix: Optional[float] = None,
         pre_open_gap: Optional[Dict[str, Any]] = None,
         prev_close: Optional[float] = None
     ) -> Signal:
         """
-        Evaluates JustNifty v3.2 institutional setups integrating:
-        1. Non-linear Live VIX VAKC Scaling
-        2. Pre-Open Market Gap Filter
-        3. 70% Value Area & POC AMT Triggers
+        Evaluates OnlyNifty v3.3 Institutional Multi-Timeframe Alignment and Stacked Footprint Setups:
+        1. Multi-Timeframe (1H + 15m + 5m) Confluence Gating:
+           - 5m Longs strictly gated by 15m and 1H Bullish / Neutral-Bullish trends.
+           - 5m Shorts strictly gated by 15m and 1H Bearish / Neutral-Bearish trends.
+        2. Stacked Order Flow Imbalances & Footprint Absorption at Key Levels (CPR, VAH, VAL, AVWAP).
+        3. Auction Market Theory 70% Value Area triggers & Non-Linear VAKC Elasticity.
+        4. Fibonacci Golden Pocket (50% - 61.8%) entries with dynamic Pre-Open gap anchoring.
         """
         if df_5m.empty:
             return Signal(SignalType.WAIT, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "No data available", False, 0.0, {})
@@ -75,6 +83,7 @@ class StrategyEngine:
         if current_idx == -1 or current_idx >= len(df_5m):
             current_idx = len(df_5m) - 1
             
+        sub_df = df_5m.iloc[:current_idx + 1]
         bar = df_5m.iloc[current_idx]
         bar_time = bar.name.strftime("%H:%M") if hasattr(bar.name, "strftime") else "12:00"
         close = float(bar["close"])
@@ -133,40 +142,71 @@ class StrategyEngine:
                         details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"])}
                     )
 
-        if len(df_5m) < 15:
+        if len(sub_df) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
 
         # Compute Stochastic Indicators & Dynamic VAKC
-        sub_df = df_5m.iloc[:current_idx + 1]
-        ema200_series = compute_ema(df_5m["close"], EMA_SLOW)
-        ema55_series = compute_ema(df_5m["close"], EMA_MID)
-        ema21_series = compute_ema(df_5m["close"], EMA_FAST)
-        vakc_upper, vakc_lower = compute_vakc_envelopes(df_5m, iv=live_iv)
-        vwap_series, vwap_up_2sd, vwap_low_2sd = compute_vwap(df_5m)
+        ema200_series = compute_ema(sub_df["close"], EMA_SLOW)
+        ema55_series = compute_ema(sub_df["close"], EMA_MID)
+        ema21_series = compute_ema(sub_df["close"], EMA_FAST)
+        vakc_upper, vakc_lower = compute_vakc_envelopes(sub_df, iv=live_iv)
+        vwap_series, vwap_up_2sd, vwap_low_2sd = compute_vwap(sub_df)
         
         hurst_info = compute_hurst_exponent(sub_df["close"])
         ofi_info = compute_order_flow_imbalance(sub_df)
         gex_info = compute_dealer_gex(close)
         vp_info = compute_volume_profile(sub_df)
         gap_info = compute_pre_open_gap_filter(sub_df, prev_close=prev_close, pre_open_data=pre_open_gap)
+        cpr_info = compute_cpr(df_daily if df_daily is not None else sub_df)
         
-        ema200 = float(ema200_series.iloc[current_idx])
-        ema55 = float(ema55_series.iloc[current_idx])
-        ema21 = float(ema21_series.iloc[current_idx])
-        current_vwap = float(vwap_series.iloc[current_idx])
-        upper_2sd = float(vwap_up_2sd.iloc[current_idx])
-        lower_2sd = float(vwap_low_2sd.iloc[current_idx])
-        upper_vakc_val = float(vakc_upper.iloc[current_idx])
-        lower_vakc_val = float(vakc_lower.iloc[current_idx])
+        ema200 = float(ema200_series.iloc[-1])
+        ema55 = float(ema55_series.iloc[-1])
+        ema21 = float(ema21_series.iloc[-1])
+        current_vwap = float(vwap_series.iloc[-1])
+        upper_2sd = float(vwap_up_2sd.iloc[-1])
+        lower_2sd = float(vwap_low_2sd.iloc[-1])
+        upper_vakc_val = float(vakc_upper.iloc[-1])
+        lower_vakc_val = float(vakc_lower.iloc[-1])
         
         # ATR 14 proxy
-        atr_14 = float((df_5m["high"].iloc[max(0, current_idx-14):current_idx+1] - df_5m["low"].iloc[max(0, current_idx-14):current_idx+1]).mean())
+        atr_14 = float((sub_df["high"].tail(14) - sub_df["low"].tail(14)).mean())
         atr_14 = max(atr_14, 25.0)
 
-        # 3. Auction Market Theory (AMT) Value Area Trigger Check
+        # 3. Multi-Timeframe Alignment Engine (1H + 15m + 5m)
+        effective_1h = df_1h if df_1h is not None else df_hourly
+        htf_regime = compute_multi_timeframe_regime(sub_df, df_15m=df_15m, df_1h=effective_1h)
+        htf_aligned_long = htf_regime["htf_aligned_long"]
+        htf_aligned_short = htf_regime["htf_aligned_short"]
+
+        # 4. Key Levels & Stacked Footprint Order Flow Imbalance Detector
+        key_levels = {
+            "CPR_PIVOT": cpr_info.get("pivot", 0.0),
+            "CPR_TC": cpr_info.get("tc", 0.0),
+            "CPR_BC": cpr_info.get("bc", 0.0),
+            "VAH": vp_info.get("vah", 0.0),
+            "VAL": vp_info.get("val", 0.0),
+            "POC": vp_info.get("poc", 0.0),
+            "AVWAP": current_vwap,
+            "AVWAP_UPPER_2SD": upper_2sd,
+            "AVWAP_LOWER_2SD": lower_2sd
+        }
+        order_flow = detect_stacked_order_flow_imbalances(sub_df, key_levels=key_levels)
+
+        # 5. Auction Market Theory (AMT) Value Area Trigger Check (HTF Gated)
         amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)
         if amt_trigger["trigger"] in ["VAH_REJECTION", "VAL_REJECTION"] and amt_trigger["confidence"] >= 0.85:
             if amt_trigger["side"] == "LONG" and close > ema55:
+                if not htf_aligned_long:
+                    return Signal(
+                        signal_type=SignalType.WAIT,
+                        entry_price=close,
+                        sl_price=0.0,
+                        target_1=0.0,
+                        target_2=0.0,
+                        reason=f"HTF Confluence Veto: AMT Long rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bullish.",
+                        htf_aligned=False,
+                        details={"htf_regime": htf_regime, "amt": amt_trigger, "order_flow": order_flow}
+                    )
                 return Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
@@ -175,12 +215,23 @@ class StrategyEngine:
                     target_2=amt_trigger["target_2"],
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) + 5.0, 2),
-                    reason=f"AMT Setup: {amt_trigger['reason']}",
+                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | HTF Aligned ({htf_regime['confluence_regime']}).",
                     htf_aligned=True,
                     fib_retracement=0.50,
-                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info}
+                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 )
             elif amt_trigger["side"] == "SHORT" and close < ema55:
+                if not htf_aligned_short:
+                    return Signal(
+                        signal_type=SignalType.WAIT,
+                        entry_price=close,
+                        sl_price=0.0,
+                        target_1=0.0,
+                        target_2=0.0,
+                        reason=f"HTF Confluence Veto: AMT Short rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bearish.",
+                        htf_aligned=False,
+                        details={"htf_regime": htf_regime, "amt": amt_trigger, "order_flow": order_flow}
+                    )
                 return Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
@@ -189,13 +240,45 @@ class StrategyEngine:
                     target_2=amt_trigger["target_2"],
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) - 5.0, 2),
-                    reason=f"AMT Setup: {amt_trigger['reason']}",
+                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | HTF Aligned ({htf_regime['confluence_regime']}).",
                     htf_aligned=True,
                     fib_retracement=0.50,
-                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info}
+                    details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 )
 
-        # 4. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
+        # 6. Stacked Order Flow Absorption Setup Check
+        if order_flow["absorption_event"] is not None:
+            abs_event = order_flow["absorption_event"]
+            if abs_event["type"] == "BUYER_ABSORPTION" and htf_aligned_long and close > ema55:
+                return Signal(
+                    signal_type=SignalType.LONG_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=abs_event["suggested_sl"],
+                    target_1=round(close + 1.2 * atr_14, 2),
+                    target_2=round(close + 2.5 * atr_14, 2),
+                    target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
+                    pyramid_trigger=round(close + 15.0, 2),
+                    reason=f"Order Flow Buyer Absorption: {abs_event['reason']} | HTF Aligned.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
+                )
+            elif abs_event["type"] == "SELLER_ABSORPTION" and htf_aligned_short and close < ema55:
+                return Signal(
+                    signal_type=SignalType.SHORT_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=abs_event["suggested_sl"],
+                    target_1=round(close - 1.2 * atr_14, 2),
+                    target_2=round(close - 2.5 * atr_14, 2),
+                    target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
+                    pyramid_trigger=round(close - 15.0, 2),
+                    reason=f"Order Flow Seller Absorption: {abs_event['reason']} | HTF Aligned.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
+                )
+
+        # 7. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
         dist_to_ema21 = abs(close - ema21) / close
         effective_stretch_threshold = MA_STRETCH_THRESHOLD * gap_info["slope_tolerance_mult"]
         if dist_to_ema21 > effective_stretch_threshold:
@@ -213,25 +296,37 @@ class StrategyEngine:
                 details={"ema21": ema21, "dist_pct": dist_to_ema21, "hurst": hurst_info["hurst"]}
             )
 
-        # 5. Dynamic Fibonacci Swings & Pre-Open Gap Anchoring
+        # 8. Dynamic Fibonacci Swings & Pre-Open Gap Anchoring
         if gap_info["is_large_gap"]:
             swing_high = gap_info["anchor_high"]
             swing_low = gap_info["anchor_low"]
         else:
             lookback = min(40, current_idx)
-            prior_window = df_5m.iloc[current_idx - lookback : current_idx - 2]
+            prior_window = sub_df.iloc[max(0, current_idx - lookback) : max(0, current_idx - 2)]
             if len(prior_window) < 5:
                 return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating swing history", True, 0.0, {})
             swing_high = float(prior_window["high"].max())
             swing_low = float(prior_window["low"].min())
             
         swing_range = swing_high - swing_low
-        prev_bar = df_5m.iloc[current_idx - 1]
+        prev_bar = sub_df.iloc[current_idx - 1]
         prev_close_val = float(prev_bar["close"])
 
-        # 6. LONG Setup (3-Tier Asymmetric Target Calculation)
+        # 9. LONG Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         long_avwap_cond = close > (current_vwap - 0.35 * (upper_2sd - current_vwap) / 2.0)
         if close > ema200 and long_avwap_cond and swing_range >= 35.0 and ofi_info["buyer_defense"]:
+            if not htf_aligned_long:
+                return Signal(
+                    signal_type=SignalType.WAIT,
+                    entry_price=close,
+                    sl_price=0.0,
+                    target_1=0.0,
+                    target_2=0.0,
+                    reason=f"HTF Confluence Veto: Golden Pocket Long rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bullish.",
+                    htf_aligned=False,
+                    details={"htf_regime": htf_regime, "order_flow": order_flow}
+                )
+                
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=True)
             in_pocket = fib["fib_618"] <= min(close, bar_open) and max(close, bar_open) <= (fib["fib_500"] + 10.0)
             bullish_trigger = (close > bar_open) or (close > prev_close_val)
@@ -250,19 +345,31 @@ class StrategyEngine:
                     target_2=t2,
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
-                    reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense.",
+                    reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | HTF Aligned.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_high": swing_high, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14, "gap_info": gap_info
+                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
                     }
                 )
 
-        # 7. SHORT Setup (3-Tier Asymmetric Target Calculation)
+        # 10. SHORT Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         short_avwap_cond = close < (current_vwap + 0.35 * (current_vwap - lower_2sd) / 2.0)
         if close < ema200 and short_avwap_cond and swing_range >= 35.0 and ofi_info["seller_defense"]:
+            if not htf_aligned_short:
+                return Signal(
+                    signal_type=SignalType.WAIT,
+                    entry_price=close,
+                    sl_price=0.0,
+                    target_1=0.0,
+                    target_2=0.0,
+                    reason=f"HTF Confluence Veto: Golden Pocket Short rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bearish.",
+                    htf_aligned=False,
+                    details={"htf_regime": htf_regime, "order_flow": order_flow}
+                )
+                
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=False)
             in_pocket = (fib["fib_500"] - 10.0) <= min(close, bar_open) and max(close, bar_open) <= fib["fib_618"]
             bearish_trigger = (close < bar_open) or (close < prev_close_val)
@@ -281,13 +388,13 @@ class StrategyEngine:
                     target_2=t2,
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
-                    reason=f"SHORT Setup Confirmed: Below 200 EMA + Below AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense.",
+                    reason=f"SHORT Setup Confirmed: Below 200 EMA + Below AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | HTF Aligned.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_low": swing_low, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14, "gap_info": gap_info
+                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
                     }
                 )
 
@@ -302,6 +409,11 @@ class StrategyEngine:
             reason="Market in consolidation / No confluence across core indicators.",
             htf_aligned=True,
             fib_retracement=0.0,
-            details={"ema200": ema200, "vwap": current_vwap, "ema21": ema21, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info, "gap_info": gap_info}
+            details={
+                "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
+                "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
+                "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
+            }
         )
+
 
