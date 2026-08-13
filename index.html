@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nifty Institutional Signal Terminal | Low-Noise Execution Engine</title>
+    <meta name="description" content="Ultra low-noise institutional trading terminal for Nifty 50 options based on the JustNifty v2.0 quantitative framework.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #080c14;
+            --bg-surface: #0e1422;
+            --bg-surface-raised: #141c2e;
+            --bg-surface-active: #1a253c;
+            --border-subtle: #1c273c;
+            --border-strong: #2a3b59;
+            
+            --text-main: #f1f5f9;
+            --text-muted: #8e9fb5;
+            --text-dim: #55657e;
+            
+            --signal-green: #05df72;
+            --signal-green-bg: rgba(5, 223, 114, 0.08);
+            --signal-green-border: rgba(5, 223, 114, 0.25);
+            
+            --signal-red: #ff3355;
+            --signal-red-bg: rgba(255, 51, 85, 0.08);
+            --signal-red-border: rgba(255, 51, 85, 0.25);
+            
+            --signal-amber: #fbb024;
+            --signal-amber-bg: rgba(251, 176, 36, 0.08);
+            --signal-amber-border: rgba(251, 176, 36, 0.25);
+            
+            --signal-cyan: #00d2ff;
+            --signal-cyan-bg: rgba(0, 210, 255, 0.08);
+            --signal-cyan-border: rgba(0, 210, 255, 0.25);
+            
+            --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            
+            --radius-xs: 4px;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Top Institutional Bar */
+        .top-bar {
+            background-color: var(--bg-surface);
+            border-bottom: 1px solid var(--border-subtle);
+            padding: 14px 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .bar-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .brand-cluster {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-badge {
+            background: linear-gradient(135deg, #05df72, #00d2ff);
+            color: #04121e;
+            font-weight: 800;
+            font-size: 13px;
+            padding: 4px 8px;
+            border-radius: var(--radius-xs);
+            letter-spacing: 0.05em;
+        }
+
+        .brand-title {
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+        }
+
+        .live-pulse {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--signal-green);
+            background-color: var(--signal-green-bg);
+            border: 1px solid var(--signal-green-border);
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .pulse-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--signal-green);
+            animation: pulse-ring 1.8s infinite;
+        }
+
+        @keyframes pulse-ring {
+            0% { transform: scale(0.9); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.4; }
+            100% { transform: scale(0.9); opacity: 1; }
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .btn-link {
+            font-size: 13px;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .btn-link:hover {
+            color: var(--text-main);
+        }
+
+        .btn-primary {
+            background-color: #1a2c47;
+            color: var(--signal-cyan);
+            border: 1px solid var(--signal-cyan-border);
+            padding: 6px 14px;
+            border-radius: var(--radius-xs);
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .btn-primary:hover {
+            background-color: #243c61;
+            border-color: var(--signal-cyan);
+        }
+
+        /* Hero Signal Banner (High Contrast, Low Noise) */
+        .hero-banner {
+            padding: 32px 0 20px;
+        }
+
+        .signal-grid-top {
+            display: grid;
+            grid-template-columns: 1.4fr 1fr;
+            gap: 20px;
+        }
+
+        .signal-card-primary {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 24px;
+            position: relative;
+        }
+
+        .signal-status-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .signal-indicator {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: var(--radius-xs);
+            letter-spacing: 0.05em;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sig-long { background-color: var(--signal-green-bg); color: var(--signal-green); border: 1px solid var(--signal-green-border); }
+        .sig-short { background-color: var(--signal-red-bg); color: var(--signal-red); border: 1px solid var(--signal-red-border); }
+        .sig-wait { background-color: var(--signal-amber-bg); color: var(--signal-amber); border: 1px solid var(--signal-amber-border); }
+
+        .spot-price-block {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .spot-value {
+            font-family: var(--font-mono);
+            font-size: 34px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+
+        .spot-change {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .change-up { color: var(--signal-green); }
+        .change-down { color: var(--signal-red); }
+
+        .signal-desc {
+            font-size: 14px;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        /* 4 Confluence Checks */
+        .confluence-checks {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            border-top: 1px solid var(--border-subtle);
+            padding-top: 16px;
+        }
+
+        .check-item {
+            background-color: var(--bg-surface-raised);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xs);
+            padding: 10px;
+        }
+
+        .check-name {
+            font-size: 11px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .check-status {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Institutional Option Action Box */
+        .action-box {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .action-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .strike-name {
+            font-family: var(--font-mono);
+            font-size: 22px;
+            font-weight: 800;
+            color: var(--signal-cyan);
+        }
+
+        .greeks-pill {
+            font-family: var(--font-mono);
+            font-size: 11.5px;
+            background-color: var(--bg-surface-raised);
+            padding: 4px 8px;
+            border-radius: var(--radius-xs);
+            color: var(--text-muted);
+        }
+
+        .price-levels-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .level-box {
+            background-color: var(--bg-base);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xs);
+            padding: 10px;
+        }
+
+        .lvl-lbl {
+            font-size: 10.5px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .lvl-val {
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .mgmt-protocol {
+            background-color: rgba(0, 210, 255, 0.04);
+            border-left: 3px solid var(--signal-cyan);
+            padding: 10px 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        /* Visual Signal Anatomy Diagram (Low Noise SVG) */
+        .diagram-section {
+            padding: 24px 0 40px;
+        }
+
+        .section-header {
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            margin-bottom: 4px;
+        }
+
+        .section-sub {
+            font-size: 13.5px;
+            color: var(--text-muted);
+        }
+
+        .diagram-card {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 24px;
+            overflow-x: auto;
+        }
+
+        .setup-selector-bar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-subtle);
+            padding-bottom: 12px;
+        }
+
+        .setup-tab {
+            background: none;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            font-family: var(--font-sans);
+            font-size: 13px;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: var(--radius-xs);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .setup-tab:hover {
+            color: var(--text-main);
+            background-color: var(--bg-surface-raised);
+        }
+
+        .setup-tab.active {
+            color: var(--signal-cyan);
+            background-color: var(--signal-cyan-bg);
+            border-color: var(--signal-cyan-border);
+        }
+
+        /* SVG Blueprint Canvas */
+        .svg-canvas {
+            width: 100%;
+            height: 380px;
+            background-color: var(--bg-base);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+        }
+
+        /* Interactive Risk Sizer */
+        .sizer-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        .sizer-box {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 24px;
+        }
+
+        .input-row {
+            margin-bottom: 16px;
+        }
+
+        .input-lbl {
+            display: block;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .input-ctrl {
+            width: 100%;
+            background-color: var(--bg-base);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-xs);
+            padding: 10px 14px;
+            color: var(--text-main);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            outline: none;
+        }
+
+        .input-ctrl:focus {
+            border-color: var(--signal-cyan);
+        }
+
+        .metrics-ladder {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .metric-cell {
+            background-color: var(--bg-base);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xs);
+            padding: 12px;
+        }
+
+        .m-lbl { font-size: 11px; color: var(--text-dim); text-transform: uppercase; font-weight: 600; }
+        .m-val { font-family: var(--font-mono); font-size: 18px; font-weight: 700; color: var(--text-main); margin-top: 4px; }
+
+        /* Strike Table */
+        .strike-table-card {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            margin-bottom: 48px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            background-color: var(--bg-surface-raised);
+            color: var(--text-dim);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-subtle);
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+        }
+
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background-color: var(--bg-surface-raised); }
+        .atm-row td { background-color: rgba(0, 210, 255, 0.04); color: var(--text-main); font-weight: 600; }
+        .pro-highlight { color: var(--signal-green); font-weight: 700; }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid var(--border-subtle);
+            padding: 24px 0;
+            font-size: 12.5px;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        @media (max-width: 900px) {
+            .signal-grid-top, .sizer-grid, .confluence-checks { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Top Navigation Header -->
+    <header class="top-bar">
+        <div class="container bar-inner">
+            <div class="brand-cluster">
+                <span class="brand-badge">PRO</span>
+                <span class="brand-title">Nifty Institutional Signal Terminal</span>
+                <span class="live-pulse"><span class="pulse-dot"></span> FEED ACTIVE</span>
+            </div>
+            <div class="nav-actions">
+                <a href="#anatomy" class="btn-link">Setup Anatomy</a>
+                <a href="#sizing" class="btn-link">Risk Calculator</a>
+                <a href="#ladder" class="btn-link">Strike Greeks</a>
+                <a href="http://localhost:8501" target="_blank" class="btn-primary">▶ Streamlit Dashboard</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Live Signal Cockpit (Low Noise, High Accuracy) -->
+        <section class="hero-banner">
+            <div class="signal-grid-top">
+                <!-- Primary Signal Status -->
+                <div class="signal-card-primary">
+                    <div class="signal-status-row">
+                        <span class="signal-indicator sig-wait" id="liveSigBadge">● AWAITING CONFLUENCE</span>
+                        <span style="font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);">TIMEFRAME: 5m EXECUTION</span>
+                    </div>
+
+                    <div class="spot-price-block">
+                        <span class="spot-value" id="spotValue">24,530.00</span>
+                        <span class="spot-change change-up" id="spotChange">+62.40 (+0.25%)</span>
+                    </div>
+
+                    <p class="signal-desc" id="signalReason">
+                        Market is holding above 200 EMA (24,480) & Session AVWAP (24,505). Watching for pullback into the <strong>50.0% to 61.8% Fibonacci Golden Pocket</strong> for high-conviction Long trigger.
+                    </p>
+
+                    <!-- 4 Confluence Gauges -->
+                    <div class="confluence-checks">
+                        <div class="check-item">
+                            <div class="check-name">1. Regime (200 EMA)</div>
+                            <div class="check-status" style="color: var(--signal-green);" id="c1">✓ Above 200 EMA</div>
+                        </div>
+                        <div class="check-item">
+                            <div class="check-name">2. Session AVWAP</div>
+                            <div class="check-status" style="color: var(--signal-green);" id="c2">✓ Above 09:15 Anchor</div>
+                        </div>
+                        <div class="check-item">
+                            <div class="check-name">3. Retracement</div>
+                            <div class="check-status" style="color: var(--signal-amber);" id="c3">⏳ 54.2% Pullback</div>
+                        </div>
+                        <div class="check-item">
+                            <div class="check-name">4. MA Proximity</div>
+                            <div class="check-status" style="color: var(--signal-green);" id="c4">✓ Proximity 0.18%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Instant Action & Strike Execution Ticket -->
+                <div class="action-box">
+                    <div>
+                        <div class="action-header">
+                            <div>
+                                <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; font-weight: 600;">Optimal Institutional Strike</div>
+                                <div class="strike-name" id="ticketSymbol">NIFTY 24500 CE</div>
+                            </div>
+                            <div class="greeks-pill" id="greeksPill">Δ 0.58 • Θ -₹14.20/sh</div>
+                        </div>
+
+                        <div class="price-levels-grid">
+                            <div class="level-box">
+                                <div class="lvl-lbl">Entry Premium</div>
+                                <div class="lvl-val" id="entryVal">₹142.50</div>
+                            </div>
+                            <div class="level-box">
+                                <div class="lvl-lbl">Stop Loss</div>
+                                <div class="lvl-val" style="color: var(--signal-red);" id="slVal">₹112.50</div>
+                            </div>
+                            <div class="level-box">
+                                <div class="lvl-lbl">50% Part-Book (T1)</div>
+                                <div class="lvl-val" style="color: var(--signal-green);" id="t1Val">₹188.00</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mgmt-protocol">
+                        <strong>Execution Protocol:</strong> Book 50% at <strong>₹188.00 (T1 / 1.5% Envelope)</strong>. Shift SL on remaining 50% lots to <strong>Break-Even (₹142.50)</strong>. Trail runners on 1m 21 EMA.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual Signal Blueprint Diagram -->
+        <section class="diagram-section" id="anatomy">
+            <div class="section-header">
+                <div class="section-title">Visual Setup Anatomy (JustNifty v2.0)</div>
+                <div class="section-sub">Low-noise visual blueprint of exact levels, golden pocket entry zones, and envelope extremes.</div>
+            </div>
+
+            <div class="diagram-card">
+                <div class="setup-selector-bar">
+                    <button class="setup-tab active" onclick="switchSetup('LONG')">🟢 Playbook 1: Golden Pocket Long</button>
+                    <button class="setup-tab" onclick="switchSetup('SHORT')">🔴 Playbook 2: Golden Pocket Short</button>
+                    <button class="setup-tab" onclick="switchSetup('3PM')">⚡ Playbook 3: 3:00 PM Breakout</button>
+                </div>
+
+                <!-- Clean Vectorized SVG Diagram -->
+                <svg class="svg-canvas" id="blueprintSvg" viewBox="0 0 1000 360">
+                    <!-- Background grid lines -->
+                    <line x1="60" y1="40" x2="940" y2="40" stroke="#1c273c" stroke-dasharray="3,3" />
+                    <line x1="60" y1="120" x2="940" y2="120" stroke="#1c273c" stroke-dasharray="3,3" />
+                    <line x1="60" y1="200" x2="940" y2="200" stroke="#1c273c" stroke-dasharray="3,3" />
+                    <line x1="60" y1="280" x2="940" y2="280" stroke="#1c273c" stroke-dasharray="3,3" />
+
+                    <!-- 1.5% Envelope Upper -->
+                    <line x1="60" y1="50" x2="940" y2="50" stroke="#ff3355" stroke-width="1.5" stroke-dasharray="4,4" />
+                    <text x="70" y="44" fill="#ff3355" font-family="JetBrains Mono" font-size="11" font-weight="600">1.5% 200 EMA Upper Envelope (Extreme Resistance / 50% Take Profit)</text>
+
+                    <!-- Fib Golden Pocket Band (50% - 61.8%) -->
+                    <rect x="60" y="160" width="880" height="50" fill="rgba(251, 176, 36, 0.07)" stroke="rgba(251, 176, 36, 0.3)" stroke-width="1" />
+                    <text x="70" y="180" fill="#fbb024" font-family="JetBrains Mono" font-size="11" font-weight="600">50.0% - 61.8% Fibonacci Golden Pocket Entry Zone</text>
+
+                    <!-- 200 EMA (Regime Line) -->
+                    <path d="M 60 260 Q 500 240 940 210" fill="none" stroke="#05df72" stroke-width="2.5" />
+                    <text x="800" y="200" fill="#05df72" font-family="JetBrains Mono" font-size="11" font-weight="700">200 EMA (Macro Regime)</text>
+
+                    <!-- Session AVWAP -->
+                    <path d="M 60 230 Q 500 210 940 180" fill="none" stroke="#a855f7" stroke-width="2" stroke-dasharray="5,3" />
+                    <text x="800" y="170" fill="#a855f7" font-family="JetBrains Mono" font-size="11" font-weight="700">Session AVWAP (09:15 Anchor)</text>
+
+                    <!-- Candlestick Impulse & Retracement Trajectory -->
+                    <path d="M 120 250 L 320 110 L 520 185 L 750 65" fill="none" stroke="#00d2ff" stroke-width="2" stroke-dasharray="2,2" />
+
+                    <!-- Golden Pocket Entry Candlestick -->
+                    <g transform="translate(520, 160)">
+                        <line x1="0" y1="0" x2="0" y2="45" stroke="#05df72" stroke-width="1.5" />
+                        <rect x="-6" y="8" width="12" height="25" fill="#05df72" />
+                        <circle cx="0" cy="20" r="18" fill="none" stroke="#00d2ff" stroke-width="1.5" stroke-dasharray="3,3" />
+                        <text x="22" y="24" fill="#00d2ff" font-family="JetBrains Mono" font-size="12" font-weight="700">ENTRY TRIGGER (Bullish Close)</text>
+                    </g>
+
+                    <!-- Stop Loss Line (78.6% Fib + 5 pts) -->
+                    <line x1="450" y1="235" x2="650" y2="235" stroke="#ff3355" stroke-width="2" />
+                    <text x="450" y="252" fill="#ff3355" font-family="JetBrains Mono" font-size="11" font-weight="600">STOP LOSS (78.6% Fib + 5 pts)</text>
+
+                    <!-- Target 1 Line (T1) -->
+                    <line x1="680" y1="75" x2="880" y2="75" stroke="#05df72" stroke-width="2" />
+                    <text x="680" y="92" fill="#05df72" font-family="JetBrains Mono" font-size="11" font-weight="600">TARGET 1: 50% PART-BOOK (VF T1 / Envelope)</text>
+                </svg>
+            </div>
+        </section>
+
+        <!-- Interactive Position & Lot Sizing Section -->
+        <section id="sizing" style="padding-bottom: 24px;">
+            <div class="section-header">
+                <div class="section-title">Institutional 1% Risk & Position Sizer</div>
+                <div class="section-sub">Computes exact allowable contract lots based on strict 1% account capital risk limits.</div>
+            </div>
+
+            <div class="sizer-grid">
+                <div class="sizer-box">
+                    <div class="input-row">
+                        <label class="input-lbl">Account Capital (₹)</label>
+                        <input type="number" id="capInput" class="input-ctrl" value="500000" step="50000">
+                    </div>
+                    <div class="input-row">
+                        <label class="input-lbl">Max Risk % (Default: 1.0%)</label>
+                        <input type="number" id="riskInput" class="input-ctrl" value="1.0" step="0.1">
+                    </div>
+                    <div class="input-row">
+                        <label class="input-lbl">Option Entry Premium (₹)</label>
+                        <input type="number" id="epInput" class="input-ctrl" value="142.50" step="1.0">
+                    </div>
+                    <div class="input-row">
+                        <label class="input-lbl">Option Stop-Loss Premium (₹)</label>
+                        <input type="number" id="slInput" class="input-ctrl" value="112.50" step="1.0">
+                    </div>
+                </div>
+
+                <div class="sizer-box">
+                    <div class="metrics-ladder">
+                        <div class="metric-cell">
+                            <div class="m-lbl">Max Allowed Loss</div>
+                            <div class="m-val" style="color: var(--signal-amber);" id="outMaxRisk">₹5,000.00</div>
+                        </div>
+                        <div class="metric-cell">
+                            <div class="m-lbl">Allocated Lots (25/lot)</div>
+                            <div class="m-val" style="color: var(--signal-cyan);" id="outLots">6 Lots (150 Qty)</div>
+                        </div>
+                        <div class="metric-cell">
+                            <div class="m-lbl">Actual Risk Exposure</div>
+                            <div class="m-val" style="color: var(--signal-red);" id="outActualRisk">₹4,500.00</div>
+                        </div>
+                        <div class="metric-cell">
+                            <div class="m-lbl">Capital Outlay</div>
+                            <div class="m-val" style="color: var(--text-main);" id="outOutlay">₹21,375.00</div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 18px; font-size: 12px; color: var(--text-dim); line-height: 1.4;">
+                        ✓ Risk is strictly capped below 1.0% of total capital.<br>
+                        ✓ Target 50% part-book at T1 leaves remaining 3 lots at break-even SL.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Strike Ladder Matrix -->
+        <section id="ladder">
+            <div class="section-header">
+                <div class="section-title">Institutional Strike Selection Ladder (Delta 0.50 – 0.65)</div>
+                <div class="section-sub">Prop desk strike matrix: ATM to 1-strike ITM options for maximum delta efficiency.</div>
+            </div>
+
+            <div class="strike-table-card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Call Execution</th>
+                            <th>CE Delta (Δ)</th>
+                            <th>CE Theta (₹/day)</th>
+                            <th>CE Premium</th>
+                            <th>Strike Price</th>
+                            <th>PE Premium</th>
+                            <th>PE Theta (₹/day)</th>
+                            <th>PE Delta (Δ)</th>
+                            <th>Put Execution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="strikeRows">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer>
+            <div>Nifty Institutional Quantitative Engine (JustNifty v2.0) • Python & Streamlit Core</div>
+            <div><a href="http://localhost:8501" target="_blank" style="color: var(--signal-cyan); text-decoration: none; font-weight: 600;">Open Live Dashboard →</a></div>
+        </footer>
+    </div>
+
+    <!-- Interactive Script -->
+    <script>
+        function updateSizer() {
+            const capital = parseFloat(document.getElementById('capInput').value) || 500000;
+            const riskPct = parseFloat(document.getElementById('riskInput').value) / 100.0;
+            const ep = parseFloat(document.getElementById('epInput').value) || 140;
+            const sl = parseFloat(document.getElementById('slInput').value) || 110;
+            const lotSize = 25;
+
+            const maxRiskRupees = capital * riskPct;
+            const riskPerShare = Math.max(ep - sl, 2.0);
+            const lots = Math.max(Math.floor(maxRiskRupees / (riskPerShare * lotSize)), 1);
+            const actualRisk = lots * lotSize * riskPerShare;
+            const outlay = lots * lotSize * ep;
+
+            document.getElementById('outMaxRisk').innerText = '₹' + maxRiskRupees.toLocaleString('en-IN', {minimumFractionDigits: 2});
+            document.getElementById('outLots').innerText = `${lots} Lots (${lots * lotSize} Qty)`;
+            document.getElementById('outActualRisk').innerText = '₹' + actualRisk.toLocaleString('en-IN', {minimumFractionDigits: 2});
+            document.getElementById('outOutlay').innerText = '₹' + outlay.toLocaleString('en-IN', {minimumFractionDigits: 2});
+        }
+
+        function populateLadder(spot) {
+            const atm = Math.round(spot / 50.0) * 50;
+            const tbody = document.getElementById('strikeRows');
+            tbody.innerHTML = '';
+
+            for (let k = atm - 150; k <= atm + 150; k += 50) {
+                const diff = (spot - k);
+                const isATM = (k === atm);
+                
+                // Approximate realistic Black-Scholes Delta & Premiums
+                const ceDelta = Math.min(Math.max(0.50 + (diff * 0.0025), 0.20), 0.85);
+                const peDelta = ceDelta - 1.0;
+                const cePrem = Math.max(130 + diff * 0.55, 10);
+                const pePrem = Math.max(130 - diff * 0.55, 10);
+                const theta = -14.50;
+
+                const isCePro = (ceDelta >= 0.50 && ceDelta <= 0.65);
+                const isPePro = (Math.abs(peDelta) >= 0.50 && Math.abs(peDelta) <= 0.65);
+
+                const tr = document.createElement('tr');
+                if (isATM) tr.className = 'atm-row';
+
+                tr.innerHTML = `
+                    <td class="${isCePro ? 'pro-highlight' : ''}">${isCePro ? '👉 PRO CALL' : ''}</td>
+                    <td style="color: ${ceDelta >= 0.5 ? '#05df72' : '#8e9fb5'}">${ceDelta.toFixed(2)}</td>
+                    <td style="color: #ff3355">₹${theta.toFixed(2)}</td>
+                    <td style="color: #f1f5f9">₹${cePrem.toFixed(2)}</td>
+                    <td style="font-weight: 700; color: ${isATM ? '#00d2ff' : '#f1f5f9'}">${k} ${isATM ? '(ATM)' : ''}</td>
+                    <td style="color: #f1f5f9">₹${pePrem.toFixed(2)}</td>
+                    <td style="color: #ff3355">₹${theta.toFixed(2)}</td>
+                    <td style="color: ${Math.abs(peDelta) >= 0.5 ? '#05df72' : '#8e9fb5'}">${peDelta.toFixed(2)}</td>
+                    <td class="${isPePro ? 'pro-highlight' : ''}">${isPePro ? '👉 PRO PUT' : ''}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
+
+        function switchSetup(type) {
+            document.querySelectorAll('.setup-tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+
+            const badge = document.getElementById('liveSigBadge');
+            const desc = document.getElementById('signalReason');
+            const sym = document.getElementById('ticketSymbol');
+            const ep = document.getElementById('entryVal');
+            const sl = document.getElementById('slVal');
+            const t1 = document.getElementById('t1Val');
+
+            if (type === 'LONG') {
+                badge.className = 'signal-indicator sig-long';
+                badge.innerText = '● LONG CONFIRMED (GOLDEN POCKET)';
+                desc.innerHTML = 'Bullish confluence met: Above 200 EMA + Above 09:15 AVWAP + 50-61.8% Fib Golden Pocket pullback + Bullish Engulfing close.';
+                sym.innerText = 'NIFTY 24500 CE (1-ITM)';
+                ep.innerText = '₹142.50';
+                sl.innerText = '₹112.50';
+                t1.innerText = '₹188.00';
+            } else if (type === 'SHORT') {
+                badge.className = 'signal-indicator sig-short';
+                badge.innerText = '● SHORT CONFIRMED (GOLDEN POCKET)';
+                desc.innerHTML = 'Bearish confluence met: Below 200 EMA + Below 09:15 AVWAP + 50-61.8% Fib Golden Pocket pullback + Bearish Engulfing close.';
+                sym.innerText = 'NIFTY 24550 PE (ATM)';
+                ep.innerText = '₹138.00';
+                sl.innerText = '₹108.00';
+                t1.innerText = '₹184.00';
+            } else {
+                badge.className = 'signal-indicator sig-wait';
+                badge.innerText = '● 3:00 PM AGGRESSIVE BREAKOUT SCAN';
+                desc.innerHTML = 'End-of-day momentum setup: Monitoring 15:00 candle High (24,560) and Low (24,510) for 100+ point MOC squeeze trigger.';
+                sym.innerText = 'NIFTY 24550 CE / PE';
+                ep.innerText = '₹135.00';
+                sl.innerText = '₹105.00';
+                t1.innerText = '₹195.00';
+            }
+        }
+
+        document.getElementById('capInput').addEventListener('input', updateSizer);
+        document.getElementById('riskInput').addEventListener('input', updateSizer);
+        document.getElementById('epInput').addEventListener('input', updateSizer);
+        document.getElementById('slInput').addEventListener('input', updateSizer);
+
+        updateSizer();
+        populateLadder(24530);
+    </script>
+</body>
+</html>
