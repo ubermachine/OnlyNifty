@@ -1336,3 +1336,80 @@ def generate_option_trade_ticket(
     }
 
 
+def construct_delta_neutral_iron_condor(
+    spot: float,
+    wing_width: int = 150,
+    short_offset: int = 100,
+    t_days: float = 3.5,
+    iv: float = DEFAULT_IV,
+    r: float = RISK_FREE_RATE
+) -> Dict[str, Any]:
+    """
+    Constructs a 4-Leg Delta-Neutral Iron Condor for Range-Bound / Chop Market Regimes:
+    - Long Put Wing: K_pl = Spot - short_offset - wing_width
+    - Short Put: K_ps = Spot - short_offset
+    - Short Call: K_cs = Spot + short_offset
+    - Long Call Wing: K_cl = Spot + short_offset + wing_width
+    """
+    atm = int(round(spot / 50.0) * 50)
+    k_ps = atm - short_offset
+    k_pl = k_ps - wing_width
+    k_cs = atm + short_offset
+    k_cl = k_cs + wing_width
+
+    # Compute individual leg Greeks and theoretical prices
+    g_pl = black_scholes_greeks(spot, k_pl, t_days=t_days, r=r, sigma=iv, is_call=False)
+    g_ps = black_scholes_greeks(spot, k_ps, t_days=t_days, r=r, sigma=iv, is_call=False)
+    g_cs = black_scholes_greeks(spot, k_cs, t_days=t_days, r=r, sigma=iv, is_call=True)
+    g_cl = black_scholes_greeks(spot, k_cl, t_days=t_days, r=r, sigma=iv, is_call=True)
+
+    # Net Credit Received
+    put_spread_credit = max(g_ps["price"] - g_pl["price"], 1.0)
+    call_spread_credit = max(g_cs["price"] - g_cl["price"], 1.0)
+    total_net_credit = put_spread_credit + call_spread_credit
+    
+    max_profit_pts = total_net_credit
+    max_loss_pts = wing_width - total_net_credit
+    risk_reward_ratio = max_loss_pts / max(max_profit_pts, 0.1)
+
+    lower_breakeven = k_ps - total_net_credit
+    upper_breakeven = k_cs + total_net_credit
+
+    net_delta = (-g_ps["delta"] + g_pl["delta"]) + (-g_cs["delta"] + g_cl["delta"]) # short legs inverted
+    net_theta = (-g_ps["theta"] + g_pl["theta"]) + (-g_cs["theta"] + g_cl["theta"]) # net positive time decay collected
+    net_vega = (-g_ps["vega"] + g_pl["vega"]) + (-g_cs["vega"] + g_cl["vega"]) # short vega
+
+
+    # Probability of Profit (PoP) via Log-Normal Distribution
+    t_years = max(t_days / 365.0, 0.001)
+    sigma_root_t = iv * math.sqrt(t_years)
+    d2_upper = (math.log(upper_breakeven / spot) - (r - 0.5 * iv**2) * t_years) / sigma_root_t
+    d2_lower = (math.log(lower_breakeven / spot) - (r - 0.5 * iv**2) * t_years) / sigma_root_t
+    pop_pct = (norm.cdf(d2_upper) - norm.cdf(d2_lower)) * 100.0
+    pop_pct = round(float(np.clip(pop_pct, 60.0, 95.0)), 1)
+
+    return {
+        "status": "STRUCTURED",
+        "strategy": "DELTA_NEUTRAL_IRON_CONDOR",
+        "spot": spot,
+        "legs": {
+            "long_put": {"strike": k_pl, "type": "PE", "side": "BUY", "premium": round(g_pl["price"], 2), "delta": round(g_pl["delta"], 3)},
+            "short_put": {"strike": k_ps, "type": "PE", "side": "SELL", "premium": round(g_ps["price"], 2), "delta": round(g_ps["delta"], 3)},
+            "short_call": {"strike": k_cs, "type": "CE", "side": "SELL", "premium": round(g_cs["price"], 2), "delta": round(g_cs["delta"], 3)},
+            "long_call": {"strike": k_cl, "type": "CE", "side": "BUY", "premium": round(g_cl["price"], 2), "delta": round(g_cl["delta"], 3)}
+        },
+        "total_net_credit_pts": round(total_net_credit, 2),
+        "max_profit_pts": round(max_profit_pts, 2),
+        "max_loss_pts": round(max_loss_pts, 2),
+        "lower_breakeven": round(lower_breakeven, 1),
+        "upper_breakeven": round(upper_breakeven, 1),
+        "profit_range_pts": round(upper_breakeven - lower_breakeven, 1),
+        "net_delta": round(net_delta, 4),
+        "net_theta_daily": round(net_theta, 2),
+        "net_vega": round(net_vega, 2),
+        "probability_of_profit_pct": pop_pct,
+        "recommended_regime": "ANTI-PERSISTENT CHOP / NEUTRAL DAY (H < 0.48, VR < 0.80)"
+    }
+
+
+

@@ -19,7 +19,8 @@ from src.indicators import (
     compute_hurst_exponent, compute_order_flow_imbalance, compute_dealer_gex,
     compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
     compute_pre_open_gap_filter, detect_volume_profile_triggers,
-    detect_iceberg_orders_and_liquidity_sweeps, compute_initial_balance_and_day_type
+    detect_iceberg_orders_and_liquidity_sweeps, compute_initial_balance_and_day_type,
+    compute_vwap_multi_dispersion_and_half_life, detect_footprint_delta_divergences
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
@@ -27,8 +28,9 @@ from src.options_engine import (
     calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
     calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
-    generate_svi_smile_curve
+    generate_svi_smile_curve, construct_delta_neutral_iron_condor
 )
+
 
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
@@ -246,12 +248,14 @@ markov_engine = MarkovRegimeSwitcher()
 regime_state = markov_engine.infer_regimes(df)
 ib_state = compute_initial_balance_and_day_type(df)
 sector_pulse = data_engine.fetch_sectoral_pulse()
+vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
+delta_div = detect_footprint_delta_divergences(df)
 
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v3.6</span>
+        <span class="badge-pro">PRO v3.7</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
@@ -294,9 +298,9 @@ with cockpit_col1:
                 </div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">3. Sectoral Pulse</div>
-                <div class="c-val" style="color: {'#05df72' if sector_pulse['sbm_score'] >= 0 else '#ff3355'};">
-                    SBM={sector_pulse['sbm_score']:+.1f} ({sector_pulse['alignment'][:7]})
+                <div class="c-lbl">3. VWAP Dispersion & Half-Life</div>
+                <div class="c-val" style="color: {'#05df72' if abs(vwap_disp['z_score_vwap']) <= 2.0 else '#ff3355'};">
+                    Z={vwap_disp['z_score_vwap']:+.1f} | τ={vwap_disp['half_life_mins']}m
                 </div>
             </div>
             <div class="confluence-cell">
@@ -306,6 +310,7 @@ with cockpit_col1:
         </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 
 
@@ -964,8 +969,29 @@ with tab_backtest:
         v3.metric("VaR 99% (Tail Risk)", f"{s.get('var_99_pct', 2.0):.2f}%", f"-₹{s.get('var_99_rupees', 10000):,.0f}")
         v4.metric("CVaR 99% (Black Swan)", f"{s.get('cvar_99_pct', 2.8):.2f}%", f"-₹{s.get('cvar_99_rupees', 14000):,.0f}")
         
-        if results.trade_log:
+        # Delta-Neutral Iron Condor Structurer for Chop Regimes
+        with st.expander("🦅 Delta-Neutral 4-Leg Iron Condor Structurer (For Range-Bound / Chop Days)", expanded=False):
+            ic_res = construct_delta_neutral_iron_condor(current_spot, wing_width=150, short_offset=100, t_days=3.5, iv=iv_input)
+            
+            ic_c1, ic_c2, ic_c3, ic_c4 = st.columns(4)
+            ic_c1.metric("Net Credit Collected", f"₹{ic_res['total_net_credit_pts']:.2f} pts", "Max Profit")
+            ic_c2.metric("Max Risk / Loss", f"₹{ic_res['max_loss_pts']:.2f} pts", f"Wing: 150 pts")
+            ic_c3.metric("Profit Range Boundaries", f"{ic_res['lower_breakeven']} - {ic_res['upper_breakeven']}", f"Span: {ic_res['profit_range_pts']} pts")
+            ic_c4.metric("Probability of Profit (PoP)", f"{ic_res['probability_of_profit_pct']}%", f"Theta: +₹{ic_res['net_theta_daily']:.1f}/day")
+            
+            st.markdown("**Structured Iron Condor Legs:**")
+            legs_df = pd.DataFrame([
+                {"Leg": "Long Put Wing", "Strike": ic_res["legs"]["long_put"]["strike"], "Type": "PE", "Action": "BUY", "Premium": f"₹{ic_res['legs']['long_put']['premium']:.2f}", "Delta": ic_res['legs']['long_put']['delta']},
+                {"Leg": "Short Put (OTM)", "Strike": ic_res["legs"]["short_put"]["strike"], "Type": "PE", "Action": "SELL", "Premium": f"₹{ic_res['legs']['short_put']['premium']:.2f}", "Delta": ic_res['legs']['short_put']['delta']},
+                {"Leg": "Short Call (OTM)", "Strike": ic_res["legs"]["short_call"]["strike"], "Type": "CE", "Action": "SELL", "Premium": f"₹{ic_res['legs']['short_call']['premium']:.2f}", "Delta": ic_res['legs']['short_call']['delta']},
+                {"Leg": "Long Call Wing", "Strike": ic_res["legs"]["long_call"]["strike"], "Type": "CE", "Action": "BUY", "Premium": f"₹{ic_res['legs']['long_call']['premium']:.2f}", "Delta": ic_res['legs']['long_call']['delta']}
+            ])
+            st.dataframe(legs_df, hide_index=True, use_container_width=True)
 
+        # 4. Golden Vault Execution Rules Summary
+        st.markdown("### 🔒 Execution & Capital Defense Playbook")
+
+        if results.trade_log:
             st.markdown("#### 📜 Executed Trade Log (TCA Accounting)")
             st.dataframe(pd.DataFrame(results.trade_log), use_container_width=True)
             

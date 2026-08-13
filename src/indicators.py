@@ -161,6 +161,143 @@ def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Seri
     lower_sd = vwap - (2.0 * std_dev)
     return vwap, upper_sd, lower_sd
 
+
+def compute_vwap_multi_dispersion_and_half_life(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Computes Full Multi-Sigma VWAP Dispersion Envelopes (±1σ, ±2σ, ±3σ),
+    Real-Time VWAP Z-Score (Z_vwap), and Ornstein-Uhlenbeck (OU) Mean-Reversion Half-Life (τ_1/2).
+    """
+    if df.empty or len(df) < 5:
+        return {
+            "vwap": 0.0, "sigma_1_up": 0.0, "sigma_1_down": 0.0,
+            "sigma_2_up": 0.0, "sigma_2_down": 0.0, "sigma_3_up": 0.0, "sigma_3_down": 0.0,
+            "z_score_vwap": 0.0, "half_life_bars": 12.0, "half_life_mins": 60.0,
+            "mean_reverting_urgency": "NORMAL"
+        }
+
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"].copy().astype(float).replace(0, 1.0)
+    
+    dates = pd.Series(df.index.date, index=df.index) if hasattr(df.index, "date") else pd.Series(0, index=df.index)
+    cum_vol = vol.groupby(dates).cumsum().clip(lower=1.0)
+    cum_tp_vol = (typical_price * vol).groupby(dates).cumsum()
+    cum_tp_sq_vol = ((typical_price ** 2) * vol).groupby(dates).cumsum()
+    
+    vwap_series = (cum_tp_vol / cum_vol).fillna(typical_price)
+    variance_series = (cum_tp_sq_vol / cum_vol) - (vwap_series ** 2)
+    std_series = np.sqrt(np.maximum(variance_series, 0.0)).fillna(1.0)
+
+    curr_close = float(df["close"].iloc[-1])
+    curr_vwap = float(vwap_series.iloc[-1])
+    curr_std = max(float(std_series.iloc[-1]), 1.0)
+
+    z_score = (curr_close - curr_vwap) / curr_std
+    
+    # 1σ, 2σ, 3σ bands
+    s1_up = round(curr_vwap + 1.0 * curr_std, 2)
+    s1_down = round(curr_vwap - 1.0 * curr_std, 2)
+    s2_up = round(curr_vwap + 2.0 * curr_std, 2)
+    s2_down = round(curr_vwap - 2.0 * curr_std, 2)
+    s3_up = round(curr_vwap + 3.0 * curr_std, 2)
+    s3_down = round(curr_vwap - 3.0 * curr_std, 2)
+
+    # Ornstein-Uhlenbeck (OU) Mean-Reversion Half-Life Estimation:
+    # Regress delta_S_t on S_{t-1} relative to VWAP
+    price_diff = (df["close"] - vwap_series).values
+    if len(price_diff) >= 15:
+        y = np.diff(price_diff)
+        x = price_diff[:-1]
+        # Linear regression slope: delta_y = beta * x
+        if np.var(x) > 1e-6:
+            beta = np.cov(x, y)[0, 1] / np.var(x)
+            if beta < 0:
+                theta = - beta # Speed of mean reversion
+                half_life_bars = round(np.log(2.0) / max(theta, 0.01), 1)
+            else:
+                half_life_bars = 45.0 # Non-mean-reverting / trending
+        else:
+            half_life_bars = 15.0
+    else:
+        half_life_bars = 12.0
+
+    half_life_bars = float(np.clip(half_life_bars, 2.0, 60.0))
+    half_life_mins = round(half_life_bars * 5.0, 1)
+
+    if abs(z_score) >= 2.5 and half_life_bars <= 8.0:
+        urgency = "HIGH_CONVICTION_MEAN_REVERSION_FADE"
+    elif abs(z_score) <= 1.0:
+        urgency = "FAIR_VALUE_CONSOLIDATION"
+    else:
+        urgency = "TREND_EXTENSION_ACTIVE"
+
+    return {
+        "vwap": round(curr_vwap, 2),
+        "std_dev": round(curr_std, 2),
+        "sigma_1_up": s1_up,
+        "sigma_1_down": s1_down,
+        "sigma_2_up": s2_up,
+        "sigma_2_down": s2_down,
+        "sigma_3_up": s3_up,
+        "sigma_3_down": s3_down,
+        "z_score_vwap": round(z_score, 2),
+        "half_life_bars": half_life_bars,
+        "half_life_mins": half_life_mins,
+        "mean_reverting_urgency": urgency
+    }
+
+
+def detect_footprint_delta_divergences(
+    df: pd.DataFrame,
+    lookback: int = 15
+) -> Dict[str, Any]:
+    """
+    Detects Institutional Footprint Delta Divergences:
+    - Regular Bullish Divergence: Price Lower Low vs CVD Higher Low (Buyer Passive Absorption)
+    - Regular Bearish Divergence: Price Higher High vs CVD Lower High (Seller Passive Absorption)
+    """
+    if df.empty or len(df) < lookback + 5:
+        return {"divergence_detected": False, "type": "NONE", "bias": "NEUTRAL", "thesis": ""}
+
+    sub = df.tail(lookback + 5)
+    vol = sub["volume"].copy().astype(float).replace(0, 1.0)
+    c_range = (sub["high"] - sub["low"]).replace(0, 1.0)
+    body_weight = (sub["close"] - sub["open"]) / c_range
+    close_loc_weight = (2.0 * sub["close"] - sub["high"] - sub["low"]) / c_range
+    bar_deltas = vol * ((0.60 * body_weight) + (0.40 * close_loc_weight))
+    cvd = bar_deltas.cumsum()
+
+    prices = sub["close"].values
+    cvd_vals = cvd.values
+
+    # Halfway split
+    mid = len(prices) // 2
+    p1_min, p1_max = np.min(prices[:mid]), np.max(prices[:mid])
+    p2_min, p2_max = np.min(prices[mid:]), np.max(prices[mid:])
+
+    cvd1_min, cvd1_max = np.min(cvd_vals[:mid]), np.max(cvd_vals[:mid])
+    cvd2_min, cvd2_max = np.min(cvd_vals[mid:]), np.max(cvd_vals[mid:])
+
+    # Bullish Divergence: Lower Low on price, Higher Low on CVD
+    if (p2_min < p1_min - 3.0) and (cvd2_min > cvd1_min + 5000):
+        return {
+            "divergence_detected": True,
+            "type": "REGULAR_BULLISH_DELTA_DIVERGENCE",
+            "bias": "BULLISH_ABSORPTION_REVERSAL",
+            "thesis": f"Spot made Lower Low ({p2_min:.1f} < {p1_min:.1f}) but Cumulative Volume Delta made Higher Low. Institutions passively absorbing selling."
+        }
+
+    # Bearish Divergence: Higher High on price, Lower High on CVD
+    if (p2_max > p1_max + 3.0) and (cvd2_max < cvd1_max - 5000):
+        return {
+            "divergence_detected": True,
+            "type": "REGULAR_BEARISH_DELTA_DIVERGENCE",
+            "bias": "BEARISH_DISTRIBUTION_REVERSAL",
+            "thesis": f"Spot made Higher High ({p2_max:.1f} > {p1_max:.1f}) but Cumulative Volume Delta made Lower High. Institutions distributing into retail FOMO."
+        }
+
+    return {"divergence_detected": False, "type": "NONE", "bias": "NEUTRAL", "thesis": "No Delta Divergence detected."}
+
+
 def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Computes Composite Price-Wick Weighted Bar Delta & Rolling 20-Bar OFI Z-Score.
