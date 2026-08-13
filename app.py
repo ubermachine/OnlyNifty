@@ -259,6 +259,8 @@ with cockpit_col2:
         ep_str = f"₹{ticket['entry_premium']:.2f}"
         sl_str = f"₹{ticket['sl_premium']:.2f}"
         t1_str = f"₹{ticket['target1_premium']:.2f}"
+        t2_str = f"₹{ticket['target2_premium']:.2f}"
+        t3_str = f"₹{ticket['target3_moonshot_premium']:.2f}"
         lots_str = f"{ticket['lots']} Lots ({ticket['total_qty']} Qty)"
         risk_rupees_str = f"₹{ticket['max_risk_rupees']:,.2f}"
         tca_fees_str = f"TCA: ₹{ticket['tca_friction']['total_friction']:.1f}"
@@ -269,7 +271,9 @@ with cockpit_col2:
         greeks_str = "Δ 0.55 • Γ 0.00078 • Θ -₹14.20/sh • Vanna 0.0420"
         ep_str = "₹142.50"
         sl_str = "₹112.50"
-        t1_str = "₹188.00"
+        t1_str = "₹182.00"
+        t2_str = "₹228.00"
+        t3_str = "₹285.00"
         lots_str = "6 Lots (150 Qty)"
         risk_rupees_str = f"₹{account_capital * risk_pct:,.2f}"
         tca_fees_str = "TCA Est: ₹182.50"
@@ -289,23 +293,27 @@ with cockpit_col2:
             <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #718096; margin-bottom: 10px;">
                 {greeks_str}
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
-                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">Entry Prem</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">{ep_str}</div>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px;">
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
+                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">Entry Prem</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">{ep_str}</div>
                 </div>
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
-                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">Stop Loss</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #ff3355;">{sl_str}</div>
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
+                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">Stop Loss</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">{sl_str}</div>
                 </div>
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px;">
-                    <div style="font-size: 10px; color: #55657e; text-transform: uppercase; font-weight: 600;">50% Target (T1)</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #05df72;">{t1_str}</div>
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
+                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">T1 (35%)</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">{t1_str}</div>
+                </div>
+                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
+                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">T2 (35%)</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #00d2ff;">{t2_str}</div>
                 </div>
             </div>
         </div>
-        <div style="background-color: rgba(0, 210, 255, 0.04); border-left: 3px solid #00d2ff; padding: 8px 10px; font-size: 11.5px; color: #8e9fb5; line-height: 1.4;">
-            <strong>Execution:</strong> Book 50% at <strong>{t1_str} (+1.2x ATR)</strong> ➔ Shift SL to <strong>Break-Even ({ep_str})</strong> ➔ Trail runners on 1m 21 EMA.
+        <div style="background-color: rgba(0, 210, 255, 0.04); border-left: 3px solid #00d2ff; padding: 8px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4;">
+            <strong>Profit Maximizer:</strong> Book 35% @ <strong>{t1_str}</strong> (or sell OTM for Free Spread) ➔ Book 35% @ <strong>{t2_str}</strong> ➔ Trail 30% runner to <strong>{t3_str}</strong> on 5m 21 EMA.
         </div>
     </div>
     """, unsafe_allow_html=True)
