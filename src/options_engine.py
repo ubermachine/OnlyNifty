@@ -1277,20 +1277,41 @@ def generate_option_trade_ticket(
     entry_prem = strike_info["price"]
     k1 = strike_info["strike"]
     
-    spot_risk = abs(signal.entry_price - signal.sl_price)
+    # 1. Spot Risk Bounds with Defensive Index Sanitization
+    sl_p = float(getattr(signal, "sl_price", 0.0))
+    if sl_p > 1000.0 and abs(spot - sl_p) < 300.0:
+        spot_risk = abs(spot - sl_p)
+    else:
+        spot_risk = 35.0  # Default 35 pts index risk
+        
     convexity_benefit = 0.5 * gamma * (spot_risk ** 2)
     theta_risk = abs(theta) * 0.15
-    option_risk = max((spot_risk * delta) - convexity_benefit + theta_risk, 2.0)
-    sl_prem = max(round(entry_prem - option_risk, 2), 2.0)
+    option_risk = max((spot_risk * delta) - convexity_benefit + theta_risk, 10.0)
+    sl_prem = max(round(entry_prem - option_risk, 2), 5.0)
     
-    # 3-Tier Convex Option Target Premiums
-    diff_t1 = abs(signal.target_1 - signal.entry_price)
+    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds
+    t1_p = float(getattr(signal, "target_1", 0.0))
+    if t1_p > 1000.0 and abs(t1_p - spot) < 400.0:
+        diff_t1 = abs(t1_p - spot)
+    else:
+        diff_t1 = 45.0  # Default 45 pts index T1 (+1.2x ATR)
+        
     target1_prem = round(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)), 2)
     
-    diff_t2 = abs(signal.target_2 - signal.entry_price)
+    t2_p = float(getattr(signal, "target_2", 0.0))
+    if t2_p > 1000.0 and abs(t2_p - spot) < 600.0:
+        diff_t2 = abs(t2_p - spot)
+    else:
+        diff_t2 = 90.0  # Default 90 pts index T2 (+2.5x ATR)
+        
     target2_prem = round(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)), 2)
     
-    diff_t3 = abs(getattr(signal, "target_3_moonshot", signal.target_2 + 50.0) - signal.entry_price)
+    t3_p = float(getattr(signal, "target_3_moonshot", 0.0))
+    if t3_p > 1000.0 and abs(t3_p - spot) < 800.0:
+        diff_t3 = abs(t3_p - spot)
+    else:
+        diff_t3 = 140.0  # Default 140 pts index T3 (+3.8x ATR)
+        
     target3_prem = round(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)), 2)
     
     sizing = calculate_position_size(capital, MAX_RISK_PCT, entry_prem, sl_prem, LOT_SIZE, current_drawdown_pct)

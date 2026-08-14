@@ -460,7 +460,7 @@ with cockpit_col1:
 with cockpit_col2:
     if ticket.get("status") == "READY":
         target_strike = ticket["symbol"]
-        greeks_str = f"Δ {ticket['delta']:.2f} • Γ {ticket['gamma']:.5f} • Θ -₹{ticket['theta_decay_daily']:.2f}/sh • Vanna {ticket['vanna']:.4f}"
+        greeks_str = f"Δ {ticket['delta']:.2f} • Γ {ticket['gamma']:.5f} • Θ -₹{abs(ticket['theta_decay_daily']):.2f}/sh • Vanna {ticket['vanna']:.4f}"
         ep_str = f"₹{ticket['entry_premium']:.2f}"
         sl_str = f"₹{ticket['sl_premium']:.2f}"
         t1_str = f"₹{ticket['target1_premium']:.2f}"
