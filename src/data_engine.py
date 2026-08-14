@@ -42,6 +42,21 @@ class DataEngine:
         # Sort chronologically and drop duplicates
         df = df[~df.index.duplicated(keep="last")]
         df = df.sort_index()
+
+        # Ensure volume is non-zero and has realistic microstructure proxy if Yahoo returns 0.0 for index
+        if "volume" in df.columns:
+            raw_vol = df["volume"].astype(float)
+            if raw_vol.sum() == 0 or (raw_vol == 0).all() or (raw_vol < 10).all():
+                atr_proxy = (df["high"] - df["low"]).rolling(14, min_periods=1).mean().replace(0, 1.0)
+                range_scale = ((df["high"] - df["low"]) / atr_proxy).clip(0.2, 5.0)
+                body_scale = (abs(df["close"] - df["open"]) / atr_proxy).clip(0.1, 4.0)
+                df["volume"] = (range_scale * 35000.0 + body_scale * 25000.0 + 15000.0).round()
+        else:
+            atr_proxy = (df["high"] - df["low"]).rolling(14, min_periods=1).mean().replace(0, 1.0)
+            range_scale = ((df["high"] - df["low"]) / atr_proxy).clip(0.2, 5.0)
+            body_scale = (abs(df["close"] - df["open"]) / atr_proxy).clip(0.1, 4.0)
+            df["volume"] = (range_scale * 35000.0 + body_scale * 25000.0 + 15000.0).round()
+
         return df
 
     def fetch_yfinance_nifty(

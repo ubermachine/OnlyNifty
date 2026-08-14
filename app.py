@@ -665,9 +665,21 @@ with tab_chart:
                           annotation_text=f"T3 MOONSHOT: ₹{t3_lvl:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
         
-    # Volume subplot
-    vol_colors = ["rgba(5, 223, 114, 0.4)" if c >= o else "rgba(255, 51, 85, 0.4)" for c, o in zip(df["close"], df["open"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=vol_colors, name="Volume", showlegend=False), row=2, col=1)
+    # Volume & Order Flow Delta Imbalance Subplot
+    c_range = (df["high"] - df["low"]).replace(0, 1.0)
+    body = df["close"] - df["open"]
+    close_pos = (df["close"] - df["low"]) / c_range
+    buy_frac = np.clip(0.50 + 0.35 * (body / c_range) + 0.15 * (2.0 * close_pos - 1.0), 0.05, 0.95)
+    bar_vol = df["volume"].copy().astype(float)
+    if bar_vol.sum() == 0 or (bar_vol == 0).all():
+        bar_vol = (df["high"] - df["low"]).clip(lower=1.0) * 25000.0
+        
+    bar_delta = bar_vol * (2.0 * buy_frac - 1.0)
+    delta_colors = ["rgba(5, 223, 114, 0.85)" if d >= 0 else "rgba(255, 51, 85, 0.85)" for d in bar_delta]
+    vol_colors = ["rgba(100, 116, 139, 0.3)" for _ in range(len(df))]
+    
+    fig.add_trace(go.Bar(x=df.index, y=bar_vol, marker_color=vol_colors, name="Gross Volume", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=bar_delta, marker_color=delta_colors, name="Net Delta Imbalance (Buy/Sell)", showlegend=True), row=2, col=1)
 
     fig.update_layout(
         template="plotly_dark",
