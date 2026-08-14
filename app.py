@@ -12,6 +12,11 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
+
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
     DEFAULT_IV, EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA,
@@ -217,29 +222,29 @@ def get_signal_journal() -> LiveSignalJournal:
     return LiveSignalJournal(persistence_file="data/signals_journal_today.json")
 
 # ----------------- MULTI-TIERED REACTIVE CACHE LAYER -----------------
-@st.cache_data(ttl=10, max_entries=10, show_spinner=False)
+@st.cache_data(ttl=5, max_entries=10, show_spinner=False)
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = get_data_engine()
     if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
-        return engine.fetch_yfinance_nifty(interval=tf, period="5d")
+        return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
     return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
 
-@st.cache_data(ttl=15, max_entries=5, show_spinner=False)
+@st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_live_option_chain_data() -> dict:
     engine = get_data_engine()
     return engine.fetch_live_nse_option_chain(symbol="NIFTY")
 
-@st.cache_data(ttl=20, max_entries=5, show_spinner=False)
+@st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_heavyweight_flow_index() -> dict:
     engine = get_data_engine()
     return engine.fetch_heavyweight_flow_index()
 
-@st.cache_data(ttl=20, max_entries=5, show_spinner=False)
+@st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_sectoral_pulse() -> dict:
     engine = get_data_engine()
     return engine.fetch_sectoral_pulse()
 
-@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+@st.cache_data(ttl=120, max_entries=2, show_spinner=False)
 def get_institutional_oi_data() -> pd.DataFrame:
     engine = get_data_engine()
     return engine.get_participant_oi_snapshot()
@@ -261,27 +266,21 @@ tf_str = "5m" if "5m" in timeframe else "1m"
 
 auto_refresh_choice = st.sidebar.selectbox(
     "⚡ Stream Refresh Rate",
-    ["Off (Manual)", "Every 5 Seconds", "Every 10 Seconds", "Every 15 Seconds", "Every 30 Seconds", "Every 60 Seconds"],
+    ["Every 10 Seconds (Default)", "Every 5 Seconds", "Every 15 Seconds", "Every 30 Seconds", "Off (Manual)"],
     index=0
 )
 
 if auto_refresh_choice != "Off (Manual)":
     sec_map = {
         "Every 5 Seconds": 5,
-        "Every 10 Seconds": 10,
+        "Every 10 Seconds (Default)": 10,
         "Every 15 Seconds": 15,
-        "Every 30 Seconds": 30,
-        "Every 60 Seconds": 60
+        "Every 30 Seconds": 30
     }
-    delay_secs = sec_map.get(auto_refresh_choice, 15)
-    st.sidebar.caption(f"⚡ Live feed streaming active ({delay_secs}s cadence)")
-    st.markdown(f"""
-    <script>
-        setTimeout(function() {{
-            window.location.reload();
-        }}, {delay_secs * 1000});
-    </script>
-    """, unsafe_allow_html=True)
+    delay_secs = sec_map.get(auto_refresh_choice, 10)
+    st.sidebar.caption(f"🟢 Real-time auto-refresh active ({delay_secs}s cadence)")
+    if st_autorefresh is not None:
+        st_autorefresh(interval=delay_secs * 1000, key="nifty_live_stream_auto_refresh")
 
 if st.sidebar.button("🔄 Instant Cache Purge & Rerun", use_container_width=True):
     st.cache_data.clear()
@@ -370,15 +369,17 @@ journal_engine.log_signal(
 
 t_latency_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
 refresh_tag = f"{auto_refresh_choice.upper()}" if auto_refresh_choice != "Off (Manual)" else "MANUAL STREAM"
+last_bar_display = df.index[-1].strftime("%H:%M:%S IST (%d %b)") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v4.0 ULTIMATE TURBO</span>
+        <span class="badge-pro">PRO v4.1 TURBO</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="display: flex; align-items: center; gap: 14px;">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">LATEST BAR: <strong style="color: #f1f5f9;">{last_bar_display}</strong></div>
         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">LATENCY: <strong style="color: #00d2ff;">{t_latency_ms:.1f}ms</strong></div>
         <div class="live-pulse">
             <div class="pulse-dot"></div>

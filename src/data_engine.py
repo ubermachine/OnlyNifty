@@ -48,7 +48,7 @@ class DataEngine:
         self,
         interval: str = "5m",
         period: str = "5d",
-        max_cache_age_seconds: int = 60
+        max_cache_age_seconds: int = 5
     ) -> pd.DataFrame:
         """Fetches Nifty 50 (^NSEI) OHLCV from Yahoo Finance with TTL-aware caching."""
         cache_key = f"nifty_{interval}_{period}.parquet"
