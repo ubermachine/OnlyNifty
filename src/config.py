@@ -1,4 +1,7 @@
 """JustNifty v3.0 Tier-1 Institutional Hedge Fund Configuration Constants."""
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
 
 # ----------------- CAPITAL & FRACTIONAL KELLY SIZING -----------------
 DEFAULT_CAPITAL: float = 500000.0       # ₹5,00,000 baseline reference institutional capital

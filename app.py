@@ -7,6 +7,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import time
+import json
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
 
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
