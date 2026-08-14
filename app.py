@@ -34,6 +34,7 @@ from src.options_engine import (
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
+from src.signal_journal import LiveSignalJournal
 
 
 # ----------------- STREAMLIT PAGE CONFIG -----------------
@@ -200,6 +201,10 @@ def get_kalman_estimator() -> KalmanFilterTrendEstimator:
 def get_markov_switcher() -> MarkovRegimeSwitcher:
     return MarkovRegimeSwitcher()
 
+@st.cache_resource(show_spinner=False)
+def get_signal_journal() -> LiveSignalJournal:
+    return LiveSignalJournal(persistence_file="data/signals_journal_today.json")
+
 # ----------------- MULTI-TIERED REACTIVE CACHE LAYER -----------------
 @st.cache_data(ttl=10, max_entries=10, show_spinner=False)
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
@@ -315,6 +320,31 @@ sector_pulse = load_sectoral_pulse()
 hfi_res = load_heavyweight_flow_index()
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
 delta_div = detect_footprint_delta_divergences(df)
+
+# Real-Time Live Signal Journal & Trade Lifecycle Tracker
+journal_engine = get_signal_journal()
+journal_engine.update_open_trades_lifecycle(
+    current_spot=current_spot,
+    current_high=float(df.iloc[-1]["high"]),
+    current_low=float(df.iloc[-1]["low"])
+)
+last_bar_ts = df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
+journal_engine.log_signal(
+    signal=signal,
+    ticket=ticket,
+    current_spot=current_spot,
+    bar_timestamp=last_bar_ts,
+    regime_info=regime_state,
+    confluence_score=1.0,
+    htf_data=htf_data,
+    kalman_vel=float(df_kalman["kalman_velocity"].iloc[-1]) if "kalman_velocity" in df_kalman.columns else 0.0,
+    kalman_z=float(df_kalman["kalman_vel_zscore"].iloc[-1]) if "kalman_vel_zscore" in df_kalman.columns else 0.0,
+    ofi_data=ofi_data,
+    gex_data=gex_data,
+    vol_profile=vol_profile,
+    df_context=df,
+    is_0dte=is_0dte_mode
+)
 
 t_latency_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
 refresh_tag = f"{auto_refresh_choice.upper()}" if auto_refresh_choice != "Off (Manual)" else "MANUAL STREAM"
@@ -457,8 +487,9 @@ with cockpit_col2:
     """, unsafe_allow_html=True)
 
 # ----------------- MAIN INTERFACE TABS -----------------
-tab_chart, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
+tab_chart, tab_journal, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
     "📈 Interactive Candlestick Chart",
+    "📜 Live Signals Journal & Audit Log (Today)",
     "🛡️ 1% Risk & Quarter-Kelly Sizer",
     "🏛️ Institutional Breadth & Option Chain",
     "📊 Bar-by-Bar Replay & Backtest Simulator",
@@ -568,30 +599,31 @@ with tab_chart:
             fig.add_hline(y=signal.stop_loss, line_dash="dash", line_color="#ff3355", line_width=1.5,
                           annotation_text=f"STOP LOSS: ₹{signal.stop_loss:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#ff3355", size=10), row=1, col=1)
-        if signal.target1:
-            fig.add_hline(y=signal.target1, line_dash="dash", line_color="#05df72", line_width=1.5,
-                          annotation_text=f"T1 (+1.2x ATR): ₹{signal.target1:.1f}", annotation_position="bottom right",
+        if signal.target_1:
+            fig.add_hline(y=signal.target_1, line_dash="dash", line_color="#05df72", line_width=1.5,
+                          annotation_text=f"TARGET 1: ₹{signal.target_1:.1f}", annotation_position="bottom right",
                           annotation_font=dict(color="#05df72", size=10), row=1, col=1)
-        if signal.target2:
-            fig.add_hline(y=signal.target2, line_dash="dot", line_color="#00d2ff", line_width=1.5,
-                          annotation_text=f"T2 (+2.5x ATR): ₹{signal.target2:.1f}", annotation_position="bottom right",
+        if signal.target_2:
+            fig.add_hline(y=signal.target_2, line_dash="dash", line_color="#05df72", line_width=1.5,
+                          annotation_text=f"TARGET 2: ₹{signal.target_2:.1f}", annotation_position="top right",
+                          annotation_font=dict(color="#05df72", size=10), row=1, col=1)
+        if signal.target_3_moonshot:
+            fig.add_hline(y=signal.target_3_moonshot, line_dash="dot", line_color="#00d2ff", line_width=1.5,
+                          annotation_text=f"T3 MOONSHOT: ₹{signal.target_3_moonshot:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
         
-    # Volume subplot with dynamic delta styling
-    vol_colors = ["#05df72" if c >= o else "#ff3355" for c, o in zip(df["close"], df["open"])]
-    fig.add_trace(go.Bar(
-        x=df.index, y=df["volume"], name="Volume", marker_color=vol_colors, opacity=0.75
-    ), row=2, col=1)
-    
-    # Layout and UX Polishing
+    # Volume subplot
+    vol_colors = ["rgba(5, 223, 114, 0.4)" if c >= o else "rgba(255, 51, 85, 0.4)" for c, o in zip(df["close"], df["open"])]
+    fig.add_trace(go.Bar(x=df.index, y=df["volume"], marker_color=vol_colors, name="Volume", showlegend=False), row=2, col=1)
+
     fig.update_layout(
-        height=700,
-        uirevision="nifty_spot_view",
         template="plotly_dark",
-        paper_bgcolor="#080c14",
-        plot_bgcolor="#080c14",
+        paper_bgcolor="#0b0f19",
+        plot_bgcolor="#0b0f19",
+        height=620,
+        margin=dict(l=10, r=10, t=30, b=10),
+        uirevision="nifty_spot_view",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=35, b=20),
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
             font=dict(size=11, color="#8e9fb5"),
@@ -603,6 +635,137 @@ with tab_chart:
     fig.update_yaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
+
+
+# ----- TAB 2: LIVE INSTITUTIONAL SIGNALS JOURNAL & AUDIT LOG -----
+with tab_journal:
+    st.markdown("""
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+        <div>
+            <h3 style="margin: 0; font-weight: 800; color: #f1f5f9;">📜 Live Institutional Signals Journal & Daily Audit Store</h3>
+            <div style="color: #8e9fb5; font-size: 12px; margin-top: 2px;">
+                Real-Time Bar-by-Bar Signal Capture • State-Transition Deduplication • Greeks Snapshots • Lifecycle Trade Tracking
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    summary = journal_engine.compute_daily_journal_summary()
+    
+    # Top KPI Metrics Row
+    jk1, jk2, jk3, jk4, jk5, jk6 = st.columns(6)
+    with jk1:
+        st.metric(label="Total Signals (Today)", value=summary["total_signals"], delta=f"{summary['active_trades']} Active" if summary['active_trades'] > 0 else "0 Active")
+    with jk2:
+        st.metric(label="Long / Short Split", value=f"{summary['long_trades']}L : {summary['short_trades']}S", delta=f"{round(summary['long_trades']/max(summary['total_signals'],1)*100)}% Long")
+    with jk3:
+        st.metric(label="Session Win Rate", value=f"{summary['win_rate_pct']:.1f}%", delta=f"{summary['winning_trades']}W / {summary['losing_trades']}L")
+    with jk4:
+        st.metric(label="Avg Confluence Score", value=f"{summary['avg_confluence_score']:.0f}%", delta="Institutional" if summary['avg_confluence_score'] >= 75 else "Standard")
+    with jk5:
+        st.metric(label="Net Realized R-Multiple", value=f"{summary['total_r_multiple']:+.2f}R", delta=f"SQN: {summary['system_quality_number_sqn']:.2f}")
+    with jk6:
+        st.metric(label="Net Realized PnL (₹)", value=f"₹{summary['total_realized_pnl']:+,.2f}", delta=f"PF: {summary['profit_factor']:.2f}")
+
+    st.markdown("---")
+
+    # Filter Bar
+    f_c1, f_c2, f_c3 = st.columns([1.2, 1.2, 1.4])
+    dir_filter = f_c1.selectbox("Filter Direction", ["All", "LONG", "SHORT"], index=0)
+    status_filter = f_c2.selectbox("Filter Status", ["All", "ACTIVE", "TRIGGERED", "T1_REACHED", "T2_REACHED", "T3_MOONSHOT", "STOPPED_OUT"], index=0)
+    grade_filter = f_c3.selectbox("Min Quality Grade", ["All", "A+ Institutional", "A Standard", "B Tactical"], index=0)
+
+    # Filter Entries
+    raw_entries = journal_engine.entries
+    filtered_entries = raw_entries.copy()
+
+    if dir_filter != "All":
+        filtered_entries = [e for e in filtered_entries if e.direction == dir_filter]
+    if status_filter == "ACTIVE":
+        filtered_entries = [e for e in filtered_entries if e.is_active()]
+    elif status_filter != "All":
+        filtered_entries = [e for e in filtered_entries if e.lifecycle_status == status_filter]
+    if grade_filter != "All":
+        filtered_entries = [e for e in filtered_entries if grade_filter in e.confluence_grade]
+
+    # Journal Table
+    df_journal = journal_engine.get_journal_dataframe()
+    if df_journal.empty:
+        st.info("ℹ️ No actionable institutional signals logged yet for today's session. Terminal is actively monitoring live 5m candles.")
+    else:
+        st.dataframe(
+            df_journal,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # Deep Signal Audit Inspector
+    if journal_engine.entries:
+        st.markdown("#### 🔍 Deep Signal Audit & Microstructure Inspector")
+        sig_ids = [e.signal_id for e in journal_engine.entries]
+        selected_sig_id = st.selectbox("Select Signal for Full Audit Breakdown", sig_ids, index=len(sig_ids)-1)
+        selected_entry = next((e for e in journal_engine.entries if e.signal_id == selected_sig_id), journal_engine.entries[-1])
+
+        with st.expander(f"📋 Full Institutional Audit Sheet: {selected_entry.signal_id}", expanded=True):
+            insp_c1, insp_c2, insp_c3 = st.columns(3)
+            with insp_c1:
+                st.markdown("**🛡️ Setup & Risk Parameters**")
+                st.markdown(f"""
+                - **Direction / Type:** `{selected_entry.direction}` (`{selected_entry.signal_type}`)
+                - **Spot Entry / SL:** `₹{selected_entry.spot_price:,.2f}` / `₹{selected_entry.sl_spot:,.2f}` (`{selected_entry.sl_points_spot:.1f} pts`)
+                - **Target 1 / Target 2:** `₹{selected_entry.target_1_spot:,.2f}` / `₹{selected_entry.target_2_spot:,.2f}`
+                - **Sizing:** `{selected_entry.lots_suggested} Lots` (`{selected_entry.total_qty} Qty`)
+                - **Max Capital Risk:** `₹{selected_entry.capital_risk_rupees:,.2f}`
+                - **TCA Friction Est:** `₹{selected_entry.tca_friction_est:.2f}`
+                """)
+            with insp_c2:
+                st.markdown("**📐 Greeks & Volatility Matrix**")
+                g = selected_entry.greeks_snapshot
+                st.markdown(f"""
+                - **Delta (Δ):** `{g.get('delta', 0.55):.4f}`
+                - **Gamma (Γ):** `{g.get('gamma', 0.0008):.6f}`
+                - **Theta (Θ):** `-₹{abs(g.get('theta', 12.0)):.2f}/sh/day`
+                - **Vanna:** `{g.get('vanna', 0.04):.4f}`
+                - **0DTE Mode:** `{'⚡ Yes' if selected_entry.is_0dte else 'No (Standard)'}`
+                - **MFE / MAE:** `+{selected_entry.peak_favorable_excursion_pts:.1f} pts / -{selected_entry.peak_adverse_excursion_pts:.1f} pts`
+                """)
+            with insp_c3:
+                st.markdown("**🧠 Confluence & Audit Trail**")
+                st.markdown(f"""
+                - **Confluence Score:** **`{selected_entry.confluence_score:.0f}%`** (`{selected_entry.confluence_grade}`)
+                - **HTF Alignment:** `{selected_entry.htf_alignment}`
+                - **Regime:** `{selected_entry.regime_summary}`
+                - **Lifecycle Milestone:** `{selected_entry.notes}`
+                - **Exit Timestamp:** `{selected_entry.exit_timestamp_ist or 'Trade Active'}`
+                - **Audit Hash:** `{selected_entry.record_hash[:16]}...`
+                """)
+
+    # Export Toolbar
+    st.markdown("---")
+    act_c1, act_c2, act_c3 = st.columns([1.5, 1.5, 1.0])
+    
+    csv_bytes = journal_engine.export_csv_bytes()
+    act_c1.download_button(
+        label="📥 Download Today's Trade Journal (CSV)",
+        data=csv_bytes,
+        file_name=f"nifty_trade_journal_{datetime.now(IST).strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+    raw_json_data = json.dumps([e.to_dict() for e in journal_engine.entries], indent=2).encode("utf-8")
+    act_c2.download_button(
+        label="📥 Download Full Audit Store (JSON)",
+        data=raw_json_data,
+        file_name=f"nifty_audit_store_{datetime.now(IST).strftime('%Y%m%d')}.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+    with act_c3:
+        if st.button("🗑️ Reset Journal", use_container_width=True):
+            journal_engine.clear_journal()
+            st.rerun()
 
 
 # ----- TAB 2: QUANTITATIVE RISK & MONTE CARLO RUIN TERMINAL -----

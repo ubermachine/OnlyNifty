@@ -55,6 +55,10 @@ class Signal:
         if self.pyramid_trigger == 0.0 and self.entry_price > 0:
             self.pyramid_trigger = round(self.entry_price + 25.0, 2)
 
+    @property
+    def stop_loss(self) -> float:
+        return self.sl_price
+
 class StrategyEngine:
     """Vectorized and streaming bar-by-bar JustNifty v3.5 institutional strategy rules evaluator."""
     def __init__(self):
