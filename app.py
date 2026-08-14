@@ -282,7 +282,7 @@ if auto_refresh_choice != "Off (Manual)":
     if st_autorefresh is not None:
         st_autorefresh(interval=delay_secs * 1000, key="nifty_live_stream_auto_refresh")
 
-if st.sidebar.button("🔄 Instant Cache Purge & Rerun", use_container_width=True):
+if st.sidebar.button("🔄 Instant Cache Purge & Rerun", width="stretch"):
     st.cache_data.clear()
     st.rerun()
 
@@ -702,7 +702,7 @@ with tab_chart:
     fig.update_xaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
 
     # Live Signals Stream directly in Chart View
     df_live_feed = journal_engine.get_journal_dataframe(actionable_only=True)
@@ -710,7 +710,7 @@ with tab_chart:
         with st.expander(f"📜 Today's Live Signals Feed ({len(df_live_feed)} Setups Captured Today)", expanded=True):
             display_cols = ["Time (IST)", "Direction", "Signal Type", "Symbol", "Spot Entry", "Stop Loss (₹)", "Target 1 (₹)", "Status", "Realized R", "Net PnL (₹)", "Confluence"]
             valid_feed_cols = [c for c in display_cols if c in df_live_feed.columns]
-            st.dataframe(df_live_feed[valid_feed_cols], hide_index=True, use_container_width=True)
+            st.dataframe(df_live_feed[valid_feed_cols], hide_index=True, width="stretch")
 
 
 # ----- TAB 2: LIVE INSTITUTIONAL SIGNALS JOURNAL & AUDIT LOG -----
@@ -771,7 +771,7 @@ with tab_journal:
     else:
         st.dataframe(
             df_journal,
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
 
@@ -826,7 +826,7 @@ with tab_journal:
         data=csv_bytes,
         file_name=f"nifty_trade_journal_{datetime.now(IST).strftime('%Y%m%d')}.csv",
         mime="text/csv",
-        use_container_width=True
+        width="stretch"
     )
 
     raw_json_data = json.dumps([e.to_dict() for e in journal_engine.entries], indent=2).encode("utf-8")
@@ -835,11 +835,11 @@ with tab_journal:
         data=raw_json_data,
         file_name=f"nifty_audit_store_{datetime.now(IST).strftime('%Y%m%d')}.json",
         mime="application/json",
-        use_container_width=True
+        width="stretch"
     )
 
     with act_c3:
-        if st.button("🗑️ Reset Journal", use_container_width=True):
+        if st.button("🗑️ Reset Journal", width="stretch"):
             journal_engine.clear_journal()
             st.rerun()
 
@@ -952,7 +952,7 @@ with tab_sizer:
     mc_win_rate = mc_c1.slider("Simulated Win Rate (%)", min_value=40.0, max_value=75.0, value=58.0, step=1.0) / 100.0
     mc_win_r = mc_c2.number_input("Win Payoff (R-Multiple)", value=2.10, step=0.10, help="Average R payoff accounting for 3-Tier Asymmetric exits (35% @ 1.2R, 35% @ 2.5R, 30% @ 4.0R).")
     mc_trades_count = mc_c3.number_input("Stress Horizon (Trades)", value=100, min_value=25, max_value=500, step=25)
-    mc_run_btn = mc_c4.button("⚡ Run 1,000 Monte Carlo Paths", use_container_width=True)
+    mc_run_btn = mc_c4.button("⚡ Run 1,000 Monte Carlo Paths", width="stretch")
     
     if mc_run_btn or "mc_sim_results" not in st.session_state:
         st.session_state["mc_sim_results"] = run_monte_carlo_simulation(
@@ -1078,7 +1078,7 @@ with tab_sizer:
     mc_fig.update_xaxes(title_text="Consecutive Trade Number", showgrid=True, gridcolor="#1c273c")
     mc_fig.update_yaxes(title_text="Portfolio Capital (₹)", showgrid=True, gridcolor="#1c273c")
     
-    st.plotly_chart(mc_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+    st.plotly_chart(mc_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
     
     dist_c1, dist_c2 = st.columns([1.0, 1.0])
     with dist_c1:
@@ -1095,7 +1095,7 @@ with tab_sizer:
                 "₹0 (Zero occurrences in 1,000 paths)"
             ]
         })
-        st.dataframe(dd_df, hide_index=True, use_container_width=True)
+        st.dataframe(dd_df, hide_index=True, width="stretch")
         
     with dist_c2:
         st.markdown("#### 🎯 Institutional Risk & Ruin Takeaway")
@@ -1122,13 +1122,13 @@ with tab_oi:
     sec_c1, sec_c2 = st.columns([1.0, 1.0])
     with sec_c1:
         with st.expander("📊 Top 5 Nifty Heavyweight Monitor (41.2% Weight)", expanded=False):
-            st.dataframe(pd.DataFrame(hfi_res["constituents"]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(hfi_res["constituents"]), hide_index=True, width="stretch")
     with sec_c2:
         with st.expander("🚀 High-Beta Sectoral Drivers (Bank, IT, Auto, Energy)", expanded=False):
-            st.dataframe(pd.DataFrame(sec_res["sectors"]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(sec_res["sectors"]), hide_index=True, width="stretch")
         
     st.markdown("#### 🏛️ Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
-    st.dataframe(get_institutional_oi_data(), use_container_width=True)
+    st.dataframe(get_institutional_oi_data(), width="stretch")
     
     st.markdown("---")
     
@@ -1180,14 +1180,14 @@ with tab_oi:
     
     if oi_met.get("strike_diagnostics"):
         with st.expander("🔍 Strike-Wise 4-Quadrant ΔOI & Trap Diagnostic Sheet", expanded=False):
-            st.dataframe(pd.DataFrame(oi_met["strike_diagnostics"]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(oi_met["strike_diagnostics"]), hide_index=True, width="stretch")
             
     st.markdown("---")
     
     # SVI Volatility Smile Curve Table
     with st.expander("📈 Parametric SVI Volatility Smile & Put-Call Skew Surface", expanded=False):
         df_svi_curve = generate_svi_smile_curve(current_spot, base_iv=iv_input)
-        st.dataframe(df_svi_curve, hide_index=True, use_container_width=True)
+        st.dataframe(df_svi_curve, hide_index=True, width="stretch")
     
     # Toggle between Official Live NSE Option Chain and BSM Surface Simulation
     oc_mode = st.radio(
@@ -1261,12 +1261,12 @@ with tab_oi:
             oi_fig.update_xaxes(title_text="Strike Price", showgrid=True, gridcolor="#1c273c")
             oi_fig.update_yaxes(title_text="Open Interest (Contracts)", showgrid=True, gridcolor="#1c273c")
             
-            st.plotly_chart(oi_fig, use_container_width=True)
+            st.plotly_chart(oi_fig, width="stretch")
             
             st.markdown(f"#### 📋 Official NSE Option Chain Table ({live_oc_data.get('source', 'jugaad-data')})")
             display_cols = ["ce_oi", "ce_change_oi", "ce_iv", "ce_ltp", "strike", "pe_ltp", "pe_iv", "pe_change_oi", "pe_oi"]
             valid_cols = [c for c in display_cols if c in oc_view.columns]
-            st.dataframe(oc_view[valid_cols], hide_index=True, use_container_width=True)
+            st.dataframe(oc_view[valid_cols], hide_index=True, width="stretch")
     else:
         st.subheader("🔍 Institutional Strike Ladder & 2nd-Order Greeks Matrix (Delta 0.50 – 0.65)")
         atm_center = int(round(current_spot / 50.0) * 50)
@@ -1294,7 +1294,7 @@ with tab_oi:
                 "Put Setup": pe_rec
             })
             
-        st.dataframe(pd.DataFrame(chain_rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(chain_rows), width="stretch")
         
     st.markdown("#### 💡 The VF Trade Table Targets (T1 to T6)")
     vf_cols = st.columns(6)
@@ -1307,7 +1307,7 @@ with tab_backtest:
     st.subheader("📊 Bar-by-Bar Replay & Institutional Performance Suite")
     st.caption("Simulates the JustNifty v3.3 model with 4-leg TCA friction, Sharpe, Sortino, Calmar, and Ulcer Index.")
     
-    run_btn = st.button("🚀 Run Backtest on Loaded Dataset", use_container_width=True)
+    run_btn = st.button("🚀 Run Backtest on Loaded Dataset", width="stretch")
     if run_btn or "bt_results" in st.session_state:
         if run_btn:
             bt_engine = BacktestEngine(initial_capital=account_capital)
@@ -1355,20 +1355,20 @@ with tab_backtest:
                 {"Leg": "Short Call (OTM)", "Strike": ic_res["legs"]["short_call"]["strike"], "Type": "CE", "Action": "SELL", "Premium": f"₹{ic_res['legs']['short_call']['premium']:.2f}", "Delta": ic_res['legs']['short_call']['delta']},
                 {"Leg": "Long Call Wing", "Strike": ic_res["legs"]["long_call"]["strike"], "Type": "CE", "Action": "BUY", "Premium": f"₹{ic_res['legs']['long_call']['premium']:.2f}", "Delta": ic_res['legs']['long_call']['delta']}
             ])
-            st.dataframe(legs_df, hide_index=True, use_container_width=True)
+            st.dataframe(legs_df, hide_index=True, width="stretch")
 
         # 4. Golden Vault Execution Rules Summary
         st.markdown("### 🔒 Execution & Capital Defense Playbook")
 
         if results.trade_log:
             st.markdown("#### 📜 Executed Trade Log (TCA Accounting)")
-            st.dataframe(pd.DataFrame(results.trade_log), use_container_width=True)
+            st.dataframe(pd.DataFrame(results.trade_log), width="stretch")
             
             st.markdown("#### 📈 Account Equity Curve (Net of All Fees)")
             fig_eq = go.Figure()
             fig_eq.add_trace(go.Scattergl(y=np.round(results.equity_curve, 2), mode="lines+markers", line=dict(color="#05df72", width=2), name="Net Equity (₹)"))
             fig_eq.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=20, b=20))
-            st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+            st.plotly_chart(fig_eq, width="stretch", config={"displayModeBar": False, "responsive": True})
         else:
             st.info("No completed trade setups triggered within this specific historical slice.")
 
