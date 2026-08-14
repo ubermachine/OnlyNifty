@@ -117,9 +117,9 @@ def black_scholes_greeks(
     is_call: bool = True,
     use_vol_surface: bool = False
 ) -> Dict[str, float]:
-    """
-    Computes theoretical European option price and exact 1st/2nd/3rd order Greeks.
-    """
+    """Computes theoretical European option price and exact 1st/2nd/3rd order Greeks."""
+    spot = max(float(spot), 1.0)
+    strike = max(float(strike), 1.0)
     t_years = max(t_days / 365.0, 0.00001)  # Sub-minute 0DTE singularity shield
     
     if use_vol_surface:
@@ -1265,10 +1265,10 @@ def generate_option_trade_ticket(
     is_0dte_afternoon: bool = False
 ) -> Dict[str, Any]:
     """Translates 3-Tier spot setups into convex institutional Option Trade Ticket with Free Spread details."""
-    if signal.signal_type == SignalType.WAIT:
+    if signal.signal_type == SignalType.WAIT or getattr(signal, "entry_price", 0.0) <= 0.0:
         return {"status": "WAIT", "message": signal.reason}
         
-    is_call = signal.signal_type in [SignalType.LONG, SignalType.LONG_3PM]
+    is_call = "LONG" in signal.signal_type.value
     strike_info = select_institutional_strike(spot, is_call=is_call, t_days=t_days, iv=iv, is_0dte_afternoon=is_0dte_afternoon)
     
     delta = abs(strike_info["delta"])
@@ -1306,7 +1306,8 @@ def generate_option_trade_ticket(
     spread_width = 100 if is_call else -100
     k2 = k1 + spread_width if is_call else k1 - abs(spread_width)
     
-    greeks_k2_at_t1 = black_scholes_greeks(signal.target_1, k2, t_days=max(t_days - 0.5, 0.05), sigma=iv, is_call=is_call)
+    target_1_spot = float(signal.target_1) if getattr(signal, "target_1", 0.0) > 0 else (spot + 50.0 if is_call else spot - 50.0)
+    greeks_k2_at_t1 = black_scholes_greeks(target_1_spot, k2, t_days=max(t_days - 0.5, 0.05), sigma=iv, is_call=is_call)
     credit_received_k2 = greeks_k2_at_t1["price"]
     net_debit = round(entry_prem - credit_received_k2, 2)
     max_spread_width = abs(k2 - k1)
