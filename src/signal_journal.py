@@ -301,11 +301,9 @@ class LiveSignalJournal:
             if self.entries and self.entries[-1].signal_type == "WAIT":
                 return None
 
-        # Deduplication Rule: Check if same bar & direction is already logged
+        # Deduplication Rule: Check if exact same bar timestamp & direction is already logged
         for existing in self.entries:
-            if existing.bar_timestamp == bar_time_str and existing.direction == direction and direction != "WAIT":
-                return None
-            if existing.is_active() and existing.direction == direction:
+            if existing.bar_timestamp == bar_time_str and existing.direction == direction:
                 return None
 
         strike = int(ticket.get("strike", int(round(current_spot / 50.0) * 50)))
@@ -496,6 +494,62 @@ class LiveSignalJournal:
             self._persist_to_disk()
 
         return updates_count
+
+    def seed_from_intraday_history(
+        self,
+        df: pd.DataFrame,
+        strategy_engine: Any,
+        live_iv: float = 0.135,
+        capital: float = 500000.0
+    ) -> int:
+        """
+        Scans through the loaded intraday dataframe and populates all historical signals and their trade outcomes.
+        """
+        from src.options_engine import generate_option_trade_ticket
+        from src.strategy_rules import SignalType
+        
+        if df.empty or len(df) < 15:
+            return 0
+            
+        seeded_count = 0
+        min_bars = min(15, len(df))
+        
+        for i in range(min_bars, len(df)):
+            sub_df = df.iloc[:i+1]
+            cur_spot = float(sub_df.iloc[-1]["close"])
+            cur_high = float(sub_df.iloc[-1]["high"])
+            cur_low = float(sub_df.iloc[-1]["low"])
+            bar_ts = sub_df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(sub_df.index[-1], "strftime") else str(sub_df.index[-1])
+            
+            # Update previous open trades first
+            self.update_open_trades_lifecycle(cur_spot, cur_high, cur_low)
+            
+            # Evaluate signal on this bar
+            sig = strategy_engine.evaluate_bar(sub_df, live_iv=live_iv)
+            if sig.signal_type != SignalType.WAIT:
+                tkt = generate_option_trade_ticket(cur_spot, sig, capital, 0.0, iv=live_iv)
+                if tkt.get("status") == "READY":
+                    entry = self.log_signal(
+                        signal=sig,
+                        ticket=tkt,
+                        current_spot=cur_spot,
+                        bar_timestamp=bar_ts,
+                        regime_info={"active_regime": "TRENDING_EXPANSION"},
+                        confluence_score=85.0,
+                        df_context=sub_df
+                    )
+                    if entry:
+                        seeded_count += 1
+                        
+        # Final pass update
+        if len(df) > 0:
+            self.update_open_trades_lifecycle(
+                current_spot=float(df.iloc[-1]["close"]),
+                current_high=float(df.iloc[-1]["high"]),
+                current_low=float(df.iloc[-1]["low"])
+            )
+            
+        return seeded_count
 
     def get_journal_dataframe(self, actionable_only: bool = False) -> pd.DataFrame:
         """Returns the signal entries formatted as a clean pandas DataFrame."""

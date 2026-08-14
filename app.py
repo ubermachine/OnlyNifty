@@ -342,6 +342,9 @@ dir_flow_res = compute_short_term_directional_vector(
 
 # Real-Time Live Signal Journal & Trade Lifecycle Tracker
 journal_engine = get_signal_journal()
+if hasattr(journal_engine, "seed_from_intraday_history") and len(journal_engine.entries) <= 1:
+    journal_engine.seed_from_intraday_history(df, strategy_engine, live_iv=iv_input, capital=account_capital)
+
 journal_engine.update_open_trades_lifecycle(
     current_spot=current_spot,
     current_high=float(df.iloc[-1]["high"]),
@@ -684,6 +687,14 @@ with tab_chart:
     fig.update_yaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
+
+    # Live Signals Stream directly in Chart View
+    df_live_feed = journal_engine.get_journal_dataframe(actionable_only=True)
+    if not df_live_feed.empty:
+        with st.expander(f"📜 Today's Live Signals Feed ({len(df_live_feed)} Setups Captured Today)", expanded=True):
+            display_cols = ["Time (IST)", "Direction", "Signal Type", "Symbol", "Spot Entry", "Stop Loss (₹)", "Target 1 (₹)", "Status", "Realized R", "Net PnL (₹)", "Confluence"]
+            valid_feed_cols = [c for c in display_cols if c in df_live_feed.columns]
+            st.dataframe(df_live_feed[valid_feed_cols], hide_index=True, use_container_width=True)
 
 
 # ----- TAB 2: LIVE INSTITUTIONAL SIGNALS JOURNAL & AUDIT LOG -----
