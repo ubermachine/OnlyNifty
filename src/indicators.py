@@ -1,8 +1,7 @@
-"""JustNifty v3.0 Tier-1 Quantitative Indicators, Stochastic Models & Order Flow Mechanics."""
-
+import math
+from typing import Dict, Tuple, Any, List, Optional
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Any, List
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA, VAKC_ATR_SPAN,
     HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN
@@ -21,7 +20,7 @@ def compute_envelopes(ema_series: pd.Series, pct: float = 0.015) -> Tuple[pd.Ser
 def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 30) -> Dict[str, Any]:
     """
     Computes the Fractional Hurst Exponent (H) via Log-Returns Rescaled Range (R/S) Analysis
-    with finite-sample Anis-Lloyd / Peters Bias Correction.
+    with finite-sample Anis-Lloyd / Peters Bias Correction (Vectorized NumPy).
     H > 0.52 -> Persistent / Trending Regime (Golden Pocket Active)
     H < 0.45 -> Anti-Persistent / Mean-Reverting Regime
     0.45 <= H <= 0.52 -> Random Walk / Noise
@@ -32,41 +31,36 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
     prices = series.values[-100:] if len(series) >= 100 else series.values
     # Compute continuously compounded log-returns for weak-sense stationarity
     log_returns = np.diff(np.log(np.maximum(prices, 1.0)))
+    n_ret = len(log_returns)
     
-    if len(log_returns) < max_lag:
+    if n_ret < max_lag:
         return {"hurst": 0.50, "regime": "RANDOM_WALK (Accumulating Data)", "is_trending": False}
 
-    lags = np.unique(np.linspace(min_lag, min(max_lag, len(log_returns) // 2), 6, dtype=int))
+    lags = np.unique(np.linspace(min_lag, min(max_lag, n_ret // 2), 6, dtype=int))
     rs_values = []
+    valid_lags = []
     
     for lag in lags:
-        n_chunks = len(log_returns) // lag
+        n_chunks = n_ret // lag
         if n_chunks < 1:
             continue
             
-        chunk_rs = []
-        for i in range(n_chunks):
-            chunk = log_returns[i * lag : (i + 1) * lag]
-            if len(chunk) < 2:
-                continue
-            mean = np.mean(chunk)
-            cum_dev = np.cumsum(chunk - mean)
-            r = np.max(cum_dev) - np.min(cum_dev)
-            s = np.std(chunk, ddof=1)
-            if s > 1e-8:
-                chunk_rs.append(r / s)
-                
-        if chunk_rs:
-            # Anis-Lloyd analytical expected R/S for standard white noise
+        # Fast 2D vectorized chunk operations
+        chunks = log_returns[:n_chunks * lag].reshape(n_chunks, lag)
+        means = chunks.mean(axis=1, keepdims=True)
+        cum_dev = np.cumsum(chunks - means, axis=1)
+        r = np.ptp(cum_dev, axis=1)
+        s = np.std(chunks, axis=1, ddof=1)
+        
+        valid = s > 1e-8
+        if np.any(valid):
+            raw_rs = float(np.mean(r[valid] / s[valid]))
             expected_rs = np.sqrt((lag - 0.5) / (np.pi * 0.5)) if lag > 2 else 1.0
-            raw_rs = np.mean(chunk_rs)
-            # Subtract finite-sample bias
             rs_values.append(raw_rs / max(expected_rs * 0.85, 0.1))
+            valid_lags.append(lag)
             
     if len(rs_values) >= 3:
-        valid_lags = lags[:len(rs_values)]
         poly = np.polyfit(np.log(valid_lags), np.log(rs_values), 1)
-        # Shift regression slope back to H scale
         h = float(np.clip(poly[0] + 0.50, 0.10, 0.90))
     else:
         h = 0.50
@@ -78,13 +72,14 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
         regime = f"ANTI-PERSISTENT MEAN-REVERTING (H={h:.2f} < 0.45 - Fade Extremes)"
         is_trending = False
     else:
-        regime = f"RANDOM WALK (H={h:.2f} - High Noise Filtered)"
+        regime = f"RANDOM WALK NOISE (H={h:.2f} in [0.45, 0.52] - Range Bound)"
         is_trending = False
         
     return {
         "hurst": round(h, 4),
         "regime": regime,
-        "is_trending": is_trending
+        "is_trending": is_trending,
+        "r_squared_proxy": round(float(np.corrcoef(np.log(valid_lags), np.log(rs_values))[0, 1] ** 2) if len(rs_values) >= 3 else 0.80, 2)
     }
 
 def compute_vakc_envelopes(
@@ -126,67 +121,67 @@ def compute_vakc_envelopes(
 
 
 def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Computes Session Anchored VWAP and Exact Online 2nd-Moment Variance (±2σ dispersion bands)."""
-    df = df.copy()
-    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    
-    vol = df["volume"].copy().astype(float)
-    if vol.sum() == 0 or (vol == 0).all():
-        vol = (df["high"] - df["low"]).clip(lower=1.0)
-    else:
-        vol = vol.replace(0, 1.0)
+    """Computes Session Anchored VWAP and Exact Online 2nd-Moment Variance (±2σ dispersion bands) via Pure NumPy."""
+    if df.empty:
+        s = pd.Series(dtype=float)
+        return s, s, s
         
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
+    vol_raw = df["volume"].to_numpy(dtype=float) if "volume" in df.columns else np.ones(len(df))
+    
+    typical_price = (high + low + close) / 3.0
+    vol = np.where(vol_raw > 0, vol_raw, np.maximum(high - low, 1.0))
     tp_vol = typical_price * vol
     tp_sq_vol = (typical_price ** 2) * vol
     
-    if anchor_session:
-        dates = pd.Series(df.index.date, index=df.index) if hasattr(df.index, "date") else pd.Series(0, index=df.index)
-        cum_vol = vol.groupby(dates).cumsum().clip(lower=1.0)
-        cum_tp_vol = tp_vol.groupby(dates).cumsum()
-        cum_tp_sq_vol = tp_sq_vol.groupby(dates).cumsum()
+    if anchor_session and isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+        day_nums = df.index.dayofyear.to_numpy()
+        session_breaks = np.concatenate(([0], np.where(np.diff(day_nums) != 0)[0] + 1))
         
-        vwap = (cum_tp_vol / cum_vol).fillna(typical_price)
-        # Exact online 2nd-moment standard deviation: sqrt(E[X^2] - (E[X])^2)
-        variance = (cum_tp_sq_vol / cum_vol) - (vwap ** 2)
-        std_dev = np.sqrt(np.maximum(variance, 0.0)).fillna(0.0)
+        cum_vol = np.zeros(len(df), dtype=float)
+        cum_tp = np.zeros(len(df), dtype=float)
+        cum_tp_sq = np.zeros(len(df), dtype=float)
+        
+        for i in range(len(session_breaks)):
+            start_i = session_breaks[i]
+            end_i = session_breaks[i + 1] if i + 1 < len(session_breaks) else len(df)
+            cum_vol[start_i:end_i] = np.cumsum(vol[start_i:end_i])
+            cum_tp[start_i:end_i] = np.cumsum(tp_vol[start_i:end_i])
+            cum_tp_sq[start_i:end_i] = np.cumsum(tp_sq_vol[start_i:end_i])
     else:
-        cum_vol = vol.cumsum().clip(lower=1.0)
-        cum_tp_vol = tp_vol.cumsum()
-        cum_tp_sq_vol = tp_sq_vol.cumsum()
-        vwap = (cum_tp_vol / cum_vol).fillna(typical_price)
-        variance = (cum_tp_sq_vol / cum_vol) - (vwap ** 2)
-        std_dev = np.sqrt(np.maximum(variance, 0.0)).fillna(0.0)
-
-    upper_sd = vwap + (2.0 * std_dev)
-    lower_sd = vwap - (2.0 * std_dev)
+        cum_vol = np.cumsum(vol)
+        cum_tp = np.cumsum(tp_vol)
+        cum_tp_sq = np.cumsum(tp_sq_vol)
+        
+    cum_vol_safe = np.maximum(cum_vol, 1.0)
+    vwap_arr = cum_tp / cum_vol_safe
+    variance_arr = np.maximum((cum_tp_sq / cum_vol_safe) - (vwap_arr ** 2), 0.0)
+    std_dev_arr = np.sqrt(variance_arr)
+    
+    vwap = pd.Series(vwap_arr, index=df.index)
+    upper_sd = pd.Series(vwap_arr + (2.0 * std_dev_arr), index=df.index)
+    lower_sd = pd.Series(vwap_arr - (2.0 * std_dev_arr), index=df.index)
     return vwap, upper_sd, lower_sd
 
 
 def compute_vwap_multi_dispersion_and_half_life(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Computes Full Multi-Sigma VWAP Dispersion Envelopes (±1σ, ±2σ, ±3σ),
-    Real-Time VWAP Z-Score (Z_vwap), and Ornstein-Uhlenbeck (OU) Mean-Reversion Half-Life (τ_1/2).
+    Real-Time VWAP Z-Score (Z_vwap), and Vectorized Ornstein-Uhlenbeck (OU) Half-Life (τ_1/2).
     """
     if df.empty or len(df) < 5:
         return {
-            "vwap": 0.0, "sigma_1_up": 0.0, "sigma_1_down": 0.0,
+            "vwap": 0.0, "std_dev": 1.0, "sigma_1_up": 0.0, "sigma_1_down": 0.0,
             "sigma_2_up": 0.0, "sigma_2_down": 0.0, "sigma_3_up": 0.0, "sigma_3_down": 0.0,
             "z_score_vwap": 0.0, "half_life_bars": 12.0, "half_life_mins": 60.0,
             "mean_reverting_urgency": "NORMAL"
         }
 
-    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    vol = df["volume"].copy().astype(float).replace(0, 1.0)
+    vwap_series, upper_2sd, lower_2sd = compute_vwap(df, anchor_session=True)
+    std_series = (upper_2sd - vwap_series) / 2.0
     
-    dates = pd.Series(df.index.date, index=df.index) if hasattr(df.index, "date") else pd.Series(0, index=df.index)
-    cum_vol = vol.groupby(dates).cumsum().clip(lower=1.0)
-    cum_tp_vol = (typical_price * vol).groupby(dates).cumsum()
-    cum_tp_sq_vol = ((typical_price ** 2) * vol).groupby(dates).cumsum()
-    
-    vwap_series = (cum_tp_vol / cum_vol).fillna(typical_price)
-    variance_series = (cum_tp_sq_vol / cum_vol) - (vwap_series ** 2)
-    std_series = np.sqrt(np.maximum(variance_series, 0.0)).fillna(1.0)
-
     curr_close = float(df["close"].iloc[-1])
     curr_vwap = float(vwap_series.iloc[-1])
     curr_std = max(float(std_series.iloc[-1]), 1.0)
@@ -201,20 +196,23 @@ def compute_vwap_multi_dispersion_and_half_life(df: pd.DataFrame) -> Dict[str, A
     s3_up = round(curr_vwap + 3.0 * curr_std, 2)
     s3_down = round(curr_vwap - 3.0 * curr_std, 2)
 
-    # Ornstein-Uhlenbeck (OU) Mean-Reversion Half-Life Estimation:
-    # Regress delta_S_t on S_{t-1} relative to VWAP
-    price_diff = (df["close"] - vwap_series).values
-    if len(price_diff) >= 15:
-        y = np.diff(price_diff)
+    # Fast Analytical OU Mean-Reversion Half-Life Estimation
+    price_diff = (df["close"] - vwap_series).to_numpy(dtype=float)
+    n_pts = len(price_diff)
+    if n_pts >= 15:
         x = price_diff[:-1]
-        # Linear regression slope: delta_y = beta * x
-        if np.var(x) > 1e-6:
-            beta = np.cov(x, y)[0, 1] / np.var(x)
+        y = np.diff(price_diff)
+        n = len(x)
+        x_c = x - np.mean(x)
+        var_x = np.dot(x_c, x_c) / n
+        if var_x > 1e-6:
+            cov_xy = np.dot(x_c, y - np.mean(y)) / n
+            beta = cov_xy / var_x
             if beta < 0:
-                theta = - beta # Speed of mean reversion
-                half_life_bars = round(np.log(2.0) / max(theta, 0.01), 1)
+                theta = -beta
+                half_life_bars = round(math.log(2.0) / max(theta, 0.01), 1)
             else:
-                half_life_bars = 45.0 # Non-mean-reverting / trending
+                half_life_bars = 45.0
         else:
             half_life_bars = 15.0
     else:
@@ -412,28 +410,31 @@ def compute_vf_trade_table(open_price: float, atr: float = 60.0) -> Dict[str, fl
     return table
 
 def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]:
-    """Computes Dual-Bracket 70% Volume Profile, POC, VAH, and VAL."""
+    """Computes Dual-Bracket 70% Volume Profile, POC, VAH, and VAL (Vectorized NumPy)."""
     if df.empty or len(df) < 3:
         return {"poc": 0.0, "vah": 0.0, "val": 0.0, "bins": [], "volumes": []}
     
-    price_min = float(df["low"].min())
-    price_max = float(df["high"].max())
+    lows = df["low"].to_numpy(dtype=float)
+    highs = df["high"].to_numpy(dtype=float)
+    vols = df["volume"].to_numpy(dtype=float)
+    
+    price_min = float(np.min(lows))
+    price_max = float(np.max(highs))
     if np.isclose(price_min, price_max):
-        return {"poc": price_min, "vah": price_max, "val": price_min, "bins": [price_min, price_max], "volumes": [int(df['volume'].sum())]}
+        return {"poc": price_min, "vah": price_max, "val": price_min, "bins": [price_min, price_max], "volumes": [int(np.sum(vols))]}
         
     bins = np.linspace(price_min, price_max, n_bins)
-    bin_volumes = np.zeros(n_bins - 1)
+    bin_volumes = np.zeros(n_bins - 1, dtype=float)
     
-    for _, row in df.iterrows():
-        c_low, c_high = float(row["low"]), float(row["high"])
-        vol = float(row["volume"]) if row["volume"] > 0 else (c_high - c_low)
-        
-        idx_low = np.clip(np.digitize(c_low, bins) - 1, 0, n_bins - 2)
-        idx_high = np.clip(np.digitize(c_high, bins) - 1, 0, n_bins - 2)
-        
-        span = max(idx_high - idx_low + 1, 1)
-        for b_i in range(idx_low, idx_high + 1):
-            bin_volumes[b_i] += vol / span
+    # Vectorized / fast array iteration without pandas overhead
+    safe_vols = np.where(vols > 0, vols, highs - lows)
+    idx_lows = np.clip(np.digitize(lows, bins) - 1, 0, n_bins - 2)
+    idx_highs = np.clip(np.digitize(highs, bins) - 1, 0, n_bins - 2)
+    spans = np.maximum(idx_highs - idx_lows + 1, 1)
+    
+    for i in range(len(lows)):
+        v_share = safe_vols[i] / spans[i]
+        bin_volumes[idx_lows[i]:idx_highs[i] + 1] += v_share
             
     poc_idx = int(np.argmax(bin_volumes))
     poc_price = (bins[poc_idx] + bins[poc_idx + 1]) / 2.0
@@ -445,8 +446,8 @@ def compute_volume_profile(df: pd.DataFrame, n_bins: int = 36) -> Dict[str, Any]
     curr_vol = bin_volumes[poc_idx]
     
     while curr_vol < target_vol and (low_idx > 0 or high_idx < len(bin_volumes) - 1):
-        v_below = bin_volumes[low_idx - 1] if low_idx > 0 else 0
-        v_above = bin_volumes[high_idx + 1] if high_idx < len(bin_volumes) - 1 else 0
+        v_below = bin_volumes[low_idx - 1] if low_idx > 0 else 0.0
+        v_above = bin_volumes[high_idx + 1] if high_idx < len(bin_volumes) - 1 else 0.0
         if v_above >= v_below and high_idx < len(bin_volumes) - 1:
             high_idx += 1
             curr_vol += v_above
@@ -643,20 +644,37 @@ def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float =
 # =====================================================================
 
 def _resample_ohlcv_if_needed(df_source: pd.DataFrame, freq: str, bar_multiplier: int) -> pd.DataFrame:
-    """Safely resamples OHLCV DataFrame using DateTimeIndex or integer grouping fallback."""
+    """Safely and swiftly resamples OHLCV DataFrame using vectorized NumPy chunking."""
     if df_source.empty:
         return df_source
-    if isinstance(df_source.index, pd.DatetimeIndex):
-        resampled = df_source.resample(freq).agg({
-            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-        }).dropna()
-        return resampled
-    else:
-        chunk_ids = np.arange(len(df_source)) // bar_multiplier
-        grouped = df_source.groupby(chunk_ids).agg({
-            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-        })
-        return grouped
+    n = len(df_source)
+    k = max(int(bar_multiplier), 1)
+    n_full = (n // k) * k
+    if n_full < k:
+        return df_source.copy()
+        
+    o_arr = df_source["open"].to_numpy(dtype=float)
+    h_arr = df_source["high"].to_numpy(dtype=float)
+    l_arr = df_source["low"].to_numpy(dtype=float)
+    c_arr = df_source["close"].to_numpy(dtype=float)
+    v_arr = df_source["volume"].to_numpy(dtype=float)
+    
+    opens = o_arr[:n_full].reshape(-1, k)[:, 0]
+    highs = np.max(h_arr[:n_full].reshape(-1, k), axis=1)
+    lows = np.min(l_arr[:n_full].reshape(-1, k), axis=1)
+    closes = c_arr[:n_full].reshape(-1, k)[:, -1]
+    volumes = np.sum(v_arr[:n_full].reshape(-1, k), axis=1)
+    
+    if n > n_full:
+        opens = np.append(opens, o_arr[n_full])
+        highs = np.append(highs, np.max(h_arr[n_full:]))
+        lows = np.append(lows, np.min(l_arr[n_full:]))
+        closes = np.append(closes, c_arr[-1])
+        volumes = np.append(volumes, np.sum(v_arr[n_full:]))
+        
+    return pd.DataFrame({
+        "open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes
+    })
 
 
 def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, Any]:

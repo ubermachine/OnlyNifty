@@ -187,6 +187,54 @@ def black_scholes_greeks(
     }
 
 
+def black_scholes_greeks_batch(
+    spot: float,
+    strikes: np.ndarray,
+    t_days: float = 4.0,
+    r: float = RISK_FREE_RATE,
+    q: float = 0.0,
+    sigma: float = DEFAULT_IV,
+    is_call: bool = True
+) -> Dict[str, np.ndarray]:
+    """Vectorized European option pricing and Greeks across array of strikes."""
+    t_years = max(t_days / 365.0, 0.00001)
+    if not is_call:
+        sigma = sigma + PUT_SKEW_PREMIUM
+    sigma = max(sigma, 0.01)
+    
+    sqrt_t = math.sqrt(t_years)
+    d1 = (np.log(spot / strikes) + (r - q + 0.5 * (sigma ** 2)) * t_years) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    
+    pdf_d1 = norm.pdf(d1)
+    cdf_d1 = norm.cdf(d1)
+    cdf_d2 = norm.cdf(d2)
+    discount_r = math.exp(-r * t_years)
+    discount_q = math.exp(-q * t_years)
+    
+    if is_call:
+        price = spot * discount_q * cdf_d1 - strikes * discount_r * cdf_d2
+        delta = discount_q * cdf_d1
+    else:
+        price = strikes * discount_r * norm.cdf(-d2) - spot * discount_q * norm.cdf(-d1)
+        delta = discount_q * (cdf_d1 - 1.0)
+        
+    gamma = (discount_q * pdf_d1) / (spot * sigma * sqrt_t)
+    theta_annual = - (spot * discount_q * pdf_d1 * sigma) / (2.0 * sqrt_t)
+    theta_daily = theta_annual / 365.0
+    vega_1pct = (spot * discount_q * pdf_d1 * sqrt_t) / 100.0
+    vanna_1pct = - discount_q * (pdf_d1 * d2) / (sigma * 100.0)
+    
+    return {
+        "price": np.maximum(price, 0.20),
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta_daily,
+        "vega": vega_1pct,
+        "vanna": vanna_1pct
+    }
+
+
 def compute_0dte_gamma_scalp_parameters(
     spot: float,
     strike: float,
@@ -1058,38 +1106,38 @@ def construct_ratio_spread(
 
 def select_institutional_strike(
     spot: float,
-
     is_call: bool,
     t_days: float = 4.0,
     iv: float = DEFAULT_IV,
     is_0dte_afternoon: bool = False
 ) -> Dict[str, Any]:
     """
-    Selects optimal institutional strike:
+    Selects optimal institutional strike (Vectorized):
     - Normal regimes: Target Delta ~0.58 in [0.50, 0.65].
     - 0DTE Expiry Thursday afternoon: Selects Deep ITM (Delta ~0.75-0.85) to avoid gamma cliff.
     """
     atm_base = int(round(spot / 50.0) * 50)
-    candidate_offsets = [0, -50, 50, -100, 100, -150, 150, -200, 200, -250, -300] if is_call else [0, 50, -50, 100, -100, 150, -150, 200, -200, 250, 300]
-    candidates = [atm_base + off for off in candidate_offsets]
+    candidate_offsets = np.array([0, -50, 50, -100, 100, -150, 150, -200, 200, -250, -300] if is_call else [0, 50, -50, 100, -100, 150, -150, 200, -200, 250, 300])
+    candidates = atm_base + candidate_offsets
     
     target_delta = DELTA_DEEP_ITM_0DTE if is_0dte_afternoon else 0.58
     min_delta = 0.70 if is_0dte_afternoon else DELTA_MIN
     max_delta = 0.90 if is_0dte_afternoon else DELTA_MAX
     
-    best_strike = atm_base
-    best_greeks = black_scholes_greeks(spot, best_strike, t_days, sigma=iv, is_call=is_call)
-    best_delta_diff = float("inf")
+    # Vectorized evaluation of all candidates at once
+    batch = black_scholes_greeks_batch(spot, candidates, t_days=t_days, sigma=iv, is_call=is_call)
+    abs_deltas = np.abs(batch["delta"])
     
-    for k in candidates:
-        g = black_scholes_greeks(spot, k, t_days, sigma=iv, is_call=is_call)
-        abs_delta = abs(g["delta"])
-        if min_delta <= abs_delta <= max_delta:
-            diff = abs(abs_delta - target_delta)
-            if diff < best_delta_diff:
-                best_delta_diff = diff
-                best_strike = k
-                best_greeks = g
+    valid_mask = (abs_deltas >= min_delta) & (abs_deltas <= max_delta)
+    if np.any(valid_mask):
+        valid_indices = np.where(valid_mask)[0]
+        diffs = np.abs(abs_deltas[valid_indices] - target_delta)
+        best_idx = valid_indices[np.argmin(diffs)]
+    else:
+        best_idx = 0
+        
+    best_strike = int(candidates[best_idx])
+    best_greeks = black_scholes_greeks(spot, best_strike, t_days=t_days, sigma=iv, is_call=is_call)
 
     opt_type = "CE" if is_call else "PE"
     return {
@@ -1170,33 +1218,38 @@ def compute_strike_ladder_greeks(
     num_strikes: int = 10,
     step: int = 50
 ) -> pd.DataFrame:
-    """Computes strike ladder DataFrame around current spot price with Greeks matrix."""
+    """Computes strike ladder DataFrame around current spot price with vectorized Greeks matrix."""
     atm_center = int(round(spot / float(step)) * step)
     min_strike = atm_center - (num_strikes // 2) * step
     max_strike = atm_center + (num_strikes // 2) * step
+    k_array = np.arange(min_strike, max_strike + step, step, dtype=float)
+    
+    ce_batch = black_scholes_greeks_batch(spot, k_array, t_days=t_days, r=r, q=q, sigma=iv, is_call=True)
+    pe_batch = black_scholes_greeks_batch(spot, k_array, t_days=t_days, r=r, q=q, sigma=iv, is_call=False)
     
     rows = []
-    for k in range(min_strike, max_strike + step, step):
-        ce = black_scholes_greeks(spot, k, t_days=t_days, r=r, q=q, sigma=iv, is_call=True)
-        pe = black_scholes_greeks(spot, k, t_days=t_days, r=r, q=q, sigma=iv, is_call=False)
-        is_atm = (k == atm_center)
-        ce_rec = "👉 PRO CALL" if (0.50 <= ce["delta"] <= 0.65) else ""
-        pe_rec = "👉 PRO PUT" if (0.50 <= abs(pe["delta"]) <= 0.65) else ""
+    for i, k in enumerate(k_array):
+        k_int = int(k)
+        is_atm = (k_int == atm_center)
+        ce_delta = ce_batch["delta"][i]
+        pe_delta = pe_batch["delta"][i]
+        ce_rec = "👉 PRO CALL" if (0.50 <= ce_delta <= 0.65) else ""
+        pe_rec = "👉 PRO PUT" if (0.50 <= abs(pe_delta) <= 0.65) else ""
         rows.append({
             "Call Setup": ce_rec,
-            "CE Delta": ce["delta"],
-            "CE Gamma": ce["gamma"],
-            "CE Theta": ce["theta"],
-            "CE Vega": ce["vega"],
-            "CE Vanna": ce["vanna"],
-            "CE Premium (₹)": ce["price"],
-            "Strike": f"🎯 {k} (ATM)" if is_atm else str(k),
-            "PE Premium (₹)": pe["price"],
-            "PE Vanna": pe["vanna"],
-            "PE Vega": pe["vega"],
-            "PE Theta": pe["theta"],
-            "PE Gamma": pe["gamma"],
-            "PE Delta": pe["delta"],
+            "CE Delta": round(ce_delta, 4),
+            "CE Gamma": round(ce_batch["gamma"][i], 6),
+            "CE Theta": round(ce_batch["theta"][i], 2),
+            "CE Vega": round(ce_batch["vega"][i], 2),
+            "CE Vanna": round(ce_batch["vanna"][i], 4),
+            "CE Premium (₹)": round(ce_batch["price"][i], 2),
+            "Strike": f"🎯 {k_int} (ATM)" if is_atm else str(k_int),
+            "PE Premium (₹)": round(pe_batch["price"][i], 2),
+            "PE Vanna": round(pe_batch["vanna"][i], 4),
+            "PE Vega": round(pe_batch["vega"][i], 2),
+            "PE Theta": round(pe_batch["theta"][i], 2),
+            "PE Gamma": round(pe_batch["gamma"][i], 6),
+            "PE Delta": round(pe_delta, 4),
             "Put Setup": pe_rec
         })
     return pd.DataFrame(rows)

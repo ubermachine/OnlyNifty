@@ -1,10 +1,11 @@
 <div align="center">
 
-# 🎯 OnlyNifty (PRO v4.0 Ultimate Institutional Edition)
-### *Tier-1 Institutional Quantitative Trading Engine & Low-Noise Signal Terminal for Nifty 50 Options*
+# 🎯 OnlyNifty (PRO v4.0 Ultimate Turbo Institutional Edition)
+### *Tier-1 Institutional Quantitative Trading Engine & Vectorized Low-Latency Terminal for Nifty 50 Options*
 
 [![Build Status](https://img.shields.io/badge/build-passing-05df72.svg?style=for-the-badge&logo=github)](https://github.com/ubermachine/OnlyNifty)
 [![Tests](https://img.shields.io/badge/unit%20tests-71%2F71%20passing%20(100%25)-00d2ff.svg?style=for-the-badge)](https://github.com/ubermachine/OnlyNifty)
+[![Latency](https://img.shields.io/badge/latency-sub--15ms%20warm%20%7C%20WebGL%20GPU-05df72.svg?style=for-the-badge)](https://github.com/ubermachine/OnlyNifty)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-blue.svg?style=for-the-badge&logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.37+-FF4B4B.svg?style=for-the-badge&logo=streamlit)](https://streamlit.io)
 [![Market](https://img.shields.io/badge/market-NSE%20India%20(NIFTY%2050)-orange.svg?style=for-the-badge)](https://www.nseindia.com)

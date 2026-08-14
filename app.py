@@ -1,4 +1,4 @@
-"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (JustNifty v3.0)."""
+"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (JustNifty v4.0 Turbo)."""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import time
 
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
@@ -30,24 +31,20 @@ from src.options_engine import (
     calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
     generate_svi_smile_curve, construct_delta_neutral_iron_condor
 )
-
-
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
 
 
-
-
-# Page Config
+# ----------------- STREAMLIT PAGE CONFIG -----------------
 st.set_page_config(
-    page_title="Nifty Institutional Signal Terminal | JustNifty v3.0",
+    page_title="Nifty Institutional Signal Terminal | JustNifty v4.0 Turbo",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom High-Contrast Low-Noise CSS
+# ----------------- HIGH-PERFORMANCE LOW-LATENCY CSS -----------------
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
@@ -64,15 +61,19 @@ st.markdown("""
         background-color: #0e1422;
         border: 1px solid #1c273c;
         border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 20px;
+        padding: 18px;
+        margin-bottom: 16px;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .cockpit-box:hover {
+        border-color: #2e3d59;
     }
     
     .cockpit-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
     }
 
     .badge-pro {
@@ -83,6 +84,30 @@ st.markdown("""
         padding: 3px 8px;
         border-radius: 4px;
         font-family: 'JetBrains Mono', monospace;
+        letter-spacing: 0.05em;
+    }
+
+    .live-pulse {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        color: #05df72;
+        font-weight: 700;
+    }
+    .pulse-dot {
+        width: 8px;
+        height: 8px;
+        background-color: #05df72;
+        border-radius: 50%;
+        box-shadow: 0 0 8px #05df72;
+        animation: pulse-glow 1.5s infinite ease-in-out;
+    }
+    @keyframes pulse-glow {
+        0% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.35; transform: scale(0.85); }
+        100% { opacity: 1; transform: scale(1); }
     }
 
     .signal-long {
@@ -94,6 +119,7 @@ st.markdown("""
         font-family: 'JetBrains Mono', monospace;
         font-weight: 700;
         font-size: 13px;
+        transition: all 0.2s ease;
     }
 
     .signal-short {
@@ -105,6 +131,7 @@ st.markdown("""
         font-family: 'JetBrains Mono', monospace;
         font-weight: 700;
         font-size: 13px;
+        transition: all 0.2s ease;
     }
 
     .signal-wait {
@@ -116,14 +143,15 @@ st.markdown("""
         font-family: 'JetBrains Mono', monospace;
         font-weight: 700;
         font-size: 13px;
+        transition: all 0.2s ease;
     }
 
     .confluence-grid {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
         gap: 10px;
-        margin-top: 14px;
-        padding-top: 14px;
+        margin-top: 12px;
+        padding-top: 12px;
         border-top: 1px solid #1c273c;
     }
 
@@ -132,13 +160,18 @@ st.markdown("""
         border: 1px solid #1c273c;
         border-radius: 6px;
         padding: 8px 12px;
+        transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+    .confluence-cell:hover {
+        border-color: #283750;
     }
 
     .c-lbl {
-        font-size: 11px;
-        color: #55657e;
+        font-size: 10.5px;
+        color: #64748b;
         text-transform: uppercase;
-        font-weight: 600;
+        font-weight: 700;
+        letter-spacing: 0.03em;
     }
 
     .c-val {
@@ -150,6 +183,51 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ----------------- RESOURCE SINGLETONS -----------------
+@st.cache_resource(show_spinner=False)
+def get_data_engine() -> DataEngine:
+    return DataEngine(use_cache=True)
+
+@st.cache_resource(show_spinner=False)
+def get_strategy_engine() -> StrategyEngine:
+    return StrategyEngine()
+
+@st.cache_resource(show_spinner=False)
+def get_kalman_estimator() -> KalmanFilterTrendEstimator:
+    return KalmanFilterTrendEstimator()
+
+@st.cache_resource(show_spinner=False)
+def get_markov_switcher() -> MarkovRegimeSwitcher:
+    return MarkovRegimeSwitcher()
+
+# ----------------- MULTI-TIERED REACTIVE CACHE LAYER -----------------
+@st.cache_data(ttl=10, max_entries=10, show_spinner=False)
+def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
+    engine = get_data_engine()
+    if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
+        return engine.fetch_yfinance_nifty(interval=tf, period="5d")
+    return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
+
+@st.cache_data(ttl=15, max_entries=5, show_spinner=False)
+def load_live_option_chain_data() -> dict:
+    engine = get_data_engine()
+    return engine.fetch_live_nse_option_chain(symbol="NIFTY")
+
+@st.cache_data(ttl=20, max_entries=5, show_spinner=False)
+def load_heavyweight_flow_index() -> dict:
+    engine = get_data_engine()
+    return engine.fetch_heavyweight_flow_index()
+
+@st.cache_data(ttl=20, max_entries=5, show_spinner=False)
+def load_sectoral_pulse() -> dict:
+    engine = get_data_engine()
+    return engine.fetch_sectoral_pulse()
+
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def get_institutional_oi_data() -> pd.DataFrame:
+    engine = get_data_engine()
+    return engine.get_participant_oi_snapshot()
+
 # ----------------- SIDEBAR CONTROLS -----------------
 st.sidebar.header("⚙️ Risk & Data Stream")
 account_capital = st.sidebar.number_input("Account Capital (₹)", min_value=50000.0, max_value=50000000.0, value=DEFAULT_CAPITAL, step=50000.0)
@@ -160,22 +238,27 @@ drawdown_input = st.sidebar.slider("Current Portfolio Drawdown (%)", min_value=0
 is_0dte_mode = st.sidebar.checkbox("⚡ 0DTE Expiry Thursday Mode (Post-13:00 IST)", value=False, help="Activates sub-minute singularity shield, tightened 18pt stops, and gamma explosion scalper.")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📡 Live Market Feed")
+st.sidebar.subheader("📡 Live Stream Engine")
 data_mode = st.sidebar.radio("Data Stream Source", ["Live / Latest Market Feed (yfinance + NSE)", "Synthetic Market Simulation"])
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
-if st.sidebar.button("🔄 Refresh Market Data Now", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
+auto_refresh_choice = st.sidebar.selectbox(
+    "⚡ Stream Refresh Rate",
+    ["Off (Manual)", "Every 5 Seconds", "Every 10 Seconds", "Every 15 Seconds", "Every 30 Seconds", "Every 60 Seconds"],
+    index=0
+)
 
-
-auto_refresh_choice = st.sidebar.selectbox("Auto-Refresh Feed", ["Off (Manual)", "Every 15 Seconds", "Every 30 Seconds", "Every 60 Seconds"], index=0)
 if auto_refresh_choice != "Off (Manual)":
-    sec_map = {"Every 15 Seconds": 15, "Every 30 Seconds": 30, "Every 60 Seconds": 60}
-    delay_secs = sec_map.get(auto_refresh_choice, 30)
-    st.sidebar.caption(f"⚡ Live feed auto-refresh active ({delay_secs}s)")
-    # Non-blocking client-side refresh timer
+    sec_map = {
+        "Every 5 Seconds": 5,
+        "Every 10 Seconds": 10,
+        "Every 15 Seconds": 15,
+        "Every 30 Seconds": 30,
+        "Every 60 Seconds": 60
+    }
+    delay_secs = sec_map.get(auto_refresh_choice, 15)
+    st.sidebar.caption(f"⚡ Live feed streaming active ({delay_secs}s cadence)")
     st.markdown(f"""
     <script>
         setTimeout(function() {{
@@ -184,28 +267,17 @@ if auto_refresh_choice != "Off (Manual)":
     </script>
     """, unsafe_allow_html=True)
 
-# ----------------- DATA INGESTION & CACHING -----------------
-@st.cache_data(ttl=30)
-def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
-    engine = DataEngine(use_cache=True)
-    if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
-        return engine.fetch_yfinance_nifty(interval=tf, period="5d")
-    else:
-        return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
+if st.sidebar.button("🔄 Instant Cache Purge & Rerun", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
-@st.cache_data(ttl=60)
-def get_institutional_oi_data() -> pd.DataFrame:
-    engine = DataEngine(use_cache=True)
-    return engine.get_participant_oi_snapshot()
+# ----------------- PIPELINE EXECUTION & LATENCY INSTRUMENTATION -----------------
+t_pipeline_start = time.perf_counter()
 
-@st.cache_data(ttl=30)
-def load_live_option_chain_data() -> dict:
-    engine = DataEngine(use_cache=True)
-    return engine.fetch_live_nse_option_chain(symbol="NIFTY")
-
-
-data_engine = DataEngine(use_cache=True)
-strategy_engine = StrategyEngine()
+data_engine = get_data_engine()
+strategy_engine = get_strategy_engine()
+kalman_engine = get_kalman_estimator()
+markov_engine = get_markov_switcher()
 
 df_raw = load_market_data(data_mode, tf_str)
 if df_raw.empty or len(df_raw) < 15:
@@ -235,30 +307,32 @@ vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"
 signal = strategy_engine.evaluate_bar(df, live_iv=iv_input)
 ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input, iv=iv_input, is_0dte_afternoon=is_0dte_mode)
 
-# Confluence checks computation
-is_above_200 = current_spot > float(df.iloc[-1]["ema200"])
-is_above_vwap = current_spot > float(df.iloc[-1]["vwap"])
-dist_ema21 = abs(current_spot - float(df.iloc[-1]["ema21"])) / current_spot
-is_not_stretched = dist_ema21 <= MA_STRETCH_THRESHOLD
-
 # Latent Kalman & Markov Regime inference
-kalman_engine = KalmanFilterTrendEstimator()
 df_kalman = kalman_engine.filter_series(df["close"])
-markov_engine = MarkovRegimeSwitcher()
 regime_state = markov_engine.infer_regimes(df)
 ib_state = compute_initial_balance_and_day_type(df)
-sector_pulse = data_engine.fetch_sectoral_pulse()
+sector_pulse = load_sectoral_pulse()
+hfi_res = load_heavyweight_flow_index()
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
 delta_div = detect_footprint_delta_divergences(df)
+
+t_latency_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+refresh_tag = f"{auto_refresh_choice.upper()}" if auto_refresh_choice != "Off (Manual)" else "MANUAL STREAM"
 
 # ----------------- UNIFIED TOP INSTITUTIONAL COCKPIT -----------------
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v4.0 ULTIMATE</span>
+        <span class="badge-pro">PRO v4.0 ULTIMATE TURBO</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
-    <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
+    <div style="display: flex; align-items: center; gap: 14px;">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">LATENCY: <strong style="color: #00d2ff;">{t_latency_ms:.1f}ms</strong></div>
+        <div class="live-pulse">
+            <div class="pulse-dot"></div>
+            <span>● {refresh_tag}</span>
+        </div>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -451,18 +525,18 @@ with tab_chart:
     ), row=1, col=1)
     
     if show_emas:
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema200"], name="200 EMA (Macro Referee)", line=dict(color="#05df72", width=2.4)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema55"], name="55 EMA (Intermediate Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["ema21"], name="21 EMA (Dynamic Trailing SL)", line=dict(color="#00d2ff", width=1.6)), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["ema200"], 2), name="200 EMA (Macro Referee)", line=dict(color="#05df72", width=2.4)), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["ema55"], 2), name="55 EMA (Intermediate Trend)", line=dict(color="#ff9100", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["ema21"], 2), name="21 EMA (Dynamic Trailing SL)", line=dict(color="#00d2ff", width=1.6)), row=1, col=1)
         
     if show_vakc:
-        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_upper"], name="Upper VAKC Envelope (Profit Zone)", line=dict(color="#ff3355", width=1.2, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vakc_lower"], name="Lower VAKC Envelope (Profit Zone)", line=dict(color="#05df72", width=1.2, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vakc_upper"], 2), name="Upper VAKC Envelope (Profit Zone)", line=dict(color="#ff3355", width=1.2, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vakc_lower"], 2), name="Lower VAKC Envelope (Profit Zone)", line=dict(color="#05df72", width=1.2, dash="dash")), row=1, col=1)
         
     if show_vwap:
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap"], name="Session AVWAP (09:15 Fair Value)", line=dict(color="#a855f7", width=2.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_upper"], name="+2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["vwap_lower"], name="-2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap"], 2), name="Session AVWAP (09:15 Fair Value)", line=dict(color="#a855f7", width=2.2)), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap_upper"], 2), name="+2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap_lower"], 2), name="-2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
         
     if show_cpr and cpr["pivot"] > 0:
         fig.add_hline(y=cpr["pivot"], line_dash="dash", line_color="#ffd600", annotation_text="CPR Pivot", row=1, col=1)
@@ -512,6 +586,7 @@ with tab_chart:
     # Layout and UX Polishing
     fig.update_layout(
         height=700,
+        uirevision="nifty_spot_view",
         template="plotly_dark",
         paper_bgcolor="#080c14",
         plot_bgcolor="#080c14",
@@ -527,7 +602,7 @@ with tab_chart:
     fig.update_xaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="#1c273c", zeroline=False)
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
 
 
 # ----- TAB 2: QUANTITATIVE RISK & MONTE CARLO RUIN TERMINAL -----
@@ -685,20 +760,20 @@ with tab_sizer:
             delta_color="normal"
         )
         
-    # High-Performance Interactive Plotly Monte Carlo Fan Chart
+    # High-Performance Interactive Plotly Monte Carlo Fan Chart (WebGL GPU Accelerated)
     mc_fig = go.Figure()
     trades_axis = list(range(mc_res["num_trades"] + 1))
     
     for path in mc_res["sample_paths"]:
-        mc_fig.add_trace(go.Scatter(
-            x=trades_axis, y=path,
+        mc_fig.add_trace(go.Scattergl(
+            x=trades_axis, y=np.round(path, 1),
             mode="lines",
             line=dict(color="rgba(100, 116, 139, 0.10)", width=1),
             showlegend=False,
             hoverinfo="skip"
         ))
         
-    mc_fig.add_trace(go.Scatter(
+    mc_fig.add_trace(go.Scattergl(
         x=trades_axis + trades_axis[::-1],
         y=mc_res["percentile_95"] + mc_res["percentile_5"][::-1],
         fill="toself",
@@ -708,7 +783,7 @@ with tab_sizer:
         hoverinfo="skip"
     ))
     
-    mc_fig.add_trace(go.Scatter(
+    mc_fig.add_trace(go.Scattergl(
         x=trades_axis + trades_axis[::-1],
         y=mc_res["percentile_75"] + mc_res["percentile_25"][::-1],
         fill="toself",
@@ -718,17 +793,17 @@ with tab_sizer:
         hoverinfo="skip"
     ))
     
-    mc_fig.add_trace(go.Scatter(
+    mc_fig.add_trace(go.Scattergl(
         x=trades_axis, y=mc_res["percentile_95"],
         mode="lines", line=dict(color="#00d2ff", width=1.5, dash="dash"),
         name="95th Percentile (Bull Case)"
     ))
-    mc_fig.add_trace(go.Scatter(
+    mc_fig.add_trace(go.Scattergl(
         x=trades_axis, y=mc_res["percentile_50"],
         mode="lines", line=dict(color="#05df72", width=2.5),
         name="Median Trajectory (50th %)"
     ))
-    mc_fig.add_trace(go.Scatter(
+    mc_fig.add_trace(go.Scattergl(
         x=trades_axis, y=mc_res["percentile_5"],
         mode="lines", line=dict(color="#ff3355", width=1.5, dash="dash"),
         name="5th Percentile (Stress Case)"
@@ -749,6 +824,7 @@ with tab_sizer:
     mc_fig.update_layout(
         title="<b>1,000-Path Monte Carlo Equity Trajectories & Confidence Envelopes (100 Consecutive Trades)</b>",
         title_font=dict(size=13, color="#f1f5f9"),
+        uirevision="mc_chart",
         template="plotly_dark",
         paper_bgcolor="#080c14",
         plot_bgcolor="#080c14",
@@ -763,7 +839,7 @@ with tab_sizer:
     mc_fig.update_xaxes(title_text="Consecutive Trade Number", showgrid=True, gridcolor="#1c273c")
     mc_fig.update_yaxes(title_text="Portfolio Capital (₹)", showgrid=True, gridcolor="#1c273c")
     
-    st.plotly_chart(mc_fig, use_container_width=True)
+    st.plotly_chart(mc_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
     
     dist_c1, dist_c2 = st.columns([1.0, 1.0])
     with dist_c1:
@@ -999,9 +1075,9 @@ with tab_backtest:
             
             st.markdown("#### 📈 Account Equity Curve (Net of All Fees)")
             fig_eq = go.Figure()
-            fig_eq.add_trace(go.Scatter(y=results.equity_curve, mode="lines+markers", line=dict(color="#05df72", width=2), name="Net Equity (₹)"))
+            fig_eq.add_trace(go.Scattergl(y=np.round(results.equity_curve, 2), mode="lines+markers", line=dict(color="#05df72", width=2), name="Net Equity (₹)"))
             fig_eq.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=20, b=20))
-            st.plotly_chart(fig_eq, use_container_width=True)
+            st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False, "responsive": True})
         else:
             st.info("No completed trade setups triggered within this specific historical slice.")
 
