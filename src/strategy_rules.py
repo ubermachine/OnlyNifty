@@ -310,6 +310,47 @@ class StrategyEngine:
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 )
 
+        # 5.1 Institutional Support Reclaim & Mean-Reversion Spring (V-Reversal Setup)
+        lowest_recent = float(sub_df["low"].tail(6).min())
+        val_lvl = float(vp_info.get("val", 0.0))
+        if (lowest_recent <= lower_2sd or lowest_recent <= lower_vakc_val or (val_lvl > 0 and lowest_recent <= val_lvl + 5.0)) and \
+           close > current_vwap and close > ema21 and ofi_info["buyer_defense"] and (close > bar_open or close > prev_close_val):
+            sl_lvl = round(lowest_recent - 5.0, 2)
+            if abs(close - sl_lvl) <= 45.0:
+                return Signal(
+                    signal_type=SignalType.LONG,
+                    entry_price=close,
+                    sl_price=sl_lvl,
+                    target_1=round(close + 1.2 * atr_14, 2),
+                    target_2=round(close + 2.5 * atr_14, 2),
+                    target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
+                    pyramid_trigger=round(current_vwap + 15.0, 2),
+                    reason="Institutional Spring Reclaim: Sub-AVWAP probe rejected + 21 EMA / AVWAP Reclaimed with Buyer Delta Absorption.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"spring_low": lowest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
+                )
+
+        highest_recent = float(sub_df["high"].tail(6).max())
+        vah_lvl = float(vp_info.get("vah", 999999.0))
+        if (highest_recent >= upper_2sd or highest_recent >= upper_vakc_val or (vah_lvl < 999999.0 and highest_recent >= vah_lvl - 5.0)) and \
+           close < current_vwap and close < ema21 and ofi_info["seller_defense"] and (close < bar_open or close < prev_close_val):
+            sl_lvl = round(highest_recent + 5.0, 2)
+            if abs(sl_lvl - close) <= 45.0:
+                return Signal(
+                    signal_type=SignalType.SHORT,
+                    entry_price=close,
+                    sl_price=sl_lvl,
+                    target_1=round(close - 1.2 * atr_14, 2),
+                    target_2=round(close - 2.5 * atr_14, 2),
+                    target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
+                    pyramid_trigger=round(current_vwap - 15.0, 2),
+                    reason="Institutional Distribution Thrust: Above-AVWAP probe rejected + 21 EMA / AVWAP Breakdown with Seller Delta Distribution.",
+                    htf_aligned=True,
+                    fib_retracement=0.50,
+                    details={"thrust_high": highest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
+                )
+
         # 6. Stacked Order Flow Absorption & Footprint Imbalance Setups
         if order_flow["absorption_event"] is not None:
             abs_event = order_flow["absorption_event"]

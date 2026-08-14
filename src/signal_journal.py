@@ -255,8 +255,10 @@ class LiveSignalJournal:
         self.persistence_file = persistence_file
         self.entries: List[SignalEntry] = []
         self._last_hash: str = "GENESIS_ROOT_HASH_0000000000000000"
-        
-        # Load existing entries if present
+        self.reload_from_disk()
+
+    def reload_from_disk(self) -> None:
+        """Reloads entries from disk persistence file if present."""
         if self.persistence_file and os.path.exists(self.persistence_file):
             try:
                 with open(self.persistence_file, "r", encoding="utf-8") as f:
@@ -512,9 +514,11 @@ class LiveSignalJournal:
             return 0
             
         seeded_count = 0
-        min_bars = min(15, len(df))
+        today = df.index[-1].date() if hasattr(df.index, "date") else None
+        today_start_idx = next((i for i, ts in enumerate(df.index) if hasattr(ts, "date") and ts.date() == today), max(0, len(df) - 80))
+        start_idx = max(15, today_start_idx)
         
-        for i in range(min_bars, len(df)):
+        for i in range(start_idx, len(df)):
             sub_df = df.iloc[:i+1]
             cur_spot = float(sub_df.iloc[-1]["close"])
             cur_high = float(sub_df.iloc[-1]["high"])
@@ -524,8 +528,8 @@ class LiveSignalJournal:
             # Update previous open trades first
             self.update_open_trades_lifecycle(cur_spot, cur_high, cur_low)
             
-            # Evaluate signal on this bar
-            sig = strategy_engine.evaluate_bar(sub_df, live_iv=live_iv)
+            # Evaluate signal on this bar using full df history context
+            sig = strategy_engine.evaluate_bar(df, current_idx=i, live_iv=live_iv)
             if sig.signal_type != SignalType.WAIT:
                 tkt = generate_option_trade_ticket(cur_spot, sig, capital, 0.0, iv=live_iv)
                 if tkt.get("status") == "READY":

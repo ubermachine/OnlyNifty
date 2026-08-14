@@ -341,8 +341,11 @@ dir_flow_res = compute_short_term_directional_vector(
 
 # Real-Time Live Signal Journal & Trade Lifecycle Tracker
 journal_engine = get_signal_journal()
-if hasattr(journal_engine, "seed_from_intraday_history") and len(journal_engine.entries) <= 1:
+if hasattr(journal_engine, "reload_from_disk"):
+    journal_engine.reload_from_disk()
+if hasattr(journal_engine, "seed_from_intraday_history") and (len(journal_engine.entries) <= 3 or "journal_seeded_v38" not in st.session_state):
     journal_engine.seed_from_intraday_history(df, strategy_engine, live_iv=iv_input, capital=account_capital)
+    st.session_state["journal_seeded_v38"] = True
 
 journal_engine.update_open_trades_lifecycle(
     current_spot=current_spot,
