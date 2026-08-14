@@ -82,3 +82,9 @@ THREE_PM_CANDLE: str = "15:00"
 HARD_SQUAREOFF_TIME: str = "15:15"      # Mandatory institutional intraday sweep close
 SESSION_END: str = "15:30"
 
+# ----------------- TOP 10 HEAVYWEIGHT CONSTITUENTS (55% WEIGHT) -----------------
+TOP_10_NIFTY_CONSTITUENTS = [
+    "HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS",
+    "TCS.NS", "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS", "BHARTIARTL.NS"
+]
+
