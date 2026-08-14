@@ -15,9 +15,10 @@ from src.indicators import (
     compute_hurst_exponent, compute_order_flow_imbalance, compute_volume_profile,
     compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers,
     compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
-    detect_iceberg_orders_and_liquidity_sweeps
+    detect_iceberg_orders_and_liquidity_sweeps, compute_dfa_alpha, compute_vpin_toxicity,
+    compute_volume_synchronized_gamma_tracker
 )
-from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
+from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher, MultiAssetKalmanCointegrator
 from src.macro_engine import GlobalMacroEngine
 
 
@@ -93,6 +94,7 @@ class StrategyEngine:
         self.kalman_filter = KalmanFilterTrendEstimator()
         self.markov_switcher = MarkovRegimeSwitcher()
         self.macro_engine = GlobalMacroEngine()
+        self.cointegrator = MultiAssetKalmanCointegrator()
         self.session_losses: int = 0
         self.last_session_date: Optional[Any] = None
 
@@ -201,9 +203,12 @@ class StrategyEngine:
         gap_info = compute_pre_open_gap_filter(sub_df, prev_close=prev_close, pre_open_data=pre_open_gap)
         cpr_info = compute_cpr(df_daily if df_daily is not None else sub_df)
         
-        # Latent Kalman Spot Velocity & Markov Regime Model
+        # Latent Kalman Spot Velocity, Markov Regime Model & Cointegration
         kalman_price, kalman_vel, kalman_z = self.kalman_filter.update(close)
         markov_info = self.markov_switcher.infer_regimes(sub_df)
+        dfa_info = compute_dfa_alpha(sub_df["close"])
+        vpin_info = compute_vpin_toxicity(sub_df)
+        cointegration = self.cointegrator.evaluate_spread_divergence(sub_df["close"])
         
         ema200 = float(ema200_series.iloc[-1])
         ema55 = float(ema55_series.iloc[-1])

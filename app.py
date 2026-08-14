@@ -30,7 +30,8 @@ from src.indicators import (
     compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
     compute_pre_open_gap_filter, detect_volume_profile_triggers,
     detect_iceberg_orders_and_liquidity_sweeps, compute_initial_balance_and_day_type,
-    compute_vwap_multi_dispersion_and_half_life, detect_footprint_delta_divergences
+    compute_vwap_multi_dispersion_and_half_life, detect_footprint_delta_divergences,
+    compute_dfa_alpha, compute_vpin_toxicity, compute_volume_synchronized_gamma_tracker
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
@@ -38,8 +39,9 @@ from src.options_engine import (
     calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
     calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
-    generate_svi_smile_curve, construct_delta_neutral_iron_condor
+    generate_svi_smile_curve, construct_delta_neutral_iron_condor, calculate_dynamic_kelly
 )
+from src.execution import OrderManager, slice_institutional_order
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
@@ -322,10 +324,12 @@ vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"
 signal = strategy_engine.evaluate_bar(df, live_iv=iv_input)
 ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input, iv=iv_input, is_0dte_afternoon=is_0dte_mode)
 
-# Latent Kalman & Markov Regime inference
 df_kalman = kalman_engine.filter_series(df["close"])
 regime_state = markov_engine.infer_regimes(df)
 ib_state = compute_initial_balance_and_day_type(df)
+dfa_res = compute_dfa_alpha(df["close"])
+vpin_res = compute_vpin_toxicity(df)
+dyn_kelly = calculate_dynamic_kelly(win_rate=0.72, payoff_ratio=2.43, day_type=ib_state["day_type"])
 sector_pulse = load_sectoral_pulse()
 hfi_res = load_heavyweight_flow_index()
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
@@ -429,7 +433,7 @@ with cockpit_col1:
                 <div style="color: #ff3355; font-weight: 700;">SL: ₹{dir_flow_res['stop_price']:.1f}</div>
             </div>
         </div>
-        <div class="confluence-grid">
+        <div class="confluence-grid" style="grid-template-columns: repeat(3, 1fr); gap: 6px;">
             <div class="confluence-cell">
                 <div class="c-lbl">1. HTF Alignment</div>
                 <div class="c-val" style="color: {'#05df72' if htf_data['htf_aligned_long'] else ('#ff3355' if htf_data['htf_aligned_short'] else '#fbb024')};">
@@ -439,18 +443,32 @@ with cockpit_col1:
             <div class="confluence-cell">
                 <div class="c-lbl">2. Kalman Velocity</div>
                 <div class="c-val" style="color: {'#05df72' if df_kalman['kalman_velocity'].iloc[-1] >= 0 else '#ff3355'};">
-                    V={df_kalman['kalman_velocity'].iloc[-1]:+.2f} pts (Z={df_kalman['kalman_vel_zscore'].iloc[-1]:.1f})
+                    V={df_kalman['kalman_velocity'].iloc[-1]:+.2f} (Z={df_kalman['kalman_vel_zscore'].iloc[-1]:.1f})
                 </div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">3. VWAP Dispersion & Half-Life</div>
+                <div class="c-lbl">3. VWAP Dispersion</div>
                 <div class="c-val" style="color: {'#05df72' if abs(vwap_disp['z_score_vwap']) <= 2.0 else '#ff3355'};">
                     Z={vwap_disp['z_score_vwap']:+.1f} | τ={vwap_disp['half_life_mins']}m
                 </div>
             </div>
             <div class="confluence-cell">
-                <div class="c-lbl">4. Dealer GEX Flip</div>
-                <div class="c-val" style="color: #00d2ff;">{gex_data['gamma_flip_strike']} ({'+Γ' if gex_data['is_positive_gamma'] else '-Γ'})</div>
+                <div class="c-lbl">4. DFA Alpha Memory</div>
+                <div class="c-val" style="color: {'#05df72' if dfa_res['is_trending'] else '#fbb024'};">
+                    α={dfa_res['dfa_alpha']:.3f} ({'Trend' if dfa_res['is_trending'] else 'Chop'})
+                </div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">5. VPIN Flow Toxicity</div>
+                <div class="c-val" style="color: {'#ff3355' if vpin_res['is_toxic'] else '#05df72'};">
+                    VPIN={vpin_res['vpin']:.2f} ({'⚠️ Toxic' if vpin_res['is_toxic'] else '🟢 Clean'})
+                </div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">6. Dynamic Kelly</div>
+                <div class="c-val" style="color: #00d2ff;">
+                    {dyn_kelly['dynamic_risk_pct_str']} ({dyn_kelly['day_type_multiplier']}x Multiplier)
+                </div>
             </div>
         </div>
     </div>
@@ -941,6 +959,27 @@ with tab_sizer:
         st.markdown("#### 🧾 Indian NSE Statutory Friction (TCA Breakdown)")
         st.write(f"• **STT (0.1% on Sell):** ₹{tca['stt']:.2f} | **Brokerage:** ₹{tca['brokerage']:.2f} | **NSE Fees + GST:** ₹{tca['exchange_charges'] + tca['gst']:.2f} | **Slippage Buffer:** ₹{tca['slippage']:.2f}")
         st.write(f"• **Total Round-Trip TCA Friction:** **₹{tca['total_friction']:.2f}**")
+
+        # Smart Order Routing (SOR) Child Slicer & Limit Order State Machine
+        with st.expander("⚡ Smart Order Routing (SOR) Chase & Cancel Simulator & Lot Slicer", expanded=False):
+            sor_col1, sor_col2 = st.columns(2)
+            with sor_col1:
+                st.markdown("**🛡️ State-Machine 'Chase & Cancel' (NSE ₹0.05 Ticks):**")
+                sor_mgr = OrderManager(tick_size=0.05, max_slippage_pts=3.0)
+                sim_res = sor_mgr.simulate_chase_and_cancel_execution(
+                    target_symbol=f"NIFTY {int(round(current_spot/50)*50)} CE",
+                    side="BUY",
+                    initial_best_ask=calc_ep,
+                    simulated_market_drift_ticks=1,
+                    fill_latency_ms=450
+                )
+                st.caption(f"Final State: `{sim_res['final_state']}` | Fill: `₹{sim_res['fill_price']:.2f}` (Slippage: +₹{sim_res['realized_slippage_pts']:.2f})")
+                for log_line in sim_res["state_log"]:
+                    st.code(log_line, language="bash")
+            with sor_col2:
+                st.markdown("**✂️ TWAP/VWAP Institutional Child Order Slicer:**")
+                child_slices = slice_institutional_order(total_lots=calc_lots, lot_size=int(contract_lot_size), slice_count=4, interval_seconds=30, algo="VWAP")
+                st.dataframe(pd.DataFrame(child_slices), hide_index=True, width="stretch")
 
     st.markdown("---")
 

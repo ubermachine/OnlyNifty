@@ -9,4 +9,5 @@ jugaad-data>=0.28
 pyarrow>=16.0.0
 pytest>=8.2.0
 requests>=2.32.0
+optuna>=4.0.0
 

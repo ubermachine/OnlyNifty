@@ -595,22 +595,31 @@ def evaluate_golden_vault_lock(
     current_intraday_pnl: float = 0.0,
     peak_intraday_pnl: float = 0.0,
     profit_trigger_pct: float = 0.015,
-    lock_pct: float = 0.75
+    lock_pct: float = 0.75,
+    realized_volatility: Optional[float] = None,
+    baseline_volatility: float = 0.12
 ) -> Dict[str, Any]:
     """
-    Dynamic Intraday Profit Lock ('The Golden Vault Rule'):
+    Dynamic Volatility-Adjusted Intraday Profit Lock ('The Golden Vault Rule' - Phase 5.1):
     Once intraday Net PnL reaches >= +1.5% of account capital, lock 75% of peak profits
     as an untouchable risk floor for the remainder of the session.
+    If Realized Volatility remains elevated above baseline, allows active moonshot runners
+    to trail while vetoing new risk.
     """
     trigger_threshold_rupees = initial_capital * profit_trigger_pct
     peak_pnl = max(peak_intraday_pnl, current_intraday_pnl)
     is_vault_triggered = peak_pnl >= trigger_threshold_rupees
     
+    allow_runners = False
     if is_vault_triggered:
         locked_profit_floor = round(peak_pnl * lock_pct, 2)
         untouchable_capital_floor = round(initial_capital + locked_profit_floor, 2)
         risk_cushion = round(max(current_intraday_pnl - locked_profit_floor, 0.0), 2)
         is_session_halted = current_intraday_pnl <= locked_profit_floor
+        
+        # Volatility expansion runner condition
+        if realized_volatility is not None and realized_volatility > 1.30 * baseline_volatility:
+            allow_runners = True
         
         if is_session_halted:
             status = "LOCKED_GOLDEN_VAULT"
@@ -620,9 +629,10 @@ def evaluate_golden_vault_lock(
             )
         else:
             status = "VAULT_ACTIVE"
+            runner_str = " | Volatility elevated: Moonshot runners active." if allow_runners else ""
             message = (
                 f"🛡️ Golden Vault Active: Peak PnL ₹{peak_pnl:,.2f} (≥ +{profit_trigger_pct*100:.1f}%). "
-                f"₹{locked_profit_floor:,.2f} locked floor. Remaining risk cushion: ₹{risk_cushion:,.2f}."
+                f"₹{locked_profit_floor:,.2f} locked floor. Remaining risk cushion: ₹{risk_cushion:,.2f}.{runner_str}"
             )
     else:
         locked_profit_floor = 0.0
@@ -636,6 +646,7 @@ def evaluate_golden_vault_lock(
         "status": status,
         "is_vault_triggered": is_vault_triggered,
         "is_session_halted": is_session_halted,
+        "allow_runners": allow_runners,
         "peak_intraday_pnl": round(peak_pnl, 2),
         "current_intraday_pnl": round(current_intraday_pnl, 2),
         "trigger_threshold_rupees": round(trigger_threshold_rupees, 2),
@@ -645,6 +656,55 @@ def evaluate_golden_vault_lock(
         "lock_pct": lock_pct,
         "message": message
     }
+
+
+def calculate_dynamic_kelly(
+    win_rate: float,
+    payoff_ratio: float,
+    day_type: str = "NORMAL_VARIATION_DAY"
+) -> Dict[str, Any]:
+    """
+    Calculates Regime-Scaled Dynamic Kelly Criterion (Phase 5.2).
+    Base Full-Kelly: f* = (p*b - q) / b
+    Quarter-Kelly Base: f* / 4.
+    Scaled by Market Profile Day Type:
+    - TREND_DAY: 1.5x (Aggressive sizing on confirmed unilateral breakouts)
+    - NORMAL_VARIATION_DAY: 1.0x (Standard sizing)
+    - NORMAL_DAY: 0.5x (Conservative inside Initial Balance)
+    - NEUTRAL_DAY: 0.3x (Highly conservative on bilateral chop)
+    """
+    q = 1.0 - win_rate
+    base_kelly = ((win_rate * payoff_ratio) - q) / payoff_ratio if payoff_ratio > 0 else 0.0
+    base_kelly = max(0.0, min(base_kelly, 0.50))
+    
+    regime_multipliers = {
+        "BULLISH_TREND_DAY": 1.5,
+        "BEARISH_TREND_DAY": 1.5,
+        "TREND_DAY": 1.5,
+        "NORMAL_VARIATION_DAY": 1.0,
+        "NORMAL_DAY": 0.5,
+        "NEUTRAL_DAY": 0.3,
+        "ACCUMULATING_INITIAL_BALANCE": 0.5
+    }
+    
+    multiplier = 1.0
+    for k, v in regime_multipliers.items():
+        if k in day_type.upper():
+            multiplier = v
+            break
+    # Scale standard 1% institutional risk budget by Kelly conviction and Market Profile Day Type
+    kelly_conviction = base_kelly / 0.50 if base_kelly > 0 else 0.0
+    dynamic_risk_pct = min(max(0.01 * kelly_conviction * multiplier, 0.002), 0.02)
+    
+    return {
+        "base_full_kelly": round(base_kelly, 4),
+        "base_quarter_kelly": round(base_kelly / 4.0, 4),
+        "day_type_multiplier": multiplier,
+        "dynamic_risk_pct": round(dynamic_risk_pct, 4),
+        "dynamic_risk_pct_str": f"{dynamic_risk_pct * 100:.2f}%",
+        "day_type": day_type
+    }
+
 
 
 def calculate_position_size(

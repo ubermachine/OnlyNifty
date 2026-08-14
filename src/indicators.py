@@ -1197,6 +1197,222 @@ def compute_initial_balance_and_day_type(
     }
 
 
+def compute_dfa_alpha(series_or_returns: pd.Series, min_lag: int = 5, max_lag: int = 60) -> Dict[str, Any]:
+    """
+    Computes the Detrended Fluctuation Analysis (DFA) scaling exponent (Alpha).
+    Isolates true long-term memory while detrending local polynomial trends and U-shaped intraday seasonality.
+    Alpha ~ 0.5 (Random Walk / Efficient Market)
+    Alpha > 0.52 (Persistent / Strong Trend Memory)
+    Alpha < 0.48 (Anti-Persistent / Mean Reversion)
+    """
+    if len(series_or_returns) < min_lag * 3:
+        return {"dfa_alpha": 0.50, "regime": "RANDOM_WALK (Insufficient Data)", "is_trending": False}
+    
+    vals = np.asarray(series_or_returns.values, dtype=float)
+    if np.all(vals > 100.0):
+        returns = np.diff(np.log(np.maximum(vals, 1.0)))
+    else:
+        returns = vals
+        
+    returns = returns[~np.isnan(returns)]
+    if len(returns) < min_lag * 3:
+        return {"dfa_alpha": 0.50, "regime": "RANDOM_WALK (Insufficient Data)", "is_trending": False}
+        
+    y = np.cumsum(returns - np.mean(returns))
+    N = len(y)
+    max_lag_adj = min(max_lag, N // 2)
+    if max_lag_adj <= min_lag:
+        return {"dfa_alpha": 0.50, "regime": "RANDOM_WALK (Insufficient Lags)", "is_trending": False}
+        
+    lags = np.unique(np.linspace(min_lag, max_lag_adj, 8, dtype=int))
+    fluctuations = []
+    valid_lags = []
+    
+    for lag in lags:
+        n_boxes = int(np.floor(N / lag))
+        if n_boxes == 0:
+            continue
+        
+        y_boxes = y[:n_boxes * lag].reshape(n_boxes, lag)
+        x = np.arange(lag)
+        
+        rms = 0.0
+        for box in y_boxes:
+            p = np.polyfit(x, box, 1)
+            trend = np.polyval(p, x)
+            rms += np.mean((box - trend) ** 2)
+            
+        fluct = np.sqrt(rms / n_boxes)
+        if fluct > 1e-12:
+            fluctuations.append(fluct)
+            valid_lags.append(lag)
+            
+    if len(valid_lags) < 3:
+        return {"dfa_alpha": 0.50, "regime": "RANDOM_WALK (Sparse Fits)", "is_trending": False}
+        
+    log_lags = np.log(valid_lags)
+    log_flucts = np.log(fluctuations)
+    alpha, _ = np.polyfit(log_lags, log_flucts, 1)
+    alpha = float(np.clip(alpha, 0.05, 0.95))
+    
+    if alpha >= 0.55:
+        regime = "STRONG_TREND (DFA Alpha Persistent)"
+        is_trending = True
+    elif alpha >= 0.52:
+        regime = "MILD_TREND (DFA Alpha Persistent)"
+        is_trending = True
+    elif alpha <= 0.45:
+        regime = "MEAN_REVERSION (DFA Alpha Anti-Persistent)"
+        is_trending = False
+    else:
+        regime = "RANDOM_WALK (DFA Alpha Noise)"
+        is_trending = False
+        
+    return {
+        "dfa_alpha": round(alpha, 4),
+        "regime": regime,
+        "is_trending": is_trending
+    }
+
+
+def compute_vpin_toxicity(df: pd.DataFrame, bucket_volume: int = 10000) -> Dict[str, Any]:
+    """
+    Computes VPIN (Volume-Synchronized Probability of Informed Trading) using Bulk Volume Classification (BVC).
+    Detects toxic institutional flow without requiring tick-level order books.
+    VPIN > 0.65 -> High Toxic Flow (Institutions aggressively front-running/dumping)
+    """
+    from scipy.stats import norm
+
+    if df.empty or len(df) < 5 or "close" not in df.columns or "volume" not in df.columns:
+        return {
+            "vpin": 0.0,
+            "is_toxic": False,
+            "toxicity_level": "LOW_TOXICITY (Standard Market)",
+            "action_advice": "STANDARD_RISK_SIZING",
+            "bucket_count": 0
+        }
+        
+    df_calc = df.copy()
+    ret = df_calc["close"].pct_change().fillna(0.0)
+    std_ret = ret.rolling(20, min_periods=3).std().fillna(0.001)
+    std_ret = np.maximum(std_ret, 1e-5)
+    
+    # BVC: Standardized return mapped through standard normal CDF
+    buy_ratio = norm.cdf(ret / std_ret)
+    vol = np.asarray(df_calc["volume"].values, dtype=float)
+    buy_vol = vol * buy_ratio
+    sell_vol = vol * (1.0 - buy_ratio)
+    
+    total_vol = float(np.sum(vol))
+    if total_vol <= 0:
+        return {
+            "vpin": 0.0,
+            "is_toxic": False,
+            "toxicity_level": "LOW_TOXICITY (Zero Traded Volume)",
+            "action_advice": "STANDARD_RISK_SIZING",
+            "bucket_count": 0
+        }
+        
+    eff_bucket_vol = max(min(bucket_volume, int(total_vol / 10)), 500)
+    
+    cumulative_vol = 0.0
+    vpin_buckets = []
+    bucket_buy, bucket_sell = 0.0, 0.0
+    
+    for b_buy, b_sell, b_vol in zip(buy_vol, sell_vol, vol):
+        cumulative_vol += b_vol
+        bucket_buy += b_buy
+        bucket_sell += b_sell
+        
+        if cumulative_vol >= eff_bucket_vol:
+            imbalance = abs(bucket_buy - bucket_sell)
+            vpin_buckets.append(imbalance / cumulative_vol)
+            cumulative_vol, bucket_buy, bucket_sell = 0.0, 0.0, 0.0
+            
+    vpin_val = float(np.mean(vpin_buckets)) if vpin_buckets else 0.0
+    vpin_val = min(max(round(vpin_val, 4), 0.0), 1.0)
+    
+    is_toxic = vpin_val >= 0.65
+    if vpin_val >= 0.75:
+        toxicity_level = "EXTREME_TOXICITY (High Informed Flow / Aggressive Dumping)"
+        advice = "WIDEN_SL_1.5X_HALVE_POSITION"
+    elif vpin_val >= 0.65:
+        toxicity_level = "HIGH_TOXICITY (Informed Order Flow Prevalent)"
+        advice = "WIDEN_SL_1.5X_HALVE_POSITION"
+    elif vpin_val >= 0.45:
+        toxicity_level = "MODERATE_FLOW (Standard Two-Sided Liquidity)"
+        advice = "STANDARD_EXECUTION"
+    else:
+        toxicity_level = "LOW_TOXICITY (Retail Balancing / Clean Liquidity)"
+        advice = "STANDARD_EXECUTION"
+        
+    return {
+        "vpin": vpin_val,
+        "is_toxic": is_toxic,
+        "toxicity_level": toxicity_level,
+        "action_advice": advice,
+        "bucket_count": len(vpin_buckets)
+    }
+
+
+def compute_volume_synchronized_gamma_tracker(
+    strikes: List[int],
+    call_volumes: List[float],
+    put_volumes: List[float],
+    call_gammas: List[float],
+    put_gammas: List[float],
+    current_spot: float,
+    multiplier: float = 65.0
+) -> Dict[str, Any]:
+    """
+    Computes Volume-Synchronized Gamma Impact (Trade Gamma Flow):
+    Gamma Impact = Volume * Option Gamma * Spot^2 * 0.01 * Multiplier
+    Accumulates intraday call vs put traded gamma to pinpoint real-time Gamma Pins and Magnet levels.
+    """
+    if not strikes:
+        return {"gamma_magnet_strike": int(round(current_spot / 50.0) * 50), "net_traded_gamma": 0.0, "pin_conviction": "NEUTRAL", "strike_impacts": []}
+        
+    strike_impacts = []
+    total_call_impact = 0.0
+    total_put_impact = 0.0
+    
+    for k, cv, pv, cg, pg in zip(strikes, call_volumes, put_volumes, call_gammas, put_gammas):
+        c_impact = cv * cg * multiplier * (current_spot ** 2) * 0.01
+        p_impact = pv * pg * multiplier * (current_spot ** 2) * 0.01
+        net_impact = c_impact - p_impact
+        total_call_impact += c_impact
+        total_put_impact += p_impact
+        
+        strike_impacts.append({
+            "strike": k,
+            "call_impact": round(c_impact, 2),
+            "put_impact": round(p_impact, 2),
+            "net_impact": round(net_impact, 2),
+            "total_gamma_volume": round(c_impact + p_impact, 2)
+        })
+        
+    max_impact_item = max(strike_impacts, key=lambda x: x["total_gamma_volume"]) if strike_impacts else {"strike": int(round(current_spot / 50.0) * 50)}
+    magnet_strike = max_impact_item["strike"]
+    net_total = total_call_impact - total_put_impact
+    
+    if total_call_impact > 1.4 * total_put_impact:
+        conviction = "CALL_GAMMA_MAGNET (Upward Resistance / Pin)"
+    elif total_put_impact > 1.4 * total_call_impact:
+        conviction = "PUT_GAMMA_MAGNET (Downward Support / Pin)"
+    else:
+        conviction = "BALANCED_GAMMA_PIN"
+        
+    return {
+        "gamma_magnet_strike": magnet_strike,
+        "total_call_gamma_impact": round(total_call_impact, 2),
+        "total_put_gamma_impact": round(total_put_impact, 2),
+        "net_traded_gamma": round(net_total, 2),
+        "pin_conviction": conviction,
+        "strike_impacts": strike_impacts
+    }
+
+
+
 
 
 

@@ -11,9 +11,12 @@ env/
 
 # Cache directories
 .cache/
+.cache_test/
 .pytest_cache/
 .coverage
+data/test_*.json
 
 # OS generated
 .DS_Store
 Thumbs.db
+
