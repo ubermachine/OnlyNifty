@@ -85,35 +85,36 @@ class DataEngine:
             if not df.empty and len(df) >= 10:
                 cleaned = self.clean_ohlcv(df)
                 
-                # Fetch Real-World Institutional Traded Volume from Top 10 Nifty Constituents (55% Index Weight)
+                # Primary Fast Index-Basket Traded Volume from Nifty 50 BeES ETF (NIFTYBEES.NS)
                 try:
-                    from src.config import TOP_10_NIFTY_CONSTITUENTS
-                    multi_df = yf.download(TOP_10_NIFTY_CONSTITUENTS, period=period, interval=interval, group_by="ticker", progress=False)
-                    if not multi_df.empty:
-                        vol_collector = []
-                        is_multi = isinstance(multi_df.columns, pd.MultiIndex)
-                        for sym in TOP_10_NIFTY_CONSTITUENTS:
-                            if is_multi and sym in multi_df.columns.levels[0]:
-                                s_vol = multi_df[sym]["Volume"]
-                                if isinstance(s_vol.index, pd.DatetimeIndex) and s_vol.index.tz is None:
-                                    s_vol.index = s_vol.index.tz_localize("UTC").tz_convert(IST)
-                                elif isinstance(s_vol.index, pd.DatetimeIndex):
-                                    s_vol.index = s_vol.index.tz_convert(IST)
-                                vol_collector.append(s_vol)
-                        if vol_collector:
-                            agg_vol = pd.concat(vol_collector, axis=1).sum(axis=1)
-                            aligned_vol = agg_vol.reindex(cleaned.index).fillna(0)
+                    bees_ticker = yf.Ticker("NIFTYBEES.NS")
+                    bees_df = bees_ticker.history(period=period, interval=interval)
+                    if not bees_df.empty and len(bees_df) >= 10:
+                        bees_clean = self.clean_ohlcv(bees_df)
+                        if "volume" in bees_clean.columns:
+                            aligned_vol = bees_clean["volume"].reindex(cleaned.index).fillna(0)
                             pos_mask = aligned_vol > 0
                             if pos_mask.any():
                                 cleaned.loc[pos_mask, "volume"] = aligned_vol[pos_mask]
                 except Exception:
-                    # Fallback to NIFTYBEES.NS ETF volume
+                    # Fallback to Top 10 Heavyweights
                     try:
-                        bees_df = yf.download("NIFTYBEES.NS", period=period, interval=interval, progress=False)
-                        if not bees_df.empty:
-                            bees_clean = self.clean_ohlcv(bees_df)
-                            if "volume" in bees_clean.columns:
-                                aligned_vol = bees_clean["volume"].reindex(cleaned.index).fillna(0)
+                        from src.config import TOP_10_NIFTY_CONSTITUENTS
+                        multi_df = yf.download(TOP_10_NIFTY_CONSTITUENTS, period=period, interval=interval, group_by="ticker", progress=False)
+                        if not multi_df.empty:
+                            vol_collector = []
+                            is_multi = isinstance(multi_df.columns, pd.MultiIndex)
+                            for sym in TOP_10_NIFTY_CONSTITUENTS:
+                                if is_multi and sym in multi_df.columns.levels[0]:
+                                    s_vol = multi_df[sym]["Volume"]
+                                    if isinstance(s_vol.index, pd.DatetimeIndex) and s_vol.index.tz is None:
+                                        s_vol.index = s_vol.index.tz_localize("UTC").tz_convert(IST)
+                                    elif isinstance(s_vol.index, pd.DatetimeIndex):
+                                        s_vol.index = s_vol.index.tz_convert(IST)
+                                    vol_collector.append(s_vol)
+                            if vol_collector:
+                                agg_vol = pd.concat(vol_collector, axis=1).sum(axis=1)
+                                aligned_vol = agg_vol.reindex(cleaned.index).fillna(0)
                                 pos_mask = aligned_vol > 0
                                 if pos_mask.any():
                                     cleaned.loc[pos_mask, "volume"] = aligned_vol[pos_mask]

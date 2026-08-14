@@ -309,10 +309,18 @@ def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
         vol = (df["high"] - df["low"]).clip(lower=1.0)
         
     c_range = (df["high"] - df["low"]).replace(0, 1.0)
-    # Composite Delta Weight: 60% Body Displacement + 40% Close Location Relative to Midpoint
+    # 3-Tier Composite Microstructure Delta:
+    # 1. 50% Body Directional Displacement
+    # 2. 30% Close Location relative to mid-point
+    # 3. 20% Wick Absorption (Buyer Lower-Shadow Defense vs Seller Upper-Shadow Distribution)
     body_weight = (df["close"] - df["open"]) / c_range
     close_loc_weight = (2.0 * df["close"] - df["high"] - df["low"]) / c_range
-    composite_weight = (0.60 * body_weight) + (0.40 * close_loc_weight)
+    lower_wick = (df[["open", "close"]].min(axis=1) - df["low"]) / c_range
+    upper_wick = (df["high"] - df[["open", "close"]].max(axis=1)) / c_range
+    wick_bias = (lower_wick - upper_wick)
+
+    composite_weight = (0.50 * body_weight) + (0.30 * close_loc_weight) + (0.20 * wick_bias)
+    composite_weight = composite_weight.clip(-1.0, 1.0)
     
     bar_delta = vol * composite_weight
     cvd = bar_delta.cumsum()
