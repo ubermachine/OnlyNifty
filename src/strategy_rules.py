@@ -408,7 +408,8 @@ class StrategyEngine:
 
         # 9. LONG Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         long_avwap_cond = close > (current_vwap - 0.35 * (upper_2sd - current_vwap) / 2.0)
-        if close > ema200 and long_avwap_cond and swing_range >= 35.0 and ofi_info["buyer_defense"]:
+        is_trending_flow = hurst_info.get("hurst", 0.50) >= HURST_TRENDING_MIN or hurst_info.get("is_trending", True)
+        if close > ema200 and long_avwap_cond and swing_range >= 35.0 and ofi_info["buyer_defense"] and is_trending_flow:
             if not htf_aligned_long:
                 return Signal(
                     signal_type=SignalType.WAIT,
@@ -439,7 +440,7 @@ class StrategyEngine:
                     target_2=t2,
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
-                    reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | HTF Aligned.",
+                    reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | Persistent Trend (H={hurst_info.get('hurst', 0.52):.2f}) | HTF Aligned.",
                     htf_aligned=True,
                     fib_retracement=0.55,
                     details={
@@ -451,7 +452,7 @@ class StrategyEngine:
 
         # 10. SHORT Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         short_avwap_cond = close < (current_vwap + 0.35 * (current_vwap - lower_2sd) / 2.0)
-        if close < ema200 and short_avwap_cond and swing_range >= 35.0 and ofi_info["seller_defense"]:
+        if close < ema200 and short_avwap_cond and swing_range >= 35.0 and ofi_info["seller_defense"] and is_trending_flow:
             if not htf_aligned_short:
                 return Signal(
                     signal_type=SignalType.WAIT,
