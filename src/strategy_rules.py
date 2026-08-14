@@ -218,6 +218,7 @@ class StrategyEngine:
         # ATR 14 proxy
         atr_14 = float((sub_df["high"].tail(14) - sub_df["low"].tail(14)).mean())
         atr_14 = max(atr_14, 25.0)
+        prev_close_val = float(sub_df.iloc[-2]["close"]) if len(sub_df) >= 2 else close
 
         # 3. Multi-Timeframe Alignment Engine (1H + 15m + 5m)
         effective_1h = df_1h if df_1h is not None else df_hourly
@@ -248,7 +249,7 @@ class StrategyEngine:
         # 4.1 Liquidity Sweep Trap Strategy (SSL / BSL Purges)
         if microstructure["liquidity_sweep_detected"] and microstructure["sweep_event"]:
             sw = microstructure["sweep_event"]
-            if sw["side"] == "LONG" and htf_aligned_long:
+            if sw["side"] == "LONG" and (close > bar_open or close > prev_close_val or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
                 return Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
@@ -257,12 +258,12 @@ class StrategyEngine:
                     target_2=round(close + 2.5 * atr_14, 2),
                     target_3_moonshot=round(close + 4.0 * atr_14, 2),
                     pyramid_trigger=round(sw["swept_swing_low"] + 15.0, 2),
-                    reason=f"Bullish SSL Liquidity Sweep Trap: {sw['thesis']} | HTF Aligned.",
+                    reason=f"Bullish SSL Liquidity Sweep Trap: {sw['thesis']} | Institutional Absorption Reversal.",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
                 )
-            elif sw["side"] == "SHORT" and htf_aligned_short:
+            elif sw["side"] == "SHORT" and (close < bar_open or close < prev_close_val or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
                 return Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
@@ -271,28 +272,16 @@ class StrategyEngine:
                     target_2=round(close - 2.5 * atr_14, 2),
                     target_3_moonshot=round(close - 4.0 * atr_14, 2),
                     pyramid_trigger=round(sw["swept_swing_high"] - 15.0, 2),
-                    reason=f"Bearish BSL Liquidity Sweep Trap: {sw['thesis']} | HTF Aligned.",
+                    reason=f"Bearish BSL Liquidity Sweep Trap: {sw['thesis']} | Institutional Distribution Reversal.",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
                 )
 
-
-        # 5. Auction Market Theory (AMT) Value Area Trigger Check (HTF Gated)
+        # 5. Auction Market Theory (AMT) Value Area Trigger Check
         amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)
         if amt_trigger["trigger"] in ["VAH_REJECTION", "VAL_REJECTION"] and amt_trigger["confidence"] >= 0.85:
-            if amt_trigger["side"] == "LONG" and close > ema55:
-                if not htf_aligned_long:
-                    return Signal(
-                        signal_type=SignalType.WAIT,
-                        entry_price=close,
-                        sl_price=0.0,
-                        target_1=0.0,
-                        target_2=0.0,
-                        reason=f"HTF Confluence Veto: AMT Long rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bullish.",
-                        htf_aligned=False,
-                        details={"htf_regime": htf_regime, "amt": amt_trigger, "order_flow": order_flow}
-                    )
+            if amt_trigger["side"] == "LONG" and (close >= vp_info.get("val", 0.0) or close > ema55):
                 return Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
@@ -301,23 +290,12 @@ class StrategyEngine:
                     target_2=amt_trigger["target_2"],
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) + 5.0, 2),
-                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | HTF Aligned ({htf_regime['confluence_regime']}).",
+                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | Value Area Defense ({htf_regime['confluence_regime']}).",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 )
-            elif amt_trigger["side"] == "SHORT" and close < ema55:
-                if not htf_aligned_short:
-                    return Signal(
-                        signal_type=SignalType.WAIT,
-                        entry_price=close,
-                        sl_price=0.0,
-                        target_1=0.0,
-                        target_2=0.0,
-                        reason=f"HTF Confluence Veto: AMT Short rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bearish.",
-                        htf_aligned=False,
-                        details={"htf_regime": htf_regime, "amt": amt_trigger, "order_flow": order_flow}
-                    )
+            elif amt_trigger["side"] == "SHORT" and (close <= vp_info.get("vah", 999999.0) or close < ema55):
                 return Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
@@ -326,16 +304,16 @@ class StrategyEngine:
                     target_2=amt_trigger["target_2"],
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) - 5.0, 2),
-                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | HTF Aligned ({htf_regime['confluence_regime']}).",
+                    reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | Value Area Defense ({htf_regime['confluence_regime']}).",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 )
 
-        # 6. Stacked Order Flow Absorption Setup Check
+        # 6. Stacked Order Flow Absorption & Footprint Imbalance Setups
         if order_flow["absorption_event"] is not None:
             abs_event = order_flow["absorption_event"]
-            if abs_event["type"] == "BUYER_ABSORPTION" and htf_aligned_long and close > ema55:
+            if abs_event["type"] == "BUYER_ABSORPTION" and (close > bar_open or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
                 return Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
@@ -344,12 +322,12 @@ class StrategyEngine:
                     target_2=round(close + 2.5 * atr_14, 2),
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(close + 15.0, 2),
-                    reason=f"Order Flow Buyer Absorption: {abs_event['reason']} | HTF Aligned.",
+                    reason=f"Order Flow Buyer Absorption: {abs_event['reason']} | Key Level Defense.",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
                 )
-            elif abs_event["type"] == "SELLER_ABSORPTION" and htf_aligned_short and close < ema55:
+            elif abs_event["type"] == "SELLER_ABSORPTION" and (close < bar_open or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
                 return Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
@@ -358,11 +336,41 @@ class StrategyEngine:
                     target_2=round(close - 2.5 * atr_14, 2),
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(close - 15.0, 2),
-                    reason=f"Order Flow Seller Absorption: {abs_event['reason']} | HTF Aligned.",
+                    reason=f"Order Flow Seller Absorption: {abs_event['reason']} | Key Level Defense.",
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
                 )
+
+        # 6.1 Stacked Aggressive Delta Imbalance (3+ Bars Cumulative Delta Momentum)
+        if order_flow.get("has_stacked_buy") and (close > ema21 or ofi_info["buyer_defense"]):
+            return Signal(
+                signal_type=SignalType.LONG_ORDER_FLOW,
+                entry_price=close,
+                sl_price=round(order_flow["stacked_support_zone"][0] - 5.0, 2) if order_flow["stacked_support_zone"] else round(close - 1.0 * atr_14, 2),
+                target_1=round(close + 1.2 * atr_14, 2),
+                target_2=round(close + 2.5 * atr_14, 2),
+                target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
+                pyramid_trigger=round(close + 15.0, 2),
+                reason=f"Stacked Buying Imbalance: {order_flow['stacked_buy_count']} consecutive aggressive buy bars | Shelf Support @ {order_flow.get('stacked_support_zone')}.",
+                htf_aligned=True,
+                fib_retracement=0.50,
+                details={"order_flow": order_flow, "htf_regime": htf_regime}
+            )
+        elif order_flow.get("has_stacked_sell") and (close < ema21 or ofi_info["seller_defense"]):
+            return Signal(
+                signal_type=SignalType.SHORT_ORDER_FLOW,
+                entry_price=close,
+                sl_price=round(order_flow["stacked_resistance_zone"][1] + 5.0, 2) if order_flow["stacked_resistance_zone"] else round(close + 1.0 * atr_14, 2),
+                target_1=round(close - 1.2 * atr_14, 2),
+                target_2=round(close - 2.5 * atr_14, 2),
+                target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
+                pyramid_trigger=round(close - 15.0, 2),
+                reason=f"Stacked Selling Imbalance: {order_flow['stacked_sell_count']} consecutive aggressive sell bars | Shelf Resistance @ {order_flow.get('stacked_resistance_zone')}.",
+                htf_aligned=True,
+                fib_retracement=0.50,
+                details={"order_flow": order_flow, "htf_regime": htf_regime}
+            )
 
         # 7. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
         dist_to_ema21 = abs(close - ema21) / close
