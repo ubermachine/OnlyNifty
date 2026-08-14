@@ -255,12 +255,13 @@ delta_div = detect_footprint_delta_divergences(df)
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v3.7</span>
+        <span class="badge-pro">PRO v4.0 ULTIMATE</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #05df72;">● FEED ACTIVE (09:15-15:30 IST)</div>
 </div>
 """, unsafe_allow_html=True)
+
 
 # Main Cockpit Split Grid
 cockpit_col1, cockpit_col2 = st.columns([1.35, 1.0])
@@ -385,10 +386,11 @@ with cockpit_col2:
 tab_chart, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tabs([
     "📈 Interactive Candlestick Chart",
     "🛡️ 1% Risk & Quarter-Kelly Sizer",
-    "🏛️ Institutional Participant OI & Option Chain",
+    "🏛️ Institutional Breadth & Option Chain",
     "📊 Bar-by-Bar Replay & Backtest Simulator",
-    "📖 JustNifty v3.0 Master Rulebook"
+    "🧠 Institutional Desk Wisdom & Master Playbook (v4.0)"
 ])
+
 
 # ----- TAB 1: INTERACTIVE CHART -----
 with tab_chart:
@@ -1006,97 +1008,92 @@ with tab_backtest:
 
 # ----- TAB 5: MASTER RULEBOOK & SETUP SUMMARIES -----
 with tab_cheatsheet:
-    st.subheader("📖 JustNifty v3.1 Institutional Setup Summaries & Quantitative Rulebook")
-    st.caption("Complete institutional playbooks, entry triggers, stop-loss formulas, 3-tier profit ladders, and execution protocols in summary form.")
+    st.subheader("🧠 Institutional Desk Scrutiny, Multi-Agent Consensus & Master Alpha Playbook (v4.0)")
+    st.caption("Comprehensive peer-reviewed scrutiny from Quantitative Research, Options Structuring, Risk Management (CRO), and Market Microstructure desks.")
     
-    st.markdown("### 🎯 Institutional Buy / Sell Setup Summaries (Playbook Matrix)")
-    pb_c1, pb_c2, pb_c3 = st.columns(3)
-    
-    with pb_c1:
+    # 1. Four Desks Consensus Accordion Cards
+    d1, d2 = st.columns(2)
+    with d1:
         st.markdown("""
-        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="background-color: rgba(5,223,114,0.1); color: #05df72; border: 1px solid rgba(5,223,114,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 1</span>
-                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #05df72; font-weight: 600;">BULLISH CONFLUENCE</span>
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="color: #00d2ff; font-weight: 700; font-size: 13px;">🔬 Lead Quantitative Desk Scrutiny</span>
+                <span style="background-color: rgba(0,210,255,0.1); color: #00d2ff; font-size: 11px; padding: 2px 6px; border-radius: 4px;">VERIFIED</span>
             </div>
-            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">🟢 Golden Pocket Long (Buy CE)</h4>
             <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
-                <p style="margin-bottom: 6px;"><strong>1. Macro Regime:</strong> 5m Spot > 200 EMA + 200 EMA slope positive (<code>dEMA/dt &gt; 0</code>).</p>
-                <p style="margin-bottom: 6px;"><strong>2. Value Anchor:</strong> Price holds above 09:15 Session AVWAP (<code>0.15σ ≤ Z_AVWAP ≤ 1.10σ</code>).</p>
-                <p style="margin-bottom: 6px;"><strong>3. Golden Pocket:</strong> Pullback into <strong>50.0% to 61.8% Fibonacci zone</strong>.</p>
-                <p style="margin-bottom: 6px;"><strong>4. Entry Trigger:</strong> Bullish candle close + positive OFI Z-Score defense.</p>
-                <p style="margin-bottom: 6px;"><strong>5. Stop-Loss:</strong> Spot 78.6% Fib retracement - 5.0 pts (Delta-Gamma option SL).</p>
-            </div>
-            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
-                <div style="color: #05df72;">• T1 (35%): +1.2x ATR (Sell OTM CE for Free Spread)</div>
-                <div style="color: #00d2ff;">• T2 (35%): +2.5x ATR (Structural Extension)</div>
-                <div style="color: #a855f7;">• T3 (30%): Moonshot Runner (Trail on 5m 21 EMA)</div>
+                • <strong>Kalman State Velocity (v_t):</strong> Latent momentum estimator eliminates lagging MA whipsaws.<br>
+                • <strong>OU Mean-Reversion (τ_1/2):</strong> Half-life ≤ 8 bars at |Z_vwap| ≥ 2.5 flags high-expectancy fade zones.<br>
+                • <strong>3-State Markov Volatility:</strong> Automatically scales Kelly fraction (1.0x in Trend vs 0.50x in Chop).
             </div>
         </div>
         """, unsafe_allow_html=True)
         
-    with pb_c2:
         st.markdown("""
-        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="background-color: rgba(255,51,85,0.1); color: #ff3355; border: 1px solid rgba(255,51,85,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 2</span>
-                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #ff3355; font-weight: 600;">BEARISH CONFLUENCE</span>
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="color: #05df72; font-weight: 700; font-size: 13px;">🎯 Prop Options Structuring Scrutiny</span>
+                <span style="background-color: rgba(5,223,114,0.1); color: #05df72; font-size: 11px; padding: 2px 6px; border-radius: 4px;">CONVEXITY MAX</span>
             </div>
-            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">🔴 Golden Pocket Short (Buy PE)</h4>
             <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
-                <p style="margin-bottom: 6px;"><strong>1. Macro Regime:</strong> 5m Spot < 200 EMA + 200 EMA slope negative (<code>dEMA/dt &lt; 0</code>).</p>
-                <p style="margin-bottom: 6px;"><strong>2. Value Anchor:</strong> Price holds below 09:15 Session AVWAP (<code>-1.10σ ≤ Z_AVWAP ≤ -0.15σ</code>).</p>
-                <p style="margin-bottom: 6px;"><strong>3. Golden Pocket:</strong> Rally into <strong>50.0% to 61.8% Fibonacci zone</strong>.</p>
-                <p style="margin-bottom: 6px;"><strong>4. Entry Trigger:</strong> Bearish candle close + negative OFI Z-Score defense.</p>
-                <p style="margin-bottom: 6px;"><strong>5. Stop-Loss:</strong> Spot 78.6% Fib retracement + 5.0 pts (Delta-Gamma option SL).</p>
-            </div>
-            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
-                <div style="color: #05df72;">• T1 (35%): -1.2x ATR (Sell OTM PE for Free Spread)</div>
-                <div style="color: #00d2ff;">• T2 (35%): -2.5x ATR (Structural Extension)</div>
-                <div style="color: #a855f7;">• T3 (30%): Moonshot Runner (Trail on 5m 21 EMA)</div>
+                • <strong>Free Vertical Spread at T1:</strong> Selling OTM K2 strike at +1.2x ATR drops Net Theta to ~0 for free moonshots.<br>
+                • <strong>SVI Smile Calibration:</strong> Models NSE structural +250 bps Put Skew for realistic pricing.<br>
+                • <strong>Delta-Neutral Iron Condor:</strong> Range-bound days harvest positive daily theta decay with >75% PoP.
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    with pb_c3:
+    with d2:
         st.markdown("""
-        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 16px; height: 100%;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="background-color: rgba(168,85,247,0.1); color: #a855f7; border: 1px solid rgba(168,85,247,0.3); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">PLAYBOOK 3</span>
-                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #a855f7; font-weight: 600;">MOC SQUEEZE</span>
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="color: #ff3355; font-weight: 700; font-size: 13px;">🛡️ Chief Risk Officer (CRO) Scrutiny</span>
+                <span style="background-color: rgba(255,51,85,0.1); color: #ff3355; font-size: 11px; padding: 2px 6px; border-radius: 4px;">RUIN RESISTANT</span>
             </div>
-            <h4 style="margin: 0 0 10px 0; color: #f1f5f9;">⚡ 3:00 PM Breakout</h4>
             <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
-                <p style="margin-bottom: 6px;"><strong>1. Reference Range:</strong> Note exact High & Low of the 15:00-15:05 IST candle.</p>
-                <p style="margin-bottom: 6px;"><strong>2. Breakout Trigger:</strong> Enter on 15:05 close beyond 15:00 candle extreme.</p>
-                <p style="margin-bottom: 6px;"><strong>3. 0DTE Strike Shift:</strong> Select <strong>Deep ITM (Δ ≥ 0.75)</strong> to eliminate theta decay.</p>
-                <p style="margin-bottom: 6px;"><strong>4. Stop-Loss:</strong> Invalidation set at opposite extreme of 15:00 candle.</p>
-                <p style="margin-bottom: 6px;"><strong>5. Hard Execution Close:</strong> <strong>15:15 IST Mandatory Square-Off</strong>.</p>
+                • <strong>1% Quarter-Kelly Sizer:</strong> Maximum 1.0% capital risk prevents ruin across 10-loss streaks.<br>
+                • <strong>Golden Vault Rule:</strong> At +1.5% daily PnL, 75% of profits are locked as an untouchable floor.<br>
+                • <strong>Dynamic Kelly Recovery:</strong> Requires 2 verified wins post-trough before re-escalating size.
             </div>
-            <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 8px; margin-top: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
-                <div style="color: #05df72;">• T1 (50%): +40 to +50 points gamma expansion</div>
-                <div style="color: #00d2ff;">• T2 (50%): +75 to +100 points MOC squeeze</div>
-                <div style="color: #ff3355;">• Hard Stop: 15:15 IST terminal clock liquidation</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        <div style="background-color: #0e1422; border: 1px solid #1c273c; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="color: #fbb024; font-weight: 700; font-size: 13px;">🌊 Market Microstructure & Order Flow</span>
+                <span style="background-color: rgba(251,176,36,0.1); color: #fbb024; font-size: 11px; padding: 2px 6px; border-radius: 4px;">TRAP PROOF</span>
+            </div>
+            <div style="font-size: 12px; color: #8e9fb5; line-height: 1.45;">
+                • <strong>Initial Balance (IB 09:15-10:15):</strong> Distinguishes Trend Days (1.5x IB) from Neutral Chops.<br>
+                • <strong>Heavyweight Flow Index (HFI 41.2%):</strong> Opposing HDFC vs Reliance signals high chop danger.<br>
+                • <strong>Liquidity Sweep Traps (SSL/BSL):</strong> Fades retail false breakouts when institutions hunt stops.
             </div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown(r"""
-    ### 🏛️ The 4 Adaptive Stochastic Pillars (Mathematical Formulations)
-    1. **Anis-Lloyd Bias-Corrected Hurst Exponent ($H$):**
-       $$H > 0.52 \implies \text{Trending State (Pillars Active)}; \quad H < 0.45 \implies \text{Mean-Reverting}; \quad H \in [0.45, 0.52] \implies \text{Noise Filter Kill-Switch}$$
-    2. **Volatility-Adaptive Keltner Channels (VAKC):**
-       $$\text{VAKC}_{\text{Upper/Lower}} = \text{EMA}_{200} \pm 2.25 \times \text{ATR}_{14} \times \sqrt{\frac{\text{IV}}{0.12}}$$
-    3. **Session AVWAP 2nd-Moment Dispersion Corridor:**
-       $$\text{AVWAP}_t = \frac{\sum P_i V_i}{\sum V_i}, \quad \sigma_{\text{AVWAP}} = \sqrt{\frac{\sum V_i (P_i - \text{AVWAP})^2}{\sum V_i}}, \quad \text{Gate: } 0.15\sigma \le |Z| \le 1.10\sigma$$
-    4. **Composite Wick-Adjusted Bar Delta & 20-bar OFI Z-Score:**
-       $$\Delta_{\text{Bar}} = V \times \left[\left(\frac{C - L}{H - L}\right) - \left(\frac{H - C}{H - L}\right)\right], \quad Z_{\text{OFI}} = \frac{\text{OFI}_t - \mu_{\text{OFI}}}{\sigma_{\text{OFI}}}$$
 
-    ### 🛡️ Risk Management & Capital Defense Architecture
-    - **1% Quarter-Kelly Position Sizer:** $f^* = \frac{p \cdot b - q}{b}, \quad \text{Lots} = \lfloor \frac{1}{4} f^* \times \frac{\text{Capital}}{\text{Risk Per Lot}} \rfloor \times (1 - \frac{\text{DD}}{\text{Max MDD}})$.
-    - **Intraday 2-Strike Rule:** Trading halts automatically for the session upon recording 2 consecutive losses.
-    - **Daily Loss Limit (DLL):** Maximum daily drawdown strictly capped at $1.5\%$ of account equity.
-    - **Full Indian Statutory TCA:** STT ($0.1\%$ on sell), Brokerage (₹20/order), NSE Charges ($0.03503\%$), GST ($18\%$), and empirical slippage ($0.75$ pts) deducted on every transaction.
-    """)
+    # 2. Top 12 Institutional Prop Desk Golden Rules
+    st.markdown("### 🏆 Top 12 Golden Rules of Institutional Nifty 50 Trading")
+    
+    r_c1, r_c2 = st.columns(2)
+    with r_c1:
+        st.markdown("""
+        1. **Never Fight the 1H/15m Trend:** 5m buy triggers are void if Higher-TF EMA200 is sloping down.
+        2. **Enter Only in the Golden Pocket (50.0%-61.8% Fib):** Never chase extended breakouts into +1.5% envelopes.
+        3. **Respect Session AVWAP ±2σ:** AVWAP is the volume-weighted institutional cost basis for the day.
+        4. **Lock Free Vertical Spreads at Target 1 (+1.2x ATR):** Eliminate theta decay to let runners ride stress-free.
+        5. **Strict 1% Quarter-Kelly Risk Sizing:** Size position based on distance to SL, never exceed 1% account risk.
+        6. **The 2-Strike Daily Loss Circuit Breaker:** 2 consecutive intraday losses = Shut terminal immediately.
+        """)
+    with r_c2:
+        st.markdown("""
+        7. **Activate Golden Vault at +1.5% Daily PnL:** Lock 75% of profits as an untouchable session floor.
+        8. **Halt on Heavyweight Divergence:** If HDFC Bank and Reliance move in opposite directions, expect chop.
+        9. **0DTE Expiry Rules (Thursdays post 13:00 IST):** Switch to Deep ITM (Δ ≥ 0.70) or square off by 15:15 IST.
+        10. **Trade Initial Balance Day Types:** Hold for T3 on Trend Days; scalp at T1 on Neutral / Normal Days.
+        11. **Exploit Liquidity Sweeps:** When price purges prior swing high/low with ≥40% wick, enter the institutional trap.
+        12. **Account for Indian Statutory Friction (TCA):** Over-trading destroys edge; take only 2-3 grade-A setups daily.
+        """)
+
 

@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🎯 OnlyNifty (JustNifty v3.0)
+# 🎯 OnlyNifty (PRO v4.0 Ultimate Institutional Edition)
 ### *Tier-1 Institutional Quantitative Trading Engine & Low-Noise Signal Terminal for Nifty 50 Options*
 
 [![Build Status](https://img.shields.io/badge/build-passing-05df72.svg?style=for-the-badge&logo=github)](https://github.com/ubermachine/OnlyNifty)
-[![Tests](https://img.shields.io/badge/unit%20tests-25%2F25%20passing%20(100%25)-00d2ff.svg?style=for-the-badge)](https://github.com/ubermachine/OnlyNifty)
+[![Tests](https://img.shields.io/badge/unit%20tests-71%2F71%20passing%20(100%25)-00d2ff.svg?style=for-the-badge)](https://github.com/ubermachine/OnlyNifty)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-blue.svg?style=for-the-badge&logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.37+-FF4B4B.svg?style=for-the-badge&logo=streamlit)](https://streamlit.io)
 [![Market](https://img.shields.io/badge/market-NSE%20India%20(NIFTY%2050)-orange.svg?style=for-the-badge)](https://www.nseindia.com)
@@ -12,7 +12,7 @@
 
 <p align="center">
   <b>A production-grade, mathematically rigorous algorithmic trading system and ultra low-noise terminal designed specifically for Nifty 50 Index Options (Weekly Expiries & 0DTE).</b><br>
-  Combines stochastic regime classification (Hurst Exponent), Volatility-Adaptive Keltner Channels (VAKC), Auction Market Theory (AVWAP + Volume Profile), second-order Black-Scholes Greeks (Vanna/Charm), Indian statutory Transaction Cost Analysis (TCA), and fat-tail Quarter-Kelly position sizing.
+  Combines stochastic regime classification (Hurst Exponent + 3-State Markov), Kalman Filter state-space velocity, Ornstein-Uhlenbeck (OU) half-life, Volatility-Adaptive Keltner Channels (VAKC), SVI Volatility Smile, Auction Market Theory (Market Profile IB + AVWAP + Volume Profile), second-order Black-Scholes Greeks (Vanna/Charm/Volga), Indian statutory Transaction Cost Analysis (TCA), and fat-tail Quarter-Kelly position sizing with Golden Vault profit defense.
 </p>
 
 [🖥️ Launch Terminal](#-quick-start) • [📐 Mathematical Formulations](#-the-4-adaptive-stochastic-pillars) • [⚡ Greeks Engine](#-derivatives-microstructure--second-order-greeks) • [🛡️ Risk & TCA Model](#️-capital-risk-sizing--statutory-tca-model) • [📊 Backtest Benchmark](#-backtest-performance-benchmark)
