@@ -59,17 +59,33 @@ class Signal:
     def stop_loss(self) -> float:
         return self.sl_price
 
+    @stop_loss.setter
+    def stop_loss(self, value: float):
+        self.sl_price = float(value)
+
     @property
     def target1(self) -> float:
         return self.target_1
+
+    @target1.setter
+    def target1(self, value: float):
+        self.target_1 = float(value)
 
     @property
     def target2(self) -> float:
         return self.target_2
 
+    @target2.setter
+    def target2(self, value: float):
+        self.target_2 = float(value)
+
     @property
     def target3(self) -> float:
         return self.target_3_moonshot
+
+    @target3.setter
+    def target3(self, value: float):
+        self.target_3_moonshot = float(value)
 
 class StrategyEngine:
     """Vectorized and streaming bar-by-bar JustNifty v3.5 institutional strategy rules evaluator."""

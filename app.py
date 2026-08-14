@@ -589,27 +589,33 @@ with tab_chart:
             row=1, col=1
         )
 
-    # Trade Level Overlays (Entry, Stop Loss, T1, T2)
+    # Trade Level Overlays (Entry, Stop Loss, T1, T2, T3)
     if show_levels and signal.signal_type != SignalType.WAIT:
-        if signal.entry_price:
-            fig.add_hline(y=signal.entry_price, line_dash="solid", line_color="#00d2ff", line_width=1.5,
-                          annotation_text=f"ENTRY: ₹{signal.entry_price:.1f}", annotation_position="bottom right",
+        entry_lvl = getattr(signal, "entry_price", 0.0)
+        sl_lvl = getattr(signal, "sl_price", getattr(signal, "stop_loss", 0.0))
+        t1_lvl = getattr(signal, "target_1", getattr(signal, "target1", 0.0))
+        t2_lvl = getattr(signal, "target_2", getattr(signal, "target2", 0.0))
+        t3_lvl = getattr(signal, "target_3_moonshot", getattr(signal, "target3", 0.0))
+
+        if entry_lvl:
+            fig.add_hline(y=entry_lvl, line_dash="solid", line_color="#00d2ff", line_width=1.5,
+                          annotation_text=f"ENTRY: ₹{entry_lvl:.1f}", annotation_position="bottom right",
                           annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
-        if signal.stop_loss:
-            fig.add_hline(y=signal.stop_loss, line_dash="dash", line_color="#ff3355", line_width=1.5,
-                          annotation_text=f"STOP LOSS: ₹{signal.stop_loss:.1f}", annotation_position="top right",
+        if sl_lvl:
+            fig.add_hline(y=sl_lvl, line_dash="dash", line_color="#ff3355", line_width=1.5,
+                          annotation_text=f"STOP LOSS: ₹{sl_lvl:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#ff3355", size=10), row=1, col=1)
-        if signal.target_1:
-            fig.add_hline(y=signal.target_1, line_dash="dash", line_color="#05df72", line_width=1.5,
-                          annotation_text=f"TARGET 1: ₹{signal.target_1:.1f}", annotation_position="bottom right",
+        if t1_lvl:
+            fig.add_hline(y=t1_lvl, line_dash="dash", line_color="#05df72", line_width=1.5,
+                          annotation_text=f"TARGET 1: ₹{t1_lvl:.1f}", annotation_position="bottom right",
                           annotation_font=dict(color="#05df72", size=10), row=1, col=1)
-        if signal.target_2:
-            fig.add_hline(y=signal.target_2, line_dash="dash", line_color="#05df72", line_width=1.5,
-                          annotation_text=f"TARGET 2: ₹{signal.target_2:.1f}", annotation_position="top right",
+        if t2_lvl:
+            fig.add_hline(y=t2_lvl, line_dash="dash", line_color="#05df72", line_width=1.5,
+                          annotation_text=f"TARGET 2: ₹{t2_lvl:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#05df72", size=10), row=1, col=1)
-        if signal.target_3_moonshot:
-            fig.add_hline(y=signal.target_3_moonshot, line_dash="dot", line_color="#00d2ff", line_width=1.5,
-                          annotation_text=f"T3 MOONSHOT: ₹{signal.target_3_moonshot:.1f}", annotation_position="top right",
+        if t3_lvl:
+            fig.add_hline(y=t3_lvl, line_dash="dot", line_color="#00d2ff", line_width=1.5,
+                          annotation_text=f"T3 MOONSHOT: ₹{t3_lvl:.1f}", annotation_position="top right",
                           annotation_font=dict(color="#00d2ff", size=10), row=1, col=1)
         
     # Volume subplot
