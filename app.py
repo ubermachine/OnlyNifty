@@ -39,6 +39,13 @@ from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitche
 from src.performance_analytics import compute_institutional_performance_suite
 from src.backtest_engine import BacktestEngine
 from src.signal_journal import LiveSignalJournal
+from src.options_flow import (
+    compute_atm_straddle_metrics,
+    compute_cumulative_oi_delta_and_traps,
+    compute_pcr_momentum_derivative,
+    compute_vanna_charm_drift_vector,
+    compute_short_term_directional_vector
+)
 
 
 # ----------------- STREAMLIT PAGE CONFIG -----------------
@@ -325,6 +332,14 @@ hfi_res = load_heavyweight_flow_index()
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
 delta_div = detect_footprint_delta_divergences(df)
 
+# Real-Time Options Flow & Short-Term Direction Deduction Vector
+dir_flow_res = compute_short_term_directional_vector(
+    spot=current_spot,
+    df=df,
+    live_iv=iv_input,
+    hfi_score=hfi_res.get("hfi_score", 0.0)
+)
+
 # Real-Time Live Signal Journal & Trade Lifecycle Tracker
 journal_engine = get_signal_journal()
 journal_engine.update_open_trades_lifecycle(
@@ -390,8 +405,22 @@ with cockpit_col1:
                 {spot_delta:+.2f} ({spot_delta/prev_spot*100:+.2f}%)
             </span>
         </div>
-        <div style="font-size: 13px; color: #8e9fb5; margin-bottom: 12px; line-height: 1.4;">
+        <div style="font-size: 13px; color: #8e9fb5; margin-bottom: 8px; line-height: 1.4;">
             <strong>Setup Status:</strong> {signal.reason}
+        </div>
+        <div style="margin-bottom: 10px; background: rgba(11, 15, 25, 0.85); border: 1px solid {dir_flow_res['badge_color']}; border-radius: 6px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; color: {dir_flow_res['badge_color']};">
+                    {dir_flow_res['emoji']} {dir_flow_res['bias'].replace('_', ' ')} (D = {dir_flow_res['directional_vector']:+.2f} | Conviction: {dir_flow_res['conviction_pct']}%)
+                </div>
+                <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
+                    <strong>Playbook:</strong> {dir_flow_res['suggested_action'][:60]}...
+                </div>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right;">
+                <div style="color: #00d2ff; font-weight: 700;">Tgt: ₹{dir_flow_res['target_price']:.1f}</div>
+                <div style="color: #ff3355; font-weight: 700;">SL: ₹{dir_flow_res['stop_price']:.1f}</div>
+            </div>
         </div>
         <div class="confluence-grid">
             <div class="confluence-cell">
@@ -537,13 +566,14 @@ with tab_chart:
             </div>
             """, unsafe_allow_html=True)
 
-    t1_c1, t1_c2, t1_c3, t1_c4, t1_c5, t1_c6 = st.columns(6)
+    t1_c1, t1_c2, t1_c3, t1_c4, t1_c5, t1_c6, t1_c7 = st.columns(7)
     show_emas = t1_c1.checkbox("200/55/21 EMAs", value=True)
     show_vakc = t1_c2.checkbox("Keltner (VAKC)", value=True)
     show_vwap = t1_c3.checkbox("AVWAP ±2σ", value=True)
     show_fib = t1_c4.checkbox("Golden Pocket", value=True)
     show_cpr = t1_c5.checkbox("CPR Pivots", value=False)
-    show_levels = t1_c6.checkbox("Trade SL/TP Pins", value=True)
+    show_levels = t1_c6.checkbox("Trade SL/TP", value=True)
+    show_straddle = t1_c7.checkbox("Straddle Bounds", value=True)
     
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -572,6 +602,15 @@ with tab_chart:
         fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap"], 2), name="Session AVWAP (09:15 Fair Value)", line=dict(color="#a855f7", width=2.2)), row=1, col=1)
         fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap_upper"], 2), name="+2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
         fig.add_trace(go.Scattergl(x=df.index, y=np.round(df["vwap_lower"], 2), name="-2σ AVWAP Extreme", line=dict(color="rgba(168,85,247,0.4)", width=1, dash="dot")), row=1, col=1)
+
+    if show_straddle and "straddle_metrics" in dir_flow_res:
+        str_met = dir_flow_res["straddle_metrics"]
+        fig.add_hline(y=str_met["upper_breakeven"], line_dash="dashdot", line_color="#c084fc", line_width=1.5,
+                      annotation_text=f"STRADDLE UPPER: ₹{str_met['upper_breakeven']:.1f}", annotation_position="top left",
+                      annotation_font=dict(color="#c084fc", size=10), row=1, col=1)
+        fig.add_hline(y=str_met["lower_breakeven"], line_dash="dashdot", line_color="#c084fc", line_width=1.5,
+                      annotation_text=f"STRADDLE LOWER: ₹{str_met['lower_breakeven']:.1f}", annotation_position="bottom left",
+                      annotation_font=dict(color="#c084fc", size=10), row=1, col=1)
         
     if show_cpr and cpr["pivot"] > 0:
         fig.add_hline(y=cpr["pivot"], line_dash="dash", line_color="#ffd600", annotation_text="CPR Pivot", row=1, col=1)
@@ -1064,6 +1103,58 @@ with tab_oi:
     st.markdown("#### 🏛️ Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), use_container_width=True)
     
+    st.markdown("---")
+    
+    # Real-Time Options Flow & Short-Term Direction Deduction Card
+    st.markdown("#### ⚡ Real-Time Options Flow Microstructure & Short-Term Direction Vector")
+    fl_c1, fl_c2, fl_c3, fl_c4 = st.columns(4)
+    fl_c1.metric(
+        "Composite Direction Vector (D)",
+        f"{dir_flow_res['emoji']} {dir_flow_res['directional_vector']:+.2f}",
+        f"Conviction: {dir_flow_res['conviction_pct']}%"
+    )
+    str_met = dir_flow_res["straddle_metrics"]
+    fl_c2.metric(
+        "Combined ATM Straddle",
+        f"₹{str_met['straddle_premium']:.2f}",
+        f"Range: {str_met['range_width_pts']:.0f} pts ({str_met['vol_state']})"
+    )
+    oi_met = dir_flow_res["oi_metrics"]
+    fl_c3.metric(
+        "Net ΔOI Pulse Score",
+        f"{oi_met['net_oi_pulse_score']:+.2f}",
+        f"Net ΔOI: {oi_met['net_oi_delta']:+d}"
+    )
+    pcr_met = dir_flow_res["pcr_metrics"]
+    fl_c4.metric(
+        "15m PCR Velocity (dPCR/dt)",
+        f"{pcr_met['pcr_momentum_score']:+.2f}",
+        pcr_met["status"][:20]
+    )
+    
+    st.markdown(f"""
+    <div style="background: #0b0f19; border: 1px solid {dir_flow_res['badge_color']}; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 800; color: {dir_flow_res['badge_color']};">
+                {dir_flow_res['emoji']} DIRECTIONAL BIAS: {dir_flow_res['bias'].replace('_', ' ')}
+            </span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #00d2ff; font-weight: 700;">
+                Target: ₹{dir_flow_res['target_price']:.1f} • Stop: ₹{dir_flow_res['stop_price']:.1f}
+            </span>
+        </div>
+        <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">
+            <strong>Playbook:</strong> {dir_flow_res['suggested_action']}
+        </div>
+        <div style="font-size: 12px; color: {'#ff3355' if oi_met['trap_flag'] else '#34d399'}; margin-top: 4px; font-weight: 600;">
+            {oi_met['trap_warning']}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if oi_met.get("strike_diagnostics"):
+        with st.expander("🔍 Strike-Wise 4-Quadrant ΔOI & Trap Diagnostic Sheet", expanded=False):
+            st.dataframe(pd.DataFrame(oi_met["strike_diagnostics"]), hide_index=True, use_container_width=True)
+            
     st.markdown("---")
     
     # SVI Volatility Smile Curve Table
