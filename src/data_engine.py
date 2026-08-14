@@ -84,6 +84,21 @@ class DataEngine:
             df = ticker.history(period=period, interval=interval)
             if not df.empty and len(df) >= 10:
                 cleaned = self.clean_ohlcv(df)
+                
+                # Fetch Real-World Traded Volume from Nifty 50 BeES ETF (NIFTYBEES.NS)
+                try:
+                    bees_ticker = yf.Ticker("NIFTYBEES.NS")
+                    bees_df = bees_ticker.history(period=period, interval=interval)
+                    if not bees_df.empty and len(bees_df) >= 10:
+                        bees_clean = self.clean_ohlcv(bees_df)
+                        if "volume" in bees_clean.columns:
+                            aligned_vol = bees_clean["volume"].reindex(cleaned.index).fillna(0)
+                            pos_mask = aligned_vol > 0
+                            if pos_mask.any():
+                                cleaned.loc[pos_mask, "volume"] = aligned_vol[pos_mask]
+                except Exception:
+                    pass
+
                 if self.use_cache:
                     cleaned.to_parquet(cache_path)
                 return cleaned
