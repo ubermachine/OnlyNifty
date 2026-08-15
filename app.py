@@ -274,18 +274,20 @@ tf_str = "5m" if "5m" in timeframe else "1m"
 
 auto_refresh_choice = st.sidebar.selectbox(
     "⚡ Stream Refresh Rate",
-    ["Every 10 Seconds (Default)", "Every 5 Seconds", "Every 15 Seconds", "Every 30 Seconds", "Off (Manual)"],
+    ["Every 60 Seconds (Default)", "Every 30 Seconds", "Every 15 Seconds", "Every 10 Seconds", "Every 5 Seconds", "Off (Manual)"],
     index=0
 )
 
 if auto_refresh_choice != "Off (Manual)":
     sec_map = {
         "Every 5 Seconds": 5,
-        "Every 10 Seconds (Default)": 10,
+        "Every 10 Seconds": 10,
         "Every 15 Seconds": 15,
-        "Every 30 Seconds": 30
+        "Every 30 Seconds": 30,
+        "Every 60 Seconds (Default)": 60,
+        "Every 1 Minute (Default)": 60
     }
-    delay_secs = sec_map.get(auto_refresh_choice, 10)
+    delay_secs = sec_map.get(auto_refresh_choice, 60)
     st.sidebar.caption(f"🟢 Real-time auto-refresh active ({delay_secs}s cadence)")
     if st_autorefresh is not None:
         st_autorefresh(interval=delay_secs * 1000, key="nifty_live_stream_auto_refresh")
