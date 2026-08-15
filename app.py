@@ -53,6 +53,7 @@ from src.options_flow import (
     compute_vanna_charm_drift_vector,
     compute_short_term_directional_vector
 )
+from src.volatility_engine import VolatilityIntelligence
 
 
 # ----------------- STREAMLIT PAGE CONFIG -----------------
@@ -330,6 +331,15 @@ ib_state = compute_initial_balance_and_day_type(df)
 dfa_res = compute_dfa_alpha(df["close"])
 vpin_res = compute_vpin_toxicity(df)
 dyn_kelly = calculate_dynamic_kelly(win_rate=0.72, payoff_ratio=2.43, day_type=ib_state["day_type"])
+
+# Volatility Intelligence Engine
+vol_engine = VolatilityIntelligence()
+vol_report = vol_engine.generate_vol_intelligence_report(
+    close_prices=df['close'],
+    current_iv=iv_input,
+    bar_time=df.index[-1].strftime('%H:%M') if hasattr(df.index[-1], 'strftime') else '12:00'
+)
+
 sector_pulse = load_sectoral_pulse()
 hfi_res = load_heavyweight_flow_index()
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
@@ -470,7 +480,36 @@ with cockpit_col1:
                     {dyn_kelly['dynamic_risk_pct_str']} ({dyn_kelly['day_type_multiplier']}x Multiplier)
                 </div>
             </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">7. IV-RV Spread</div>
+                <div class="c-val" style="color: {'#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'};">
+                    IV:{vol_report['iv_rv_spread']['iv']*100:.1f}% RV:{vol_report['iv_rv_spread']['rv']*100:.1f}% ({vol_report['composite_vol_regime'].replace('_', ' ')})
+                </div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">8. Order Flow (OFI)</div>
+                <div class="c-val" style="color: {'#05df72' if ofi_data.get('ofi_zscore', 0) > 0.5 else '#ff3355' if ofi_data.get('ofi_zscore', 0) < -0.5 else '#fbb024'};">
+                    Z={ofi_data.get('ofi_zscore', 0):+.2f} ({'Buyers' if ofi_data.get('buyer_defense') else 'Sellers' if ofi_data.get('seller_defense') else 'Neutral'})
+                </div>
+            </div>
+            <div class="confluence-cell">
+                <div class="c-lbl">9. Dealer GEX</div>
+                <div class="c-val" style="color: {'#05df72' if gex_data.get('is_positive_gamma') else '#ff3355'};">
+                    {gex_data.get('gamma_flip_strike', 'N/A')} ({'+Γ Pin' if gex_data.get('is_positive_gamma') else '-Γ Explosive'})
+                </div>
+            </div>
         </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Vol Intelligence Banner
+    vol_regime_color = '#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'
+    st.markdown(f"""
+    <div style="background-color: rgba({','.join(['255,51,85' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '5,223,114' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '251,176,36'])}, 0.06); border-left: 3px solid {{vol_regime_color}}; padding: 6px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4; margin-top: 6px; border-radius: 4px;">
+        <strong style="color: {{vol_regime_color}};">Vol Regime: {{vol_report['composite_vol_regime'].replace('_', ' ')}}</strong> — 
+        IV Percentile: {{vol_report['iv_percentile']['iv_percentile']:.0f}}% ({{vol_report['iv_percentile']['rank_label'].replace('_', ' ')}}) |
+        Spread: {{vol_report['iv_rv_spread']['spread_pct']:+.1f}}% |
+        Quality: {{vol_report['intraday_quality']['quality_label'].replace('_', ' ')}} ({{vol_report['intraday_quality']['sizing_multiplier']:.0%}})
     </div>
     """, unsafe_allow_html=True)
 
@@ -641,6 +680,24 @@ with tab_chart:
         fig.add_hline(y=cpr["pivot"], line_dash="dash", line_color="#ffd600", annotation_text="CPR Pivot", row=1, col=1)
         fig.add_hline(y=cpr["tc"], line_dash="dot", line_color="#ffd600", annotation_text="CPR TC", row=1, col=1)
         fig.add_hline(y=cpr["bc"], line_dash="dot", line_color="#ffd600", annotation_text="CPR BC", row=1, col=1)
+        
+    # Volume Profile Key Levels
+    if vol_profile:
+        poc_val = vol_profile.get('poc', 0)
+        vah_val = vol_profile.get('vah', 0)
+        val_val = vol_profile.get('val', 0)
+        if poc_val > 0:
+            fig.add_hline(y=poc_val, line_dash='dot', line_color='#e2e8f0', line_width=1,
+                          annotation_text=f'POC {poc_val:.0f}', annotation_position='right',
+                          annotation_font_color='#e2e8f0', annotation_font_size=9, row=1, col=1)
+        if vah_val > 0:
+            fig.add_hline(y=vah_val, line_dash='dot', line_color='#05df72', line_width=1,
+                          annotation_text=f'VAH {vah_val:.0f}', annotation_position='right',
+                          annotation_font_color='#05df72', annotation_font_size=9, row=1, col=1)
+        if val_val > 0:
+            fig.add_hline(y=val_val, line_dash='dot', line_color='#ff3355', line_width=1,
+                          annotation_text=f'VAL {val_val:.0f}', annotation_position='right',
+                          annotation_font_color='#ff3355', annotation_font_size=9, row=1, col=1)
         
     if show_fib and len(df) >= 30:
         s_high = float(df["high"].tail(30).max())

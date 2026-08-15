@@ -16,10 +16,12 @@ from src.indicators import (
     compute_dealer_gex, compute_pre_open_gap_filter, detect_volume_profile_triggers,
     compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
     detect_iceberg_orders_and_liquidity_sweeps, compute_dfa_alpha, compute_vpin_toxicity,
-    compute_volume_synchronized_gamma_tracker
+    compute_volume_synchronized_gamma_tracker,
+    compute_initial_balance_and_day_type
 )
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher, MultiAssetKalmanCointegrator
 from src.macro_engine import GlobalMacroEngine
+from src.volatility_engine import VolatilityIntelligence
 
 
 
@@ -95,11 +97,44 @@ class StrategyEngine:
         self.markov_switcher = MarkovRegimeSwitcher()
         self.macro_engine = GlobalMacroEngine()
         self.cointegrator = MultiAssetKalmanCointegrator()
+        self.vol_intelligence = VolatilityIntelligence()
         self.session_losses: int = 0
         self.last_session_date: Optional[Any] = None
 
 
+
     def evaluate_bar(
+        self,
+        df_5m: pd.DataFrame,
+        current_idx: int = -1,
+        df_daily: Optional[pd.DataFrame] = None,
+        df_hourly: Optional[pd.DataFrame] = None,
+        df_15m: Optional[pd.DataFrame] = None,
+        df_1h: Optional[pd.DataFrame] = None,
+        live_iv: float = DEFAULT_IV,
+        live_vix: Optional[float] = None,
+        pre_open_gap: Optional[Dict[str, Any]] = None,
+        prev_close: Optional[float] = None
+    ) -> Signal:
+        self._last_vol_report = None
+        self._last_lunch_lull = False
+        
+        signal = self._evaluate_bar_core(
+            df_5m, current_idx, df_daily, df_hourly, df_15m, df_1h,
+            live_iv, live_vix, pre_open_gap, prev_close
+        )
+        
+        if getattr(self, '_last_vol_report', None) is not None:
+            if signal.details is None:
+                signal.details = {}
+            signal.details['vol_report'] = self._last_vol_report
+            
+        if getattr(self, '_last_lunch_lull', False) and signal.signal_type != SignalType.WAIT:
+            signal.reason += " [LUNCH LULL: Reduced confidence, halved sizing recommended]"
+            
+        return signal
+
+    def _evaluate_bar_core(
         self,
         df_5m: pd.DataFrame,
         current_idx: int = -1,
@@ -189,6 +224,13 @@ class StrategyEngine:
         if len(sub_df) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
 
+        # Lunch Lull Filter
+        lunch_lull_active = False
+        if "11:30" <= bar_time <= "13:00":
+            intraday_quality = self.vol_intelligence.compute_intraday_quality_score(bar_time)
+            lunch_lull_active = True
+        self._last_lunch_lull = lunch_lull_active
+
         # Compute Stochastic Indicators & Dynamic VAKC
         ema200_series = compute_ema(sub_df["close"], EMA_SLOW)
         ema55_series = compute_ema(sub_df["close"], EMA_MID)
@@ -209,6 +251,17 @@ class StrategyEngine:
         dfa_info = compute_dfa_alpha(sub_df["close"])
         vpin_info = compute_vpin_toxicity(sub_df)
         cointegration = self.cointegrator.evaluate_spread_divergence(sub_df["close"])
+
+        # Vol Intelligence: IV-RV Spread & Regime
+        vol_report = self.vol_intelligence.generate_vol_intelligence_report(
+            close_prices=sub_df['close'],
+            current_iv=live_iv,
+            bar_time=bar_time
+        )
+        vol_regime = vol_report['composite_vol_regime']
+        intraday_quality = vol_report['intraday_quality']
+        self._last_vol_report = vol_report
+
         
         ema200 = float(ema200_series.iloc[-1])
         ema55 = float(ema55_series.iloc[-1])
@@ -281,6 +334,69 @@ class StrategyEngine:
                     htf_aligned=True,
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
+                )
+
+        
+        # 4.2 Mean-Reversion Strategy (Active in MEAN_REVERTING_CHOP regime)
+        if markov_info['active_regime'] == 'MEAN_REVERTING_CHOP':
+            # LONG
+            if close <= vp_info.get('val', 0) + 5.0 and close > ema200 and ofi_info['buyer_defense'] and close > bar_open:
+                return Signal(
+                    signal_type=SignalType.LONG,
+                    entry_price=close,
+                    sl_price=round(close - 0.8 * atr_14, 2),
+                    target_1=round(vp_info.get('poc', close + 20), 2),
+                    target_2=round(vp_info.get('vah', close + 40), 2),
+                    reason="Mean-Reversion Long: Price at VAL in Choppy Regime. OFI confirms buyer defense. Quick scalp to POC.",
+                    htf_aligned=True,
+                    details={}
+                )
+            # SHORT
+            if close >= vp_info.get('vah', 99999) - 5.0 and close < ema200 and ofi_info['seller_defense'] and close < bar_open:
+                return Signal(
+                    signal_type=SignalType.SHORT,
+                    entry_price=close,
+                    sl_price=round(close + 0.8 * atr_14, 2),
+                    target_1=round(vp_info.get('poc', close - 20), 2),
+                    target_2=round(vp_info.get('val', close - 40), 2),
+                    reason="Mean-Reversion Short: Price at VAH in Choppy Regime. OFI confirms seller defense. Quick scalp to POC.",
+                    htf_aligned=True,
+                    details={}
+                )
+
+        # 4.3 IB Breakout Strategy (Active in LOW_VOL_TRENDING regime after 10:15 IST)
+        if markov_info['active_regime'] == 'LOW_VOL_TRENDING' and bar_time >= '10:15':
+            ib_state = compute_initial_balance_and_day_type(sub_df)
+            avg_vol = float(sub_df['volume'].tail(10).mean()) if 'volume' in sub_df.columns else 0.0
+            curr_vol = float(bar.get('volume', 0))
+            
+            # LONG
+            if close > ib_state.get('ib_high', 99999) and htf_aligned_long and curr_vol > avg_vol:
+                return Signal(
+                    signal_type=SignalType.LONG,
+                    entry_price=close,
+                    sl_price=ib_state.get('ib_low', close - atr_14),
+                    target_1=round(close + 1.5 * atr_14, 2),
+                    target_2=round(close + 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close + 5.0 * atr_14, 2),
+                    pyramid_trigger=round(close + 1.0 * atr_14, 2),
+                    reason="IB Breakout Long: Price cleared Initial Balance High in Trending Regime. HTF aligned. Volume confirmed.",
+                    htf_aligned=True,
+                    details={'ib_state': ib_state}
+                )
+            # SHORT
+            if close < ib_state.get('ib_low', 0) and htf_aligned_short and curr_vol > avg_vol:
+                return Signal(
+                    signal_type=SignalType.SHORT,
+                    entry_price=close,
+                    sl_price=ib_state.get('ib_high', close + atr_14),
+                    target_1=round(close - 1.5 * atr_14, 2),
+                    target_2=round(close - 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close - 5.0 * atr_14, 2),
+                    pyramid_trigger=round(close - 1.0 * atr_14, 2),
+                    reason="IB Breakdown Short: Price broke Initial Balance Low in Trending Regime. HTF aligned. Volume confirmed.",
+                    htf_aligned=True,
+                    details={'ib_state': ib_state}
                 )
 
         # 5. Auction Market Theory (AMT) Value Area Trigger Check
