@@ -20,11 +20,14 @@ class KalmanFilterTrendEstimator:
     Process Noise Covariance: Q
     Measurement Noise Covariance: R
     """
-    def __init__(self, process_noise_std: float = 0.8, measurement_noise_std: float = 3.5, dt: float = 1.0):
+    def __init__(self, process_noise_std: float = 1.2, measurement_noise_std: float = 6.0, dt: float = 1.0):
         self.dt = dt
         self.F = np.array([[1.0, self.dt],
                            [0.0, 1.0]])
         self.H = np.array([[1.0, 0.0]])
+        
+        self.process_noise_std = process_noise_std
+        self.measurement_noise_std = measurement_noise_std
         
         # Discrete-time process noise covariance
         q_pos = (process_noise_std ** 2) * (self.dt ** 3) / 3.0
@@ -46,7 +49,8 @@ class KalmanFilterTrendEstimator:
         """
         if not self.is_initialized:
             self.x = np.array([[price], [0.0]])
-            self.P = np.eye(2) * 20.0
+            scale = max(price / 24000.0, 0.1)
+            self.P = np.diag([50.0 * (scale**2), 20.0 * (scale**2)])
             self.is_initialized = True
             return price, 0.0, 0.0
 
@@ -99,7 +103,7 @@ class MarkovRegimeSwitcher:
     - State 1: HIGH_VOL_EXPANSION (High return variance, wide breakout moves)
     - State 2: MEAN_REVERTING_CHOP (Near-zero drift, fast mean-reversion, choppy wicks)
     """
-    def __init__(self):
+    def __init__(self, base_iv: float = 0.135):
         # 3 States: [0: LOW_VOL_TREND, 1: HIGH_VOL_EXPANSION, 2: MEAN_REVERTING_CHOP]
         self.state_names = ["LOW_VOL_TRENDING", "HIGH_VOL_EXPANSION", "MEAN_REVERTING_CHOP"]
         
@@ -116,7 +120,12 @@ class MarkovRegimeSwitcher:
         
         # Emission Parameters (Mean drift %, Return Volatility % per 5m bar)
         self.means = np.array([0.0003, 0.0000, 0.0000])
-        self.sigmas = np.array([0.0008, 0.0025, 0.0012])
+        self._update_sigmas(base_iv)
+
+    def _update_sigmas(self, iv: float):
+        iv_clean = max(iv if iv is not None else 0.135, 0.05)
+        bar_std = iv_clean / np.sqrt(252 * 75)
+        self.sigmas = np.array([bar_std * 0.8, bar_std * 2.5, bar_std * 1.2])
 
     def compute_emission_density(self, ret: float, state_idx: int) -> float:
         """Gaussian probability density of observing return `ret` given hidden state `state_idx`."""
@@ -126,9 +135,16 @@ class MarkovRegimeSwitcher:
         exp_term = np.exp(-0.5 * ((ret - mu) / sigma) ** 2)
         return max(exp_term / denom, 1e-12)
 
-    def infer_regimes(self, df_5m: pd.DataFrame, window: int = 30) -> Dict[str, Any]:
+    def infer_regimes(
+        self,
+        df_5m: pd.DataFrame,
+        window: int = 30,
+        iv: Optional[float] = None,
+        hurst_exponent: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
         Runs Forward Algorithm to compute smoothed posterior state probabilities P(S_t = k | Y_1:t).
+        Also evaluates Rough Volatility (Fractional Brownian Motion) dynamics if Hurst parameter H < 0.25.
         """
         if df_5m.empty or len(df_5m) < 10:
             return {
@@ -136,8 +152,13 @@ class MarkovRegimeSwitcher:
                 "state_probabilities": {"LOW_VOL_TRENDING": 0.5, "HIGH_VOL_EXPANSION": 0.2, "MEAN_REVERTING_CHOP": 0.3},
                 "kelly_multiplier": 1.0,
                 "target_scaling": "NORMAL_3TIER",
-                "entropy": 0.50
+                "entropy": 0.50,
+                "is_rough_volatility": False,
+                "hurst_h": 0.50
             }
+
+        if iv is not None:
+            self._update_sigmas(iv)
 
         prices = df_5m["close"].values
         recent_prices = prices[-window:] if len(prices) >= window else prices
@@ -149,7 +170,9 @@ class MarkovRegimeSwitcher:
                 "state_probabilities": {"LOW_VOL_TRENDING": 0.5, "HIGH_VOL_EXPANSION": 0.2, "MEAN_REVERTING_CHOP": 0.3},
                 "kelly_multiplier": 1.0,
                 "target_scaling": "NORMAL_3TIER",
-                "entropy": 0.50
+                "entropy": 0.50,
+                "is_rough_volatility": False,
+                "hurst_h": 0.50
             }
 
         # Forward recursion
@@ -173,6 +196,12 @@ class MarkovRegimeSwitcher:
         # Shannon Entropy as regime uncertainty metric: H = - sum(p * log(p))
         entropy = - float(np.sum(alpha * np.log(np.maximum(alpha, 1e-12))))
 
+        # Rough Volatility (Fractional Brownian Motion) Check
+        is_rough_vol = False
+        hurst_val = float(hurst_exponent) if hurst_exponent is not None else 0.50
+        if hurst_exponent is not None and hurst_exponent < 0.25:
+            is_rough_vol = True
+
         # Adaptive Kelly & Target Scalers
         if active_regime == "LOW_VOL_TRENDING":
             kelly_multiplier = 1.0
@@ -187,6 +216,9 @@ class MarkovRegimeSwitcher:
             target_scaling = "SCALPING_T1_ONLY"
             advice = "Mean-reverting chop detected. Halve risk (0.5% Kelly) or take quick 15-20pt scalp."
 
+        if is_rough_vol:
+            advice += f" | ⚡ Rough Volatility active (H={hurst_val:.2f} < 0.25): High-frequency variance clustering detected."
+
         return {
             "active_regime": active_regime,
             "state_probabilities": {
@@ -197,7 +229,9 @@ class MarkovRegimeSwitcher:
             "kelly_multiplier": kelly_multiplier,
             "target_scaling": target_scaling,
             "entropy": round(entropy, 3),
-            "advice": advice
+            "advice": advice,
+            "is_rough_volatility": is_rough_vol,
+            "hurst_h": round(hurst_val, 3)
         }
 
 
@@ -209,9 +243,9 @@ class MultiAssetKalmanCointegrator:
     """
     def __init__(self, delta: float = 1e-4, R: float = 1e-3):
         self.theta = np.zeros((2, 1))
-        self.P = np.eye(2) * 10.0
+        self.P = np.diag([10.0, 1e6])
         self.R = R
-        self.Q = delta / (1.0 - delta) * np.eye(2)
+        self.Q = delta / (1.0 - delta) * np.diag([1.0, 100.0])
         self.is_initialized = False
 
     def update(self, y_price: float, x_price: float) -> Tuple[float, float, float]:

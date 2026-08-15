@@ -162,7 +162,12 @@ def black_scholes_greeks(
     theta_daily = theta_annual / 365.0
     
     # 2nd Order Cross Greeks
-    charm_daily = -pdf_d1 * (r / (sigma * sqrt_t) - d2 / (2.0 * t_years)) / 365.0
+    term2 = discount_q * pdf_d1 * ((2.0 * (r - q) * t_years - d2 * sigma * sqrt_t) / (2.0 * t_years * sigma * sqrt_t))
+    if is_call:
+        charm_annual = q * discount_q * cdf_d1 - term2
+    else:
+        charm_annual = -q * discount_q * norm.cdf(-d1) - term2
+    charm_daily = charm_annual / 365.0
     vanna_1pct = - discount_q * (pdf_d1 * d2) / (sigma * 100.0)
     volga_1pct = (vega_1pct * d1 * d2) / (sigma * 100.0)
     
@@ -215,12 +220,21 @@ def black_scholes_greeks_batch(
     if is_call:
         price = spot * discount_q * cdf_d1 - strikes * discount_r * cdf_d2
         delta = discount_q * cdf_d1
+        theta_annual = (
+            - (spot * discount_q * pdf_d1 * sigma) / (2.0 * sqrt_t)
+            - r * strikes * discount_r * cdf_d2
+            + q * spot * discount_q * cdf_d1
+        )
     else:
         price = strikes * discount_r * norm.cdf(-d2) - spot * discount_q * norm.cdf(-d1)
         delta = discount_q * (cdf_d1 - 1.0)
+        theta_annual = (
+            - (spot * discount_q * pdf_d1 * sigma) / (2.0 * sqrt_t)
+            + r * strikes * discount_r * norm.cdf(-d2)
+            - q * spot * discount_q * norm.cdf(-d1)
+        )
         
     gamma = (discount_q * pdf_d1) / (spot * sigma * sqrt_t)
-    theta_annual = - (spot * discount_q * pdf_d1 * sigma) / (2.0 * sqrt_t)
     theta_daily = theta_annual / 365.0
     vega_1pct = (spot * discount_q * pdf_d1 * sqrt_t) / 100.0
     vanna_1pct = - discount_q * (pdf_d1 * d2) / (sigma * 100.0)
@@ -233,6 +247,63 @@ def black_scholes_greeks_batch(
         "vega": vega_1pct,
         "vanna": vanna_1pct
     }
+
+
+def black_76_greeks(
+    futures_price: float,
+    strike: float,
+    t_days: float = 4.0,
+    r: float = RISK_FREE_RATE,
+    sigma: float = DEFAULT_IV,
+    is_call: bool = True
+) -> Dict[str, float]:
+    """
+    Black-76 model for European options on futures/forwards (Standard for NSE Index Options).
+    Eliminates dividend-yield parameter estimation risk.
+    """
+    f = max(float(futures_price), 1.0)
+    k = max(float(strike), 1.0)
+    t_years = max(t_days / 365.0, 0.00001)
+    
+    sigma_clean = (sigma / 100.0) if sigma > 1.0 else sigma
+    if not is_call:
+        sigma_clean = sigma_clean + PUT_SKEW_PREMIUM
+    sigma_clean = max(sigma_clean, 0.01)
+
+    sqrt_t = math.sqrt(t_years)
+    d1 = (math.log(f / k) + 0.5 * (sigma_clean ** 2) * t_years) / (sigma_clean * sqrt_t)
+    d2 = d1 - sigma_clean * sqrt_t
+    
+    pdf_d1 = norm.pdf(d1)
+    cdf_d1 = norm.cdf(d1)
+    cdf_d2 = norm.cdf(d2)
+    discount = math.exp(-r * t_years)
+    
+    if is_call:
+        price = discount * (f * cdf_d1 - k * cdf_d2)
+        delta = discount * cdf_d1
+        theta_annual = - (f * discount * pdf_d1 * sigma_clean) / (2.0 * sqrt_t) - r * price
+    else:
+        price = discount * (k * norm.cdf(-d2) - f * norm.cdf(-d1))
+        delta = - discount * norm.cdf(-d1)
+        theta_annual = - (f * discount * pdf_d1 * sigma_clean) / (2.0 * sqrt_t) - r * price
+
+    gamma = (discount * pdf_d1) / (f * sigma_clean * sqrt_t)
+    vega_1pct = (f * discount * sqrt_t * pdf_d1) / 100.0
+    vanna_1pct = - discount * (pdf_d1 * d2) / (sigma_clean * 100.0)
+    charm_daily = (- discount * pdf_d1 * (r * sqrt_t / (sigma_clean) - d2 / (2.0 * t_years)) ) / 365.0 if t_years > 0 else 0.0
+
+    return {
+        "price": round(max(price, 0.20), 2),
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "theta": round(theta_annual / 365.0, 2),
+        "vega": round(vega_1pct, 2),
+        "vanna": round(vanna_1pct, 4),
+        "charm": round(charm_daily, 4),
+        "iv": round(sigma_clean * 100.0, 1)
+    }
+
 
 
 def compute_0dte_gamma_scalp_parameters(
@@ -433,72 +504,6 @@ def calculate_adaptive_tca_friction(
         "slippage": round(slippage, 2),
         "effective_slippage_pts": round(effective_slippage_pts, 2)
     }
-
-
-def calculate_adaptive_tca_friction_multi_tier(
-    entry_prem: float,
-    t1_prem: float,
-    t2_prem: float,
-    final_exit_prem: float,
-    total_qty: int,
-    lots: int,
-    t1_hit: bool = False,
-    t2_hit: bool = False,
-    is_pyramided: bool = False,
-    iv: float = DEFAULT_IV,
-    is_0dte_afternoon: bool = False
-) -> Dict[str, float]:
-    """Accurately calculates statutory NSE TCA friction across 1, 2, 3, or 4 exit tranches."""
-    if total_qty <= 0:
-        return {"total_friction": 0.0, "stt": 0.0, "brokerage": 0.0, "exchange_charges": 0.0, "gst": 0.0, "slippage": 0.0}
-        
-    orders_count = 2.0
-    if is_pyramided:
-        orders_count += 1.0
-    if t1_hit and t2_hit:
-        orders_count += 2.0
-    elif t1_hit:
-        orders_count += 1.0
-        
-    brokerage = BROKERAGE_PER_ORDER * orders_count
-    turnover_buy = entry_prem * total_qty
-    
-    if t1_hit and t2_hit:
-        qty_35_1 = int(round(lots * 0.35)) * LOT_SIZE
-        qty_35_2 = int(round(lots * 0.35)) * LOT_SIZE
-        qty_30 = total_qty - qty_35_1 - qty_35_2
-        turnover_sell = (qty_35_1 * t1_prem) + (qty_35_2 * t2_prem) + (qty_30 * final_exit_prem)
-    elif t1_hit:
-        qty_35_1 = int(round(lots * 0.35)) * LOT_SIZE
-        qty_rem = total_qty - qty_35_1
-        turnover_sell = (qty_35_1 * t1_prem) + (qty_rem * final_exit_prem)
-    else:
-        turnover_sell = total_qty * final_exit_prem
-        
-    stt = turnover_sell * STT_SELL_PCT
-    exchange_charges = (turnover_buy + turnover_sell) * NSE_TURNOVER_PCT
-    sebi_fees = (turnover_buy + turnover_sell) * SEBI_CHARGES_PCT
-    stamp_duty = turnover_buy * STAMP_DUTY_BUY_PCT
-    gst = (brokerage + exchange_charges + sebi_fees) * GST_PCT
-    
-    vol_multiplier = math.sqrt(max(iv, 0.08) / 0.12)
-    time_multiplier = 1.40 if is_0dte_afternoon else 1.0
-    effective_slippage_pts = DEFAULT_SLIPPAGE_PTS * vol_multiplier * time_multiplier
-    slippage = effective_slippage_pts * total_qty
-    
-    total_friction = brokerage + stt + exchange_charges + sebi_fees + stamp_duty + gst + slippage
-    return {
-        "total_friction": round(total_friction, 2),
-        "stt": round(stt, 2),
-        "brokerage": round(brokerage, 2),
-        "exchange_charges": round(exchange_charges, 2),
-        "gst": round(gst, 2),
-        "stamp_duty": round(stamp_duty, 2),
-        "slippage": round(slippage, 2),
-        "effective_slippage_pts": round(effective_slippage_pts, 2),
-        "orders_count": int(orders_count)
-    }
-
 
 
 def calculate_adaptive_tca_friction_multi_tier(
@@ -850,7 +855,8 @@ def run_monte_carlo_simulation(
     cvar_95_rupees = round(initial_capital * (cvar_95_mdd_pct / 100.0), 2)
     cvar_99_rupees = round(initial_capital * (cvar_99_mdd_pct / 100.0), 2)
     
-    ruined_count = int(np.sum(path_max_dds >= ruin_threshold_pct))
+    min_equity_per_path = np.min(equity_paths, axis=1)
+    ruined_count = int(np.sum(min_equity_per_path <= initial_capital * (1.0 - ruin_threshold_pct)))
     prob_of_ruin_pct = float((ruined_count / num_simulations) * 100.0)
     por_display_str = "< 0.01%" if prob_of_ruin_pct == 0.0 else f"{prob_of_ruin_pct:.2f}%"
     
@@ -913,12 +919,39 @@ def run_monte_carlo_simulation(
     }
 
 
-def calculate_pcr_and_max_pain(option_chain_df: pd.DataFrame) -> Dict[str, Any]:
+def calculate_pcr_and_max_pain(option_chain_df: Any) -> Dict[str, Any]:
     """
     Computes exact Max Pain strike price (where option sellers incur minimum cumulative payout)
     and Open Interest / Change in OI / Volume Put-Call Ratio (PCR).
     """
-    if option_chain_df is None or option_chain_df.empty:
+    if option_chain_df is not None and isinstance(option_chain_df, dict):
+        if "dataframe" in option_chain_df and isinstance(option_chain_df["dataframe"], pd.DataFrame):
+            option_chain_df = option_chain_df["dataframe"]
+        elif "records" in option_chain_df and isinstance(option_chain_df["records"], dict) and "data" in option_chain_df["records"]:
+            rows = []
+            for item in option_chain_df["records"]["data"]:
+                stk = item.get("strikePrice")
+                ce = item.get("CE", {})
+                pe = item.get("PE", {})
+                rows.append({
+                    "strike": float(stk),
+                    "ce_oi": float(ce.get("openInterest", 0)),
+                    "pe_oi": float(pe.get("openInterest", 0)),
+                    "ce_change_oi": float(ce.get("changeinOpenInterest", 0)),
+                    "pe_change_oi": float(pe.get("changeinOpenInterest", 0)),
+                    "ce_volume": float(ce.get("totalTradedVolume", 0)),
+                    "pe_volume": float(pe.get("totalTradedVolume", 0)),
+                    "ce_ltp": float(ce.get("lastPrice", 0)),
+                    "pe_ltp": float(pe.get("lastPrice", 0))
+                })
+            option_chain_df = pd.DataFrame(rows)
+        else:
+            try:
+                option_chain_df = pd.DataFrame(option_chain_df)
+            except Exception:
+                option_chain_df = None
+
+    if option_chain_df is None or not isinstance(option_chain_df, pd.DataFrame) or option_chain_df.empty:
         return {
             "max_pain_strike": 24500.0,
             "total_ce_oi": 0, "total_pe_oi": 0, "pcr_oi": 1.0,
@@ -1322,7 +1355,10 @@ def generate_option_trade_ticket(
     current_drawdown_pct: float = 0.0,
     t_days: float = 4.0,
     iv: float = DEFAULT_IV,
-    is_0dte_afternoon: bool = False
+    is_0dte_afternoon: bool = False,
+    current_intraday_pnl: float = 0.0,
+    peak_intraday_pnl: float = 0.0,
+    risk_pct_override: Optional[float] = None
 ) -> Dict[str, Any]:
     """Translates 3-Tier spot setups into convex institutional Option Trade Ticket with Free Spread details."""
     if signal.signal_type == SignalType.WAIT or getattr(signal, "entry_price", 0.0) <= 0.0:
@@ -1349,14 +1385,15 @@ def generate_option_trade_ticket(
     option_risk = max((spot_risk * delta) - convexity_benefit + theta_risk, 10.0)
     sl_prem = max(round(entry_prem - option_risk, 2), 5.0)
     
-    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds
+    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds (Accounting for Theta Decay)
     t1_p = float(getattr(signal, "target_1", 0.0))
     if t1_p > 1000.0 and abs(t1_p - spot) < 400.0:
         diff_t1 = abs(t1_p - spot)
     else:
         diff_t1 = 45.0  # Default 45 pts index T1 (+1.2x ATR)
         
-    target1_prem = round(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)), 2)
+    theta_decay_t1 = abs(theta) * 0.10
+    target1_prem = round(max(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)) - theta_decay_t1, entry_prem + 1.0), 2)
     
     t2_p = float(getattr(signal, "target_2", 0.0))
     if t2_p > 1000.0 and abs(t2_p - spot) < 600.0:
@@ -1364,7 +1401,8 @@ def generate_option_trade_ticket(
     else:
         diff_t2 = 90.0  # Default 90 pts index T2 (+2.5x ATR)
         
-    target2_prem = round(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)), 2)
+    theta_decay_t2 = abs(theta) * 0.20
+    target2_prem = round(max(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)) - theta_decay_t2, target1_prem + 1.0), 2)
     
     t3_p = float(getattr(signal, "target_3_moonshot", 0.0))
     if t3_p > 1000.0 and abs(t3_p - spot) < 800.0:
@@ -1372,9 +1410,20 @@ def generate_option_trade_ticket(
     else:
         diff_t3 = 140.0  # Default 140 pts index T3 (+3.8x ATR)
         
-    target3_prem = round(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)), 2)
+    theta_decay_t3 = abs(theta) * 0.35
+    target3_prem = round(max(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)) - theta_decay_t3, target2_prem + 1.0), 2)
     
-    sizing = calculate_position_size(capital, MAX_RISK_PCT, entry_prem, sl_prem, LOT_SIZE, current_drawdown_pct)
+    risk_pct_to_use = risk_pct_override if risk_pct_override is not None else MAX_RISK_PCT
+    sizing = calculate_position_size(
+        capital,
+        risk_pct_to_use,
+        entry_prem,
+        sl_prem,
+        LOT_SIZE,
+        current_drawdown_pct,
+        current_intraday_pnl=current_intraday_pnl,
+        peak_intraday_pnl=peak_intraday_pnl
+    )
     tca = calculate_adaptive_tca_friction_multi_tier(
         entry_prem, target1_prem, target2_prem, target3_prem,
         sizing["total_qty"], sizing["lots"], t1_hit=True, t2_hit=True, iv=iv, is_0dte_afternoon=is_0dte_afternoon
@@ -1546,6 +1595,75 @@ def construct_delta_neutral_iron_condor(
         "probability_of_profit_pct": pop_pct,
         "recommended_regime": "ANTI-PERSISTENT CHOP / NEUTRAL DAY (H < 0.48, VR < 0.80)"
     }
+
+
+def construct_jade_lizard(
+    spot: float,
+    put_offset: int = 150,
+    call_short_offset: int = 150,
+    call_wing_width: int = 100,
+    t_days: float = 4.0,
+    iv: float = DEFAULT_IV,
+    r: float = RISK_FREE_RATE,
+    put_skew_multiplier: float = 1.15
+) -> Dict[str, Any]:
+    """
+    Constructs a 3-Leg Jade Lizard Strategy for exploiting institutional Put Skew:
+    - Short 1x OTM Put: K_p = Spot - put_offset (higher IV due to downside skew)
+    - Short 1x OTM Call: K_cs = Spot + call_short_offset
+    - Long 1x OTM Call: K_cl = K_cs + call_wing_width
+    
+    Zero Upside Risk Invariant:
+    If Net Credit Collected >= Call Wing Width, the maximum loss on the Bear Call Spread
+    is fully offset by the total credit, leaving ZERO upside risk.
+    """
+    atm = int(round(spot / 50.0) * 50)
+    k_p = atm - put_offset
+    k_cs = atm + call_short_offset
+    k_cl = k_cs + call_wing_width
+
+    # Skewed put IV
+    iv_put = iv * put_skew_multiplier
+
+    g_p = black_scholes_greeks(spot, k_p, t_days=t_days, r=r, sigma=iv_put, is_call=False)
+    g_cs = black_scholes_greeks(spot, k_cs, t_days=t_days, r=r, sigma=iv, is_call=True)
+    g_cl = black_scholes_greeks(spot, k_cl, t_days=t_days, r=r, sigma=iv, is_call=True)
+
+    put_credit = max(g_p["price"], 1.0)
+    call_spread_cost = max(g_cs["price"] - g_cl["price"], 1.0)
+    total_net_credit = put_credit + call_spread_cost
+
+    upside_risk = max(0.0, float(call_wing_width - total_net_credit))
+    has_zero_upside_risk = total_net_credit >= float(call_wing_width)
+
+    max_profit = total_net_credit
+    lower_breakeven = k_p - total_net_credit
+
+    net_delta = -g_p["delta"] - g_cs["delta"] + g_cl["delta"]
+    net_theta = -g_p["theta"] - g_cs["theta"] + g_cl["theta"]
+    net_vega = -g_p["vega"] - g_cs["vega"] + g_cl["vega"]
+
+    return {
+        "status": "STRUCTURED",
+        "strategy": "JADE_LIZARD_SKEW_ARBITRAGE",
+        "spot": spot,
+        "legs": {
+            "short_put": {"strike": k_p, "type": "PE", "side": "SELL", "premium": round(g_p["price"], 2), "delta": round(g_p["delta"], 3), "iv": round(iv_put, 3)},
+            "short_call": {"strike": k_cs, "type": "CE", "side": "SELL", "premium": round(g_cs["price"], 2), "delta": round(g_cs["delta"], 3), "iv": round(iv, 3)},
+            "long_call": {"strike": k_cl, "type": "CE", "side": "BUY", "premium": round(g_cl["price"], 2), "delta": round(g_cl["delta"], 3), "iv": round(iv, 3)}
+        },
+        "total_net_credit_pts": round(total_net_credit, 2),
+        "call_wing_width_pts": float(call_wing_width),
+        "has_zero_upside_risk": has_zero_upside_risk,
+        "upside_risk_pts": round(upside_risk, 2),
+        "max_profit_pts": round(max_profit, 2),
+        "lower_breakeven": round(lower_breakeven, 1),
+        "net_delta": round(net_delta, 4),
+        "net_theta_daily": round(net_theta, 2),
+        "net_vega": round(net_vega, 2),
+        "recommended_regime": "ELEVATED PUT SKEW (Z_skew >= +1.0) / MODERATE BULLISH TO NEUTRAL BIAS"
+    }
+
 
 
 

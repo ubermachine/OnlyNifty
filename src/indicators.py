@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA, VAKC_ATR_SPAN,
-    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN
+    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
+    VPIN_TOXICITY_THRESHOLD
 )
 
 def compute_ema(series: pd.Series, period: int) -> pd.Series:
@@ -36,7 +37,7 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
     if n_ret < max_lag:
         return {"hurst": 0.50, "regime": "RANDOM_WALK (Accumulating Data)", "is_trending": False}
 
-    lags = np.unique(np.linspace(min_lag, min(max_lag, n_ret // 2), 6, dtype=int))
+    lags = np.unique(np.linspace(min_lag, min(max_lag, n_ret // 2), 16, dtype=int))
     rs_values = []
     valid_lags = []
     
@@ -87,7 +88,7 @@ def compute_vakc_envelopes(
     ema_span: int = EMA_SLOW,
     atr_span: int = VAKC_ATR_SPAN,
     k: float = VAKC_LAMBDA,
-    iv: float = DEFAULT_IV
+    iv: Union[float, pd.Series, None] = DEFAULT_IV
 ) -> Tuple[pd.Series, pd.Series]:
     """
     Computes Volatility-Adaptive Keltner Channels (VAKC) using Wilder's RMA for ATR
@@ -109,9 +110,18 @@ def compute_vakc_envelopes(
     atr = tr.ewm(alpha=1.0/atr_span, adjust=False).mean()
     
     # Smooth Non-Linear Volatility Elasticity Multiplier
-    clamped_iv = max(iv if iv is not None else DEFAULT_IV, 0.06)
+    if isinstance(iv, pd.Series):
+        clamped_iv = iv.clip(lower=0.06)
+    elif "iv" in df.columns and (iv is None or isinstance(iv, str)):
+        clamped_iv = df["iv"].clip(lower=0.06)
+    else:
+        clamped_iv = max(iv if iv is not None else DEFAULT_IV, 0.06)
+        
     vol_ratio = clamped_iv / 0.12
-    vol_scalar = (vol_ratio ** 0.45) * (1.0 + 0.12 * np.tanh((clamped_iv - 0.18) / 0.06))
+    if isinstance(vol_ratio, pd.Series):
+        vol_scalar = (vol_ratio ** 0.45) * (1.0 + 0.12 * np.tanh((clamped_iv - 0.18) / 0.06))
+    else:
+        vol_scalar = (vol_ratio ** 0.45) * (1.0 + 0.12 * np.tanh((clamped_iv - 0.18) / 0.06))
     
     band_width = (k * atr * vol_scalar).fillna(ema200 * 0.015)
     
@@ -121,7 +131,7 @@ def compute_vakc_envelopes(
 
 
 def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Computes Session Anchored VWAP and Exact Online 2nd-Moment Variance (±2σ dispersion bands) via Pure NumPy."""
+    """Computes Session Anchored VWAP and Exact Numerically Stable Online Variance (±2σ dispersion bands)."""
     if df.empty:
         s = pd.Series(dtype=float)
         return s, s, s
@@ -133,31 +143,43 @@ def compute_vwap(df: pd.DataFrame, anchor_session: bool = True) -> Tuple[pd.Seri
     
     typical_price = (high + low + close) / 3.0
     vol = np.where(vol_raw > 0, vol_raw, np.maximum(high - low, 1.0))
-    tp_vol = typical_price * vol
-    tp_sq_vol = (typical_price ** 2) * vol
+    
+    vwap_arr = np.zeros(len(df), dtype=float)
+    variance_arr = np.zeros(len(df), dtype=float)
     
     if anchor_session and isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
         day_nums = df.index.dayofyear.to_numpy()
         session_breaks = np.concatenate(([0], np.where(np.diff(day_nums) != 0)[0] + 1))
         
-        cum_vol = np.zeros(len(df), dtype=float)
-        cum_tp = np.zeros(len(df), dtype=float)
-        cum_tp_sq = np.zeros(len(df), dtype=float)
-        
         for i in range(len(session_breaks)):
             start_i = session_breaks[i]
             end_i = session_breaks[i + 1] if i + 1 < len(session_breaks) else len(df)
-            cum_vol[start_i:end_i] = np.cumsum(vol[start_i:end_i])
-            cum_tp[start_i:end_i] = np.cumsum(tp_vol[start_i:end_i])
-            cum_tp_sq[start_i:end_i] = np.cumsum(tp_sq_vol[start_i:end_i])
+            
+            p0 = typical_price[start_i]
+            delta = typical_price[start_i:end_i] - p0
+            w = vol[start_i:end_i]
+            
+            cum_w = np.cumsum(w)
+            cum_w_safe = np.maximum(cum_w, 1.0)
+            cum_delta_w = np.cumsum(delta * w)
+            cum_delta_sq_w = np.cumsum((delta ** 2) * w)
+            
+            delta_bar = cum_delta_w / cum_w_safe
+            vwap_arr[start_i:end_i] = p0 + delta_bar
+            variance_arr[start_i:end_i] = np.maximum((cum_delta_sq_w / cum_w_safe) - (delta_bar ** 2), 0.0)
     else:
-        cum_vol = np.cumsum(vol)
-        cum_tp = np.cumsum(tp_vol)
-        cum_tp_sq = np.cumsum(tp_sq_vol)
+        p0 = typical_price[0]
+        delta = typical_price - p0
+        w = vol
+        cum_w = np.cumsum(w)
+        cum_w_safe = np.maximum(cum_w, 1.0)
+        cum_delta_w = np.cumsum(delta * w)
+        cum_delta_sq_w = np.cumsum((delta ** 2) * w)
         
-    cum_vol_safe = np.maximum(cum_vol, 1.0)
-    vwap_arr = cum_tp / cum_vol_safe
-    variance_arr = np.maximum((cum_tp_sq / cum_vol_safe) - (vwap_arr ** 2), 0.0)
+        delta_bar = cum_delta_w / cum_w_safe
+        vwap_arr = p0 + delta_bar
+        variance_arr = np.maximum((cum_delta_sq_w / cum_w_safe) - (delta_bar ** 2), 0.0)
+        
     std_dev_arr = np.sqrt(variance_arr)
     
     vwap = pd.Series(vwap_arr, index=df.index)
@@ -296,13 +318,19 @@ def detect_footprint_delta_divergences(
     return {"divergence_detected": False, "type": "NONE", "bias": "NEUTRAL", "thesis": "No Delta Divergence detected."}
 
 
-def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
+def compute_order_flow_imbalance(df: pd.DataFrame, decay_lambda: float = 0.15) -> Dict[str, Any]:
     """
-    Computes Composite Price-Wick Weighted Bar Delta & Rolling 20-Bar OFI Z-Score.
-    Detects institutional absorption at Session AVWAP.
+    Computes Composite Price-Wick Weighted Bar Delta & Rolling 20-Bar OFI Z-Score,
+    augmented with a Hawkes Process Exponential Decay Kernel (e^(-lambda * dt))
+    to model high-frequency order flow clustering and predictive liquidity shocks.
     """
     if df.empty or len(df) < 2:
-        return {"ofi": 0.0, "ofi_zscore": 0.0, "cvd": 0.0, "buyer_defense": True, "cvd_series": pd.Series()}
+        return {
+            "ofi": 0.0, "ofi_zscore": 0.0, "cvd": 0.0,
+            "buyer_defense": True, "seller_defense": True,
+            "hawkes_ofi": 0.0, "is_hawkes_surge": False,
+            "cvd_series": pd.Series()
+        }
         
     vol = df["volume"].copy().astype(float)
     if vol.sum() == 0 or (vol == 0).all():
@@ -332,6 +360,12 @@ def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
     
     recent_z = float(ofi_zscore_series.iloc[-1])
     recent_ofi = float(bar_delta.tail(5).sum())
+
+    # Hawkes Process Exponential Decay Kernel: w_k = exp(-lambda * (N - 1 - k))
+    k_len = min(len(bar_delta), 15)
+    decay_weights = np.exp(-decay_lambda * np.arange(k_len)[::-1])
+    hawkes_ofi = float(np.sum(bar_delta.iloc[-k_len:].values * decay_weights))
+    is_hawkes_surge = abs(recent_z) >= 1.50 or abs(hawkes_ofi) >= 5000.0
     
     return {
         "ofi": round(recent_ofi, 2),
@@ -339,6 +373,8 @@ def compute_order_flow_imbalance(df: pd.DataFrame) -> Dict[str, Any]:
         "cvd": round(float(cvd.iloc[-1]), 2),
         "buyer_defense": recent_z >= -0.20,
         "seller_defense": recent_z <= 0.20,
+        "hawkes_ofi": round(hawkes_ofi, 2),
+        "is_hawkes_surge": is_hawkes_surge,
         "cvd_series": cvd
     }
 
@@ -652,9 +688,23 @@ def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float =
 # =====================================================================
 
 def _resample_ohlcv_if_needed(df_source: pd.DataFrame, freq: str, bar_multiplier: int) -> pd.DataFrame:
-    """Safely and swiftly resamples OHLCV DataFrame using vectorized NumPy chunking."""
+    """Safely and swiftly resamples OHLCV DataFrame aligning to standard market clock."""
     if df_source.empty:
         return df_source
+    if isinstance(df_source.index, pd.DatetimeIndex) and len(df_source) > 1:
+        try:
+            resampled = df_source.resample(freq, origin="start_day").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum"
+            }).dropna()
+            if not resampled.empty and len(resampled) >= 2:
+                return resampled
+        except Exception:
+            pass
+
     n = len(df_source)
     k = max(int(bar_multiplier), 1)
     n_full = (n // k) * k
@@ -1279,7 +1329,7 @@ def compute_vpin_toxicity(df: pd.DataFrame, bucket_volume: int = 10000) -> Dict[
     """
     Computes VPIN (Volume-Synchronized Probability of Informed Trading) using Bulk Volume Classification (BVC).
     Detects toxic institutional flow without requiring tick-level order books.
-    VPIN > 0.65 -> High Toxic Flow (Institutions aggressively front-running/dumping)
+    VPIN >= 0.75 -> High Toxic Flow (Institutions aggressively front-running/dumping)
     """
     from scipy.stats import norm
 
@@ -1332,14 +1382,14 @@ def compute_vpin_toxicity(df: pd.DataFrame, bucket_volume: int = 10000) -> Dict[
     vpin_val = float(np.mean(vpin_buckets)) if vpin_buckets else 0.0
     vpin_val = min(max(round(vpin_val, 4), 0.0), 1.0)
     
-    is_toxic = vpin_val >= 0.65
-    if vpin_val >= 0.75:
-        toxicity_level = "EXTREME_TOXICITY (High Informed Flow / Aggressive Dumping)"
+    is_toxic = vpin_val >= VPIN_TOXICITY_THRESHOLD
+    if vpin_val >= 0.85:
+        toxicity_level = "CRITICAL_TOXICITY (Severe Informed Dumping / Front-Running)"
         advice = "WIDEN_SL_1.5X_HALVE_POSITION"
-    elif vpin_val >= 0.65:
+    elif vpin_val >= VPIN_TOXICITY_THRESHOLD:
         toxicity_level = "HIGH_TOXICITY (Informed Order Flow Prevalent)"
         advice = "WIDEN_SL_1.5X_HALVE_POSITION"
-    elif vpin_val >= 0.45:
+    elif vpin_val >= 0.50:
         toxicity_level = "MODERATE_FLOW (Standard Two-Sided Liquidity)"
         advice = "STANDARD_EXECUTION"
     else:
@@ -1410,6 +1460,111 @@ def compute_volume_synchronized_gamma_tracker(
         "pin_conviction": conviction,
         "strike_impacts": strike_impacts
     }
+
+
+def compute_session_cvd(df: pd.DataFrame) -> pd.Series:
+    """
+    Computes Session-Reset Cumulative Volume Delta (CVD) using 3-Tier Intrabar Decomposition:
+    W_t = 0.50 * Phi_body + 0.30 * Phi_CLV + 0.20 * Phi_wick.
+    Automatically resets CVD to 0.0 at 09:15 IST at the start of each trading day.
+    """
+    if df.empty or len(df) < 2:
+        return pd.Series([0.0] * len(df), index=df.index if not df.empty else None)
+
+    high = df["high"].astype(float).values
+    low = df["low"].astype(float).values
+    close = df["close"].astype(float).values
+    open_p = df["open"].astype(float).values
+    volume = df["volume"].astype(float).values if "volume" in df.columns else np.ones(len(df))
+
+    ranges = np.maximum(high - low, 1e-4)
+
+    # 1. Body Ratio
+    phi_body = (close - open_p) / ranges
+
+    # 2. Close Location Value (CLV)
+    phi_clv = ((close - low) - (high - close)) / ranges
+
+    # 3. Wick Imbalance
+    upper_wick = high - np.maximum(close, open_p)
+    lower_wick = np.minimum(close, open_p) - low
+    wick_diff = (lower_wick - upper_wick) / ranges
+    phi_wick = np.clip(wick_diff, -1.0, 1.0)
+
+    # 3-Tier Composite Delta Weight
+    w_t = 0.50 * phi_body + 0.30 * phi_clv + 0.20 * phi_wick
+    bar_deltas = w_t * volume
+
+    # Session Reset Logic (09:15 IST or Date Change)
+    cvd = np.zeros(len(df))
+    current_cum = 0.0
+
+    dates = df.index.date if hasattr(df.index, "date") else None
+    times = df.index.strftime("%H:%M") if hasattr(df.index, "strftime") else None
+
+    for i in range(len(df)):
+        is_new_session = False
+        if i > 0:
+            if dates is not None and dates[i] != dates[i - 1]:
+                is_new_session = True
+            elif times is not None and times[i] == "09:15":
+                is_new_session = True
+
+        if is_new_session:
+            current_cum = 0.0
+
+        current_cum += bar_deltas[i]
+        cvd[i] = current_cum
+
+    return pd.Series(cvd, index=df.index, name="session_cvd")
+
+
+def detect_absorption_traps(df: pd.DataFrame, key_levels: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """
+    Detects Passive Institutional Limit Order Absorption at Value Area / CPR Extremes.
+    Identifies when aggressive buyers/sellers are absorbed by opposing iceberg orders.
+    """
+    if len(df) < 6:
+        return {"is_absorption": False, "type": "NONE", "confidence": 0.0, "reason": "Insufficient data"}
+
+    sub_df = df.tail(6)
+    close = float(sub_df["close"].iloc[-1])
+    open_p = float(sub_df["open"].iloc[-1])
+    high = float(sub_df["high"].iloc[-1])
+    low = float(sub_df["low"].iloc[-1])
+    
+    cvd_series = compute_session_cvd(df)
+    recent_cvd = cvd_series.tail(6).values
+    cvd_delta = recent_cvd[-1] - recent_cvd[0]
+
+    vah = key_levels.get("VAH", 999999.0) if key_levels else 999999.0
+    val = key_levels.get("VAL", 0.0) if key_levels else 0.0
+    cpr_tc = key_levels.get("CPR_TC", 999999.0) if key_levels else 999999.0
+    cpr_bc = key_levels.get("CPR_BC", 0.0) if key_levels else 0.0
+
+    # 1. Bearish Absorption at Resistance (Buyers absorbed at VAH / TC)
+    tested_res = high >= vah - 5.0 or high >= cpr_tc - 5.0
+    if tested_res and cvd_delta > 0 and close < open_p and (high - max(close, open_p)) >= 0.40 * (high - low):
+        return {
+            "is_absorption": True,
+            "type": "BEARISH_ABSORPTION",
+            "confidence": 0.88,
+            "reason": "Aggressive buyers absorbed at Resistance (VAH/TC). Large upper wick with positive CVD divergence.",
+            "suggested_sl": round(high + 5.0, 2)
+        }
+
+    # 2. Bullish Absorption at Support (Sellers absorbed at VAL / BC)
+    tested_sup = low <= val + 5.0 or low <= cpr_bc + 5.0
+    if tested_sup and cvd_delta < 0 and close > open_p and (min(close, open_p) - low) >= 0.40 * (high - low):
+        return {
+            "is_absorption": True,
+            "type": "BULLISH_ABSORPTION",
+            "confidence": 0.88,
+            "reason": "Aggressive sellers absorbed at Support (VAL/BC). Large lower wick with negative CVD divergence.",
+            "suggested_sl": round(low - 5.0, 2)
+        }
+
+    return {"is_absorption": False, "type": "NONE", "confidence": 0.0, "reason": "No absorption trap detected"}
 
 
 

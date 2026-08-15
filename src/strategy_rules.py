@@ -8,7 +8,10 @@ import pandas as pd
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA,
     FIB_GOLDEN_MIN, FIB_GOLDEN_MAX, MA_STRETCH_THRESHOLD,
-    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN
+    HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
+    SKEW_ZSCORE_THRESHOLD, GEX_WALL_BUFFER_PTS, VCR_SQUEEZE_THRESHOLD,
+    SIGNAL_MIN_CONFLUENCE, VPIN_TOXICITY_THRESHOLD, STOP_MIN_ATR_FRACTION,
+    STOP_MAX_POINTS, STOP_NOISE_BAND_MULT, GATE_FAIL_TO_WAIT
 )
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
@@ -17,11 +20,23 @@ from src.indicators import (
     compute_cpr, compute_multi_timeframe_regime, detect_stacked_order_flow_imbalances,
     detect_iceberg_orders_and_liquidity_sweeps, compute_dfa_alpha, compute_vpin_toxicity,
     compute_volume_synchronized_gamma_tracker,
-    compute_initial_balance_and_day_type
+    compute_initial_balance_and_day_type,
+    compute_session_cvd, detect_absorption_traps
 )
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher, MultiAssetKalmanCointegrator
 from src.macro_engine import GlobalMacroEngine
 from src.volatility_engine import VolatilityIntelligence
+from src.risk_state import SessionRiskState
+from src.config import (
+    POSITIONING_VETO_STRENGTH,
+    WALL_BUFFER_PTS,
+    PCR_Z_CONTRARIAN_THRESHOLD,
+    POSITIONING_UNVERIFIED_SIZE_CAP,
+    TERM_STRUCTURE_BACKWARDATION_THRESHOLD, TERM_STRUCTURE_CRISIS_SIZE_MULT,
+    IV_RANK_SPREAD_THRESHOLD, IV_RANK_CONVEXITY_THRESHOLD,
+    GEX_WALL_BUFFER_ATR_MULT, VAL_BUFFER_ATR_MULT,
+    GAMMA_SQUEEZE_TARGET_MULT, EXPIRY_PIN_MIN_DISTANCE_PTS
+)
 
 
 
@@ -34,6 +49,15 @@ class SignalType(Enum):
     SHORT_LAAF = "SHORT_LAAF"
     LONG_ORDER_FLOW = "LONG_ORDER_FLOW"
     SHORT_ORDER_FLOW = "SHORT_ORDER_FLOW"
+    RANGE_FADE_LONG = "RANGE_FADE_LONG"
+    RANGE_FADE_SHORT = "RANGE_FADE_SHORT"
+    GAMMA_BREAKOUT_LONG = "GAMMA_BREAKOUT_LONG"
+    GAMMA_BREAKOUT_SHORT = "GAMMA_BREAKOUT_SHORT"
+    EXPIRY_PIN_LONG = "EXPIRY_PIN_LONG"
+    EXPIRY_PIN_SHORT = "EXPIRY_PIN_SHORT"
+    GAMMA_SQUEEZE_LONG = "GAMMA_SQUEEZE_LONG"
+    GAMMA_SQUEEZE_SHORT = "GAMMA_SQUEEZE_SHORT"
+    INTRADAY_0DTE_STRADDLE = "INTRADAY_0DTE_STRADDLE"
 
 @dataclass
 class Signal:
@@ -45,18 +69,42 @@ class Signal:
     target_3_moonshot: float = 0.0
     pyramid_trigger: float = 0.0
     reason: str = ""
-    htf_aligned: bool = True
+    htf_aligned: bool = False
     fib_retracement: float = 0.0
     details: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.details is None:
             self.details = {}
-        if self.target_3_moonshot == 0.0 and self.target_2 > 0:
+        sig_str = self.signal_type.value if hasattr(self.signal_type, "value") else str(self.signal_type)
+        is_short = "SHORT" in sig_str
+        is_long = "LONG" in sig_str
+        is_trade = is_long or is_short
+        if self.target_3_moonshot == 0.0 and self.target_2 > 0 and self.entry_price > 0:
             diff = abs(self.target_2 - self.entry_price)
-            self.target_3_moonshot = round(self.target_2 + (diff * 0.618), 2)
+            if is_short:
+                self.target_3_moonshot = round(min(self.target_2 - (diff * 0.618), self.target_2), 2)
+            else:
+                self.target_3_moonshot = round(max(self.target_2 + (diff * 0.618), self.target_2), 2)
+        elif is_trade and self.target_2 > 0 and self.entry_price > 0:
+            # Guard against an explicitly-passed but inverted moonshot target (T3 must
+            # extend beyond T2 in the trade direction) instead of silently shipping a
+            # nonsensical target ladder to the journal/UI.
+            diff = abs(self.target_2 - self.entry_price)
+            if is_short and self.target_3_moonshot > self.target_2:
+                self.target_3_moonshot = round(self.target_2 - max(diff * 0.618, 1.0), 2)
+            elif is_long and self.target_3_moonshot < self.target_2:
+                self.target_3_moonshot = round(self.target_2 + max(diff * 0.618, 1.0), 2)
         if self.pyramid_trigger == 0.0 and self.entry_price > 0:
-            self.pyramid_trigger = round(self.entry_price + 25.0, 2)
+            if is_short:
+                self.pyramid_trigger = round(self.entry_price - 25.0, 2)
+            else:
+                self.pyramid_trigger = round(self.entry_price + 25.0, 2)
+        if is_trade and self.entry_price > 0 and self.sl_price == self.entry_price:
+            # SL == entry is not a stop; nudge it a minimal safety distance away rather
+            # than shipping a trade ticket with zero effective risk-defined stop.
+            nudge = max(abs(self.entry_price) * 0.001, 5.0)
+            self.sl_price = round(self.entry_price - nudge if is_long else self.entry_price + nudge, 2)
 
     @property
     def stop_loss(self) -> float:
@@ -92,7 +140,7 @@ class Signal:
 
 class StrategyEngine:
     """Vectorized and streaming bar-by-bar JustNifty v3.5 institutional strategy rules evaluator."""
-    def __init__(self):
+    def __init__(self, edge_table: Optional[Any] = None):
         self.kalman_filter = KalmanFilterTrendEstimator()
         self.markov_switcher = MarkovRegimeSwitcher()
         self.macro_engine = GlobalMacroEngine()
@@ -100,6 +148,13 @@ class StrategyEngine:
         self.vol_intelligence = VolatilityIntelligence()
         self.session_losses: int = 0
         self.last_session_date: Optional[Any] = None
+        # Walk-forward OOS edge table. Absent/empty table is permissive by design
+        # (EdgeTable.is_tradeable returns True for unmeasured setups), so trading
+        # behaviour is unchanged until a walk-forward run actually populates it.
+        if edge_table is None:
+            from src.edge_harness import EdgeTable
+            edge_table = EdgeTable.load_from_disk()
+        self.edge_table = edge_table
 
 
 
@@ -114,25 +169,276 @@ class StrategyEngine:
         live_iv: float = DEFAULT_IV,
         live_vix: Optional[float] = None,
         pre_open_gap: Optional[Dict[str, Any]] = None,
-        prev_close: Optional[float] = None
+        prev_close: Optional[float] = None,
+        hfi_score: float = 0.0,
+        option_chain_df: Optional[pd.DataFrame] = None,
+        options_context: Optional[Dict[str, Any]] = None
     ) -> Signal:
         self._last_vol_report = None
         self._last_lunch_lull = False
-        
+        self._last_markov_info = None
+        self._last_options_context = options_context
+
         signal = self._evaluate_bar_core(
             df_5m, current_idx, df_daily, df_hourly, df_15m, df_1h,
-            live_iv, live_vix, pre_open_gap, prev_close
+            live_iv, live_vix, pre_open_gap, prev_close,
+            hfi_score=hfi_score, option_chain_df=option_chain_df,
+            options_context=options_context
         )
-        
+
+        if signal.details is None:
+            signal.details = {}
+
         if getattr(self, '_last_vol_report', None) is not None:
-            if signal.details is None:
-                signal.details = {}
             signal.details['vol_report'] = self._last_vol_report
+
+        # Stamp the active regime onto EVERY signal, not just the fall-through WAIT.
+        # The walk-forward harness buckets edge stats by (setup_id, regime) and the live
+        # edge gate looks trades up by the same key — if trade signals carry no regime the
+        # two disagree, every lookup misses, and the quarantine gate silently never fires.
+        if "markov_regime" not in signal.details:
+            signal.details["markov_regime"] = self._last_markov_info or {"active_regime": "UNKNOWN"}
+
+        if options_context is not None:
+            signal.details['options_context'] = options_context
             
         if getattr(self, '_last_lunch_lull', False) and signal.signal_type != SignalType.WAIT:
             signal.reason += " [LUNCH LULL: Reduced confidence, halved sizing recommended]"
             
         return signal
+
+    def _apply_universal_gates(
+        self,
+        candidate_direction: str,
+        close: float,
+        skew_info: Dict[str, Any],
+        vpin_info: Dict[str, Any],
+        hfi_score: float,
+        gex_info: Dict[str, Any],
+        htf_regime: Dict[str, Any],
+        session_risk_state: Optional[SessionRiskState] = None,
+        current_bar_idx: int = 0,
+        options_context: Optional[Dict[str, Any]] = None,
+        candidate_signal_type: Optional[str] = None
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        audit = {
+            "vpin": vpin_info.get("vpin", 0.0),
+            "skew_zscore": skew_info.get("skew_zscore", 0.0),
+            "hfi_score": hfi_score,
+            "gex_regime": gex_info.get("is_positive_gamma", True),
+            "htf_aligned_long": htf_regime.get("htf_aligned_long", False),
+            "htf_aligned_short": htf_regime.get("htf_aligned_short", False),
+            "signal_type": candidate_signal_type or "",
+            "passed": True,
+            "veto_gate": None
+        }
+
+        # 1. VPIN Flow Toxicity Veto
+        vpin_val = float(vpin_info.get("vpin", 0.0))
+        if vpin_val > VPIN_TOXICITY_THRESHOLD:
+            audit["passed"] = False
+            audit["veto_gate"] = "VPIN_TOXICITY"
+            return False, f"VPIN Flow Toxicity Veto: Toxic order flow detected (VPIN={vpin_val:.2f} > {VPIN_TOXICITY_THRESHOLD}). Entries blocked.", audit
+
+        # 2. 25-Delta Put Skew Crash Veto
+        if candidate_direction == "LONG" and skew_info.get("is_crash_hedging", False):
+            audit["passed"] = False
+            audit["veto_gate"] = "SKEW_CRASH_HEDGING"
+            return False, f"25-Delta Put Skew Crash Gate: Long blocked. Put Skew spiked (Z={skew_info.get('skew_zscore', 0):+.2f}) indicating crash hedging.", audit
+
+        # 3. Heavyweight Flow Index (HFI) Alignment Veto
+        if candidate_direction == "LONG" and hfi_score < -0.20:
+            audit["passed"] = False
+            audit["veto_gate"] = "HFI_BEARISH_DIVERGENCE"
+            return False, f"Heavyweight Flow Veto: Long blocked. Top-5 Heavyweights are net negative (HFI={hfi_score:+.2f}).", audit
+        elif candidate_direction == "SHORT" and hfi_score > 0.20:
+            audit["passed"] = False
+            audit["veto_gate"] = "HFI_BULLISH_DIVERGENCE"
+            return False, f"Heavyweight Flow Veto: Short blocked. Top-5 Heavyweights are net positive (HFI={hfi_score:+.2f}).", audit
+
+        # 4. Dealer GEX Wall Pinning Defense
+        if gex_info.get("is_positive_gamma", False):
+            call_wall = float(gex_info.get("call_wall_strike", 999999.0))
+            put_wall = float(gex_info.get("put_wall_strike", 0.0))
+            if candidate_direction == "LONG" and close >= call_wall - GEX_WALL_BUFFER_PTS:
+                audit["passed"] = False
+                audit["veto_gate"] = "GEX_CALL_WALL_PIN"
+                return False, f"Dealer GEX Pin Veto: Long blocked. Spot at Call Wall ({call_wall:.0f}) in Positive Gamma regime.", audit
+            elif candidate_direction == "SHORT" and close <= put_wall + GEX_WALL_BUFFER_PTS:
+                audit["passed"] = False
+                audit["veto_gate"] = "GEX_PUT_WALL_PIN"
+                return False, f"Dealer GEX Pin Veto: Short blocked. Spot at Put Wall ({put_wall:.0f}) in Positive Gamma regime.", audit
+
+        # 5. Higher Timeframe Alignment Veto
+        if candidate_direction == "LONG" and not htf_regime.get("htf_aligned_long", False):
+            audit["passed"] = False
+            audit["veto_gate"] = "HTF_NOT_ALIGNED_LONG"
+            return False, f"HTF Confluence Veto: Long not supported by 15m ({htf_regime.get('tf_15m', {}).get('bias')}) / 1H ({htf_regime.get('tf_1h', {}).get('bias')}).", audit
+        elif candidate_direction == "SHORT" and not htf_regime.get("htf_aligned_short", False):
+            audit["passed"] = False
+            audit["veto_gate"] = "HTF_NOT_ALIGNED_SHORT"
+            return False, f"HTF Confluence Veto: Short not supported by 15m ({htf_regime.get('tf_15m', {}).get('bias')}) / 1H ({htf_regime.get('tf_1h', {}).get('bias')}).", audit
+
+        # 6. Positioning Flow Direction Veto
+        if options_context and options_context.get("dir_flow"):
+            d_vec = float(options_context["dir_flow"].get("directional_vector", 0.0))
+            if candidate_direction == "LONG" and d_vec <= -POSITIONING_VETO_STRENGTH:
+                audit["passed"] = False
+                audit["veto_gate"] = "POSITIONING_OPPOSES_CHART"
+                return False, f"Positioning Veto: Long blocked. Bearish options flow (D={d_vec:+.2f}).", audit
+            elif candidate_direction == "SHORT" and d_vec >= POSITIONING_VETO_STRENGTH:
+                audit["passed"] = False
+                audit["veto_gate"] = "POSITIONING_OPPOSES_CHART"
+                return False, f"Positioning Veto: Short blocked. Bullish options flow (D={d_vec:+.2f}).", audit
+
+        # 7. Session Risk Rails
+        if session_risk_state:
+            can_trade, reason = session_risk_state.can_take_new_trade(current_bar_idx)
+            if not can_trade:
+                audit["passed"] = False
+                audit["veto_gate"] = "SESSION_RISK_LIMIT"
+                return False, f"Session Risk Gate: {reason}", audit
+
+        # 8. Term Structure Inversion Crisis Gate (IMP-4)
+        if options_context and options_context.get("vol_report"):
+            vol_r = options_context["vol_report"]
+            ts_regime = vol_r.get("term_structure_regime", {})
+            if isinstance(ts_regime, dict) and ts_regime.get("is_crisis", False):
+                if candidate_direction == "LONG":
+                    audit["passed"] = False
+                    audit["veto_gate"] = "TERM_STRUCTURE_CRISIS"
+                    return False, f"Term Structure Crisis Gate: Long blocked. IV backwardation detected (slope={ts_regime.get('slope', 0):.4f}). Risk-off mode.", audit
+
+        # 9. Gamma Flip Level Regime Gate (IMP-3)
+        if not gex_info.get("is_positive_gamma", True):
+            # In -Gamma regime, block range fade strategies (dealers will amplify the move)
+            sig_name = str(audit.get("signal_type", ""))
+            if "RANGE_FADE" in sig_name:
+                audit["passed"] = False
+                audit["veto_gate"] = "GAMMA_REGIME_BLOCKS_FADE"
+                return False, f"Gamma Regime Gate: Range Fade blocked in -Γ expansion regime. Use momentum strategies instead.", audit
+
+        # 10. Smart Money Institutional Flow Score Veto
+        if options_context:
+            inst_flow = options_context.get("inst_flow") or options_context.get("flow_score_data")
+            flow_val = None
+            if isinstance(inst_flow, dict):
+                flow_val = inst_flow.get("flow_score")
+            elif "flow_score" in options_context:
+                flow_val = options_context["flow_score"]
+
+            if flow_val is not None:
+                audit["flow_score"] = float(flow_val)
+                if candidate_direction == "LONG" and float(flow_val) < 30.0:
+                    audit["passed"] = False
+                    audit["veto_gate"] = "INSTITUTIONAL_FLOW_BEARISH_VETO"
+                    return False, f"Institutional Flow Veto: Long blocked. Smart Money flow is net bearish (Flow Score={float(flow_val):.1f} < 30).", audit
+                elif candidate_direction == "SHORT" and float(flow_val) > 70.0:
+                    audit["passed"] = False
+                    audit["veto_gate"] = "INSTITUTIONAL_FLOW_BULLISH_VETO"
+                    return False, f"Institutional Flow Veto: Short blocked. Smart Money flow is net bullish (Flow Score={float(flow_val):.1f} > 70).", audit
+
+        # 11. Variance Risk Premium (VRP) Backwardation Veto
+        if options_context:
+            vrp_data = options_context.get("vrp_data") or options_context.get("vrp_info")
+            vrp_val = None
+            if isinstance(vrp_data, dict):
+                vrp_val = vrp_data.get("vrp")
+            elif "vrp" in options_context:
+                vrp_val = options_context["vrp"]
+
+            if vrp_val is not None:
+                audit["vrp"] = float(vrp_val)
+                sig_name = str(audit.get("signal_type", ""))
+                if ("RANGE_FADE" in sig_name or "STRADDLE" in sig_name) and float(vrp_val) < -0.02:
+                    audit["passed"] = False
+                    audit["veto_gate"] = "VRP_BACKWARDATION_VETO"
+                    return False, f"Variance Risk Premium Gate: Short premium blocked. Negative VRP (IV in backwardation relative to Realized Vol, VRP={float(vrp_val):+.3f}).", audit
+
+        return True, "PASSED", audit
+
+    def _finalize_candidate(
+        self,
+        candidate_sig: Signal,
+        sub_df: pd.DataFrame,
+        htf_regime: Dict[str, Any],
+        kalman_vel: float,
+        kalman_z: float,
+        markov_info: Dict[str, Any],
+        ofi_info: Dict[str, Any],
+        gex_info: Dict[str, Any],
+        vp_info: Dict[str, Any],
+        atr_14: float,
+        gate_audit: Dict[str, Any]
+    ) -> Signal:
+        sig_str = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
+        is_long = "LONG" in sig_str
+        is_short = "SHORT" in sig_str
+
+        # 1. Stop Loss & Target Hygiene
+        if is_long or is_short:
+            sl_dist = abs(candidate_sig.entry_price - candidate_sig.sl_price)
+            min_sl = max(STOP_MIN_ATR_FRACTION * atr_14, 15.0)
+            max_sl = STOP_MAX_POINTS
+            
+            if sl_dist < min_sl:
+                candidate_sig.sl_price = round(candidate_sig.entry_price - min_sl if is_long else candidate_sig.entry_price + min_sl, 2)
+            elif sl_dist > max_sl:
+                candidate_sig.sl_price = round(candidate_sig.entry_price - max_sl if is_long else candidate_sig.entry_price + max_sl, 2)
+
+            # Ensure proper target ladder
+            if is_long:
+                if candidate_sig.target_1 <= candidate_sig.entry_price:
+                    candidate_sig.target_1 = round(candidate_sig.entry_price + 1.2 * atr_14, 2)
+                if candidate_sig.target_2 <= candidate_sig.target_1:
+                    candidate_sig.target_2 = round(candidate_sig.target_1 + 1.3 * atr_14, 2)
+                if candidate_sig.target_3_moonshot <= candidate_sig.target_2:
+                    candidate_sig.target_3_moonshot = round(candidate_sig.target_2 + 1.5 * atr_14, 2)
+            elif is_short:
+                if candidate_sig.target_1 >= candidate_sig.entry_price:
+                    candidate_sig.target_1 = round(candidate_sig.entry_price - 1.2 * atr_14, 2)
+                if candidate_sig.target_2 >= candidate_sig.target_1:
+                    candidate_sig.target_2 = round(candidate_sig.target_1 - 1.3 * atr_14, 2)
+                if candidate_sig.target_3_moonshot >= candidate_sig.target_2:
+                    candidate_sig.target_3_moonshot = round(candidate_sig.target_2 - 1.5 * atr_14, 2)
+
+        # 2. Pre-Decision Confluence Score
+        from src.signal_journal import calculate_confluence_score
+        score, grade = calculate_confluence_score(
+            candidate_sig,
+            sub_df,
+            htf_data=htf_regime,
+            kalman_vel=kalman_vel,
+            kalman_z=kalman_z,
+            regime_state=markov_info,
+            ofi_data=ofi_info,
+            gex_data=gex_info,
+            vol_profile=vp_info
+        )
+
+        if candidate_sig.details is None:
+            candidate_sig.details = {}
+        candidate_sig.details["confluence_score"] = score
+        candidate_sig.details["confluence_grade"] = grade
+        candidate_sig.details["gate_audit"] = gate_audit
+
+        # 3. Confluence Score Veto (Floor check)
+        if score < SIGNAL_MIN_CONFLUENCE and (is_long or is_short):
+            return Signal(
+                signal_type=SignalType.WAIT,
+                entry_price=candidate_sig.entry_price,
+                sl_price=0.0,
+                target_1=0.0,
+                target_2=0.0,
+                target_3_moonshot=0.0,
+                pyramid_trigger=0.0,
+                reason=f"Confluence Veto: Score {score:.1f} < {SIGNAL_MIN_CONFLUENCE:.1f} ({grade}). Setup rejected for insufficient confluence.",
+                htf_aligned=candidate_sig.htf_aligned,
+                fib_retracement=candidate_sig.fib_retracement,
+                details=candidate_sig.details
+            )
+
+        return candidate_sig
 
     def _evaluate_bar_core(
         self,
@@ -145,7 +451,10 @@ class StrategyEngine:
         live_iv: float = DEFAULT_IV,
         live_vix: Optional[float] = None,
         pre_open_gap: Optional[Dict[str, Any]] = None,
-        prev_close: Optional[float] = None
+        prev_close: Optional[float] = None,
+        hfi_score: float = 0.0,
+        option_chain_df: Optional[pd.DataFrame] = None,
+        options_context: Optional[Dict[str, Any]] = None
     ) -> Signal:
         """
         Evaluates OnlyNifty v3.3 Institutional Multi-Timeframe Alignment and Stacked Footprint Setups:
@@ -184,42 +493,50 @@ class StrategyEngine:
                 details={"bar_time": bar_time}
             )
 
-        # 2. 3:00 PM (15:00) Aggressive Breakout Strategy Check
+        # 2. 3:00 PM (15:00) Hardened Breakout Strategy (v5.3: Volume + GEX + Auto-Squareoff protection)
         if bar_time in ["15:05", "15:10"]:
-            three_pm_indices = [
-                i for i, idx in enumerate(df_5m.index[:current_idx + 1])
-                if hasattr(idx, "strftime") and idx.strftime("%H:%M") == "15:00"
-            ]
-            if three_pm_indices:
-                candle_3pm = df_5m.iloc[three_pm_indices[-1]]
-                if close > float(candle_3pm["high"]):
-                    return Signal(
-                        signal_type=SignalType.LONG_3PM,
-                        entry_price=close,
-                        sl_price=float(candle_3pm["low"]),
-                        target_1=round(close + 40.0, 2),
-                        target_2=round(close + 75.0, 2),
-                        target_3_moonshot=round(close + 120.0, 2),
-                        pyramid_trigger=round(float(candle_3pm["high"]) + 10.0, 2),
-                        reason="3 PM Strategy: Bullish breakout above 15:00 candle High. Institutional MOC gamma squeeze expected.",
-                        htf_aligned=True,
-                        fib_retracement=0.0,
-                        details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"])}
-                    )
-                elif close < float(candle_3pm["low"]):
-                    return Signal(
-                        signal_type=SignalType.SHORT_3PM,
-                        entry_price=close,
-                        sl_price=float(candle_3pm["high"]),
-                        target_1=round(close - 40.0, 2),
-                        target_2=round(close - 75.0, 2),
-                        target_3_moonshot=round(close - 120.0, 2),
-                        pyramid_trigger=round(float(candle_3pm["low"]) - 10.0, 2),
-                        reason="3 PM Strategy: Bearish breakdown below 15:00 candle Low. Institutional MOC gamma squeeze expected.",
-                        htf_aligned=True,
-                        fib_retracement=0.0,
-                        details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"])}
-                    )
+            # IMP-7: Skip 3PM strategy on expiry days (gamma explosion risk)
+            is_expiry_day = options_context.get("is_expiry_day", False) if options_context else False
+            if not is_expiry_day:
+                three_pm_indices = [
+                    i for i, idx in enumerate(df_5m.index[:current_idx + 1])
+                    if hasattr(idx, "strftime") and idx.strftime("%H:%M") == "15:00"
+                ]
+                if three_pm_indices:
+                    candle_3pm = df_5m.iloc[three_pm_indices[-1]]
+                    # Volume confirmation: require > 1.5x session average
+                    avg_vol_3pm = float(sub_df['volume'].mean()) if 'volume' in sub_df.columns else 0.0
+                    curr_vol_3pm = float(bar.get('volume', 0))
+                    volume_confirmed = curr_vol_3pm > 1.5 * avg_vol_3pm if avg_vol_3pm > 0 else True
+                    
+                    if volume_confirmed and close > float(candle_3pm["high"]):
+                        return Signal(
+                            signal_type=SignalType.LONG_3PM,
+                            entry_price=close,
+                            sl_price=float(candle_3pm["low"]),
+                            target_1=round(close + 40.0, 2),
+                            target_2=round(close + 75.0, 2),
+                            target_3_moonshot=round(close + 120.0, 2),
+                            pyramid_trigger=round(float(candle_3pm["high"]) + 10.0, 2),
+                            reason="3 PM Strategy (Hardened): Bullish breakout above 15:00 candle High. Volume confirmed. Exit before 15:15.",
+                            htf_aligned=True,
+                            fib_retracement=0.0,
+                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
+                        )
+                    elif volume_confirmed and close < float(candle_3pm["low"]):
+                        return Signal(
+                            signal_type=SignalType.SHORT_3PM,
+                            entry_price=close,
+                            sl_price=float(candle_3pm["high"]),
+                            target_1=round(close - 40.0, 2),
+                            target_2=round(close - 75.0, 2),
+                            target_3_moonshot=round(close - 120.0, 2),
+                            pyramid_trigger=round(float(candle_3pm["low"]) - 10.0, 2),
+                            reason="3 PM Strategy (Hardened): Bearish breakdown below 15:00 candle Low. Volume confirmed. Exit before 15:15.",
+                            htf_aligned=True,
+                            fib_retracement=0.0,
+                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
+                        )
 
         if len(sub_df) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
@@ -240,7 +557,20 @@ class StrategyEngine:
         
         hurst_info = compute_hurst_exponent(sub_df["close"])
         ofi_info = compute_order_flow_imbalance(sub_df)
-        gex_info = compute_dealer_gex(close)
+
+        if options_context and options_context.get("gex_chart"):
+            g = options_context["gex_chart"]
+            gex_info = {
+                "call_wall_strike": float(g.get("call_wall_strike", 999999.0)),
+                "put_wall_strike": float(g.get("put_wall_strike", 0.0)),
+                "zero_gex_strike": float(g.get("zero_gex_strike", close)),
+                "is_positive_gamma": str(g.get("net_dealer_regime", "")).startswith("POSITIVE") or str(g.get("net_dealer_regime", "")).startswith("DEALER_LONG"),
+                "walls_verified": True
+            }
+        else:
+            gex_info = compute_dealer_gex(close)
+            gex_info["walls_verified"] = False
+
         vp_info = compute_volume_profile(sub_df)
         gap_info = compute_pre_open_gap_filter(sub_df, prev_close=prev_close, pre_open_data=pre_open_gap)
         cpr_info = compute_cpr(df_daily if df_daily is not None else sub_df)
@@ -248,6 +578,7 @@ class StrategyEngine:
         # Latent Kalman Spot Velocity, Markov Regime Model & Cointegration
         kalman_price, kalman_vel, kalman_z = self.kalman_filter.update(close)
         markov_info = self.markov_switcher.infer_regimes(sub_df)
+        self._last_markov_info = markov_info
         dfa_info = compute_dfa_alpha(sub_df["close"])
         vpin_info = compute_vpin_toxicity(sub_df)
         cointegration = self.cointegrator.evaluate_spread_divergence(sub_df["close"])
@@ -262,6 +593,11 @@ class StrategyEngine:
         intraday_quality = vol_report['intraday_quality']
         self._last_vol_report = vol_report
 
+        # 25-Delta Put-Call Skew & VCR Squeeze (v5.2)
+        chain_for_skew = options_context.get("chain_df") if options_context else option_chain_df
+        skew_info = self.vol_intelligence.compute_25delta_skew(chain_for_skew, spot=close, iv_baseline=live_iv)
+        skew_info["data_quality"] = "VERIFIED" if (chain_for_skew is not None and not chain_for_skew.empty) else "SYNTHETIC"
+        vcr_info = self.vol_intelligence.compute_vcr_squeeze(sub_df['close'])
         
         ema200 = float(ema200_series.iloc[-1])
         ema55 = float(ema55_series.iloc[-1])
@@ -298,17 +634,102 @@ class StrategyEngine:
         }
         order_flow = detect_stacked_order_flow_imbalances(sub_df, key_levels=key_levels)
         microstructure = detect_iceberg_orders_and_liquidity_sweeps(sub_df)
+        absorption_trap = detect_absorption_traps(sub_df, key_levels=key_levels)
         
         # Realized Volatility / Implied Volatility Ratio
         log_rets = np.diff(np.log(np.maximum(sub_df["close"].tail(30).values, 1.0)))
         realized_vol = float(np.std(log_rets, ddof=1) * np.sqrt(252 * 75)) if len(log_rets) > 5 else live_iv
         vol_ratio = round(realized_vol / max(live_iv, 0.05), 2)
 
+        # Define internal candidate gate check and pre-decision finalizer
+        def _check_and_return(direction: str, candidate_sig: Signal) -> Signal:
+            gate_ok, gate_msg, audit = self._apply_universal_gates(
+                direction, close, skew_info, vpin_info, hfi_score, gex_info, htf_regime,
+                current_bar_idx=current_idx, options_context=options_context,
+                candidate_signal_type=candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
+            )
+            if not gate_ok:
+                return Signal(
+                    SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    gate_msg, False, 0.0, audit
+                )
+
+            setup_id = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
+            active_regime = markov_info.get("active_regime", "UNKNOWN")
+
+            # Walk-forward OOS edge gate: quarantined (measured negative-EV) setups
+            # are blocked in the regimes where they lost money.
+            if self.edge_table is not None and not self.edge_table.is_tradeable(setup_id, active_regime):
+                audit["passed"] = False
+                audit["veto_gate"] = "EDGE_TABLE_QUARANTINED"
+                return Signal(
+                    SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    f"Edge Table Veto: '{setup_id}' is QUARANTINED in {active_regime} regime (measured negative out-of-sample EV).",
+                    False, 0.0, audit
+                )
+
+            candidate_sig.htf_aligned = htf_aligned_long if direction == "LONG" else htf_aligned_short
+
+            # Sizing factors: VCR squeeze & Unverified Positioning cap
+            if candidate_sig.details is None: candidate_sig.details = {}
+            if option_chain_df is not None and not option_chain_df.empty:
+                candidate_sig.details["option_chain_available"] = True
+            if vcr_info.get("vcr_ratio", 1.0) < VCR_SQUEEZE_THRESHOLD:
+                candidate_sig.details["size_factor"] = 0.5
+            if self.edge_table is not None:
+                edge_stats = self.edge_table.lookup(setup_id, active_regime)
+                # Only let the edge table scale size once it has actually measured this
+                # setup. An unmeasured setup keeps its existing size rather than being
+                # silently halved, so an empty edge table is a no-op on live sizing.
+                if edge_stats is not None:
+                    edge_size = self.edge_table.get_sizing_factor(setup_id, active_regime)
+                    candidate_sig.details["size_factor"] = min(candidate_sig.details.get("size_factor", 1.0), edge_size)
+                candidate_sig.details["edge_status"] = getattr(edge_stats, "status", "UNMEASURED")
+            if skew_info.get("data_quality") == "SYNTHETIC" or not gex_info.get("walls_verified", False):
+                candidate_sig.details["size_factor"] = min(candidate_sig.details.get("size_factor", 1.0), POSITIONING_UNVERIFIED_SIZE_CAP)
+                audit["data_quality"] = "POSITIONING_UNVERIFIED"
+
+            return self._finalize_candidate(
+                candidate_sig, sub_df, htf_regime, kalman_vel, kalman_z,
+                markov_info, ofi_info, gex_info, vp_info, atr_14, audit
+            )
+
+        # 4.05 Passive Institutional Limit Absorption Trap Strategy (v5.2)
+        if absorption_trap["is_absorption"]:
+            if absorption_trap["type"] == "BULLISH_ABSORPTION" and (close > bar_open or ofi_info["buyer_defense"]):
+                return _check_and_return("LONG", Signal(
+                    signal_type=SignalType.LONG_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=absorption_trap["suggested_sl"],
+                    target_1=round(close + 1.2 * atr_14, 2),
+                    target_2=round(close + 2.5 * atr_14, 2),
+                    target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
+                    pyramid_trigger=round(close + 15.0, 2),
+                    reason=f"Institutional Support Absorption: {absorption_trap['reason']}",
+                    htf_aligned=htf_aligned_long,
+                    fib_retracement=0.50,
+                    details={"absorption": absorption_trap, "skew": skew_info, "vcr": vcr_info, "order_flow": order_flow}
+                ))
+            elif absorption_trap["type"] == "BEARISH_ABSORPTION" and (close < bar_open or ofi_info["seller_defense"]):
+                return _check_and_return("SHORT", Signal(
+                    signal_type=SignalType.SHORT_ORDER_FLOW,
+                    entry_price=close,
+                    sl_price=absorption_trap["suggested_sl"],
+                    target_1=round(close - 1.2 * atr_14, 2),
+                    target_2=round(close - 2.5 * atr_14, 2),
+                    target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
+                    pyramid_trigger=round(close - 15.0, 2),
+                    reason=f"Institutional Resistance Absorption: {absorption_trap['reason']}",
+                    htf_aligned=htf_aligned_short,
+                    fib_retracement=0.50,
+                    details={"absorption": absorption_trap, "skew": skew_info, "vcr": vcr_info, "order_flow": order_flow}
+                ))
+
         # 4.1 Liquidity Sweep Trap Strategy (SSL / BSL Purges)
         if microstructure["liquidity_sweep_detected"] and microstructure["sweep_event"]:
             sw = microstructure["sweep_event"]
             if sw["side"] == "LONG" and (close > bar_open or close > prev_close_val or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
                     sl_price=sw["suggested_sl"],
@@ -317,12 +738,12 @@ class StrategyEngine:
                     target_3_moonshot=round(close + 4.0 * atr_14, 2),
                     pyramid_trigger=round(sw["swept_swing_low"] + 15.0, 2),
                     reason=f"Bullish SSL Liquidity Sweep Trap: {sw['thesis']} | Institutional Absorption Reversal.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
-                )
+                ))
             elif sw["side"] == "SHORT" and (close < bar_open or close < prev_close_val or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
                     sl_price=sw["suggested_sl"],
@@ -331,48 +752,47 @@ class StrategyEngine:
                     target_3_moonshot=round(close - 4.0 * atr_14, 2),
                     pyramid_trigger=round(sw["swept_swing_high"] - 15.0, 2),
                     reason=f"Bearish BSL Liquidity Sweep Trap: {sw['thesis']} | Institutional Distribution Reversal.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
-                )
+                ))
 
-        
         # 4.2 Mean-Reversion Strategy (Active in MEAN_REVERTING_CHOP regime)
         if markov_info['active_regime'] == 'MEAN_REVERTING_CHOP':
-            # LONG
-            if close <= vp_info.get('val', 0) + 5.0 and close > ema200 and ofi_info['buyer_defense'] and close > bar_open:
-                return Signal(
+            # LONG: price at or near VAL with buyer defense confirmation
+            if close <= vp_info.get('val', 0) + VAL_BUFFER_ATR_MULT * atr_14 and ofi_info['buyer_defense'] and (close > bar_open or close > lower_2sd):
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=round(close - 0.8 * atr_14, 2),
                     target_1=round(vp_info.get('poc', close + 20), 2),
                     target_2=round(vp_info.get('vah', close + 40), 2),
                     reason="Mean-Reversion Long: Price at VAL in Choppy Regime. OFI confirms buyer defense. Quick scalp to POC.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     details={}
-                )
-            # SHORT
-            if close >= vp_info.get('vah', 99999) - 5.0 and close < ema200 and ofi_info['seller_defense'] and close < bar_open:
-                return Signal(
+                ))
+            # SHORT: price at or near VAH with seller defense confirmation
+            if close >= vp_info.get('vah', 99999) - VAL_BUFFER_ATR_MULT * atr_14 and ofi_info['seller_defense'] and (close < bar_open or close < upper_2sd):
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=round(close + 0.8 * atr_14, 2),
                     target_1=round(vp_info.get('poc', close - 20), 2),
                     target_2=round(vp_info.get('val', close - 40), 2),
                     reason="Mean-Reversion Short: Price at VAH in Choppy Regime. OFI confirms seller defense. Quick scalp to POC.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     details={}
-                )
+                ))
 
-        # 4.3 IB Breakout Strategy (Active in LOW_VOL_TRENDING regime after 10:15 IST)
-        if markov_info['active_regime'] == 'LOW_VOL_TRENDING' and bar_time >= '10:15':
+        # 4.3 IB Breakout Strategy (Active in trending / high vol expansion regimes after 10:15 IST)
+        if markov_info['active_regime'] in ['LOW_VOL_TRENDING', 'HIGH_VOL_EXPANSION'] and bar_time >= '10:15':
             ib_state = compute_initial_balance_and_day_type(sub_df)
             avg_vol = float(sub_df['volume'].tail(10).mean()) if 'volume' in sub_df.columns else 0.0
             curr_vol = float(bar.get('volume', 0))
             
             # LONG
             if close > ib_state.get('ib_high', 99999) and htf_aligned_long and curr_vol > avg_vol:
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=ib_state.get('ib_low', close - atr_14),
@@ -381,12 +801,12 @@ class StrategyEngine:
                     target_3_moonshot=round(close + 5.0 * atr_14, 2),
                     pyramid_trigger=round(close + 1.0 * atr_14, 2),
                     reason="IB Breakout Long: Price cleared Initial Balance High in Trending Regime. HTF aligned. Volume confirmed.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     details={'ib_state': ib_state}
-                )
+                ))
             # SHORT
             if close < ib_state.get('ib_low', 0) and htf_aligned_short and curr_vol > avg_vol:
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=ib_state.get('ib_high', close + atr_14),
@@ -395,15 +815,15 @@ class StrategyEngine:
                     target_3_moonshot=round(close - 5.0 * atr_14, 2),
                     pyramid_trigger=round(close - 1.0 * atr_14, 2),
                     reason="IB Breakdown Short: Price broke Initial Balance Low in Trending Regime. HTF aligned. Volume confirmed.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     details={'ib_state': ib_state}
-                )
+                ))
 
         # 5. Auction Market Theory (AMT) Value Area Trigger Check
         amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)
         if amt_trigger["trigger"] in ["VAH_REJECTION", "VAL_REJECTION"] and amt_trigger["confidence"] >= 0.85:
             if amt_trigger["side"] == "LONG" and (close >= vp_info.get("val", 0.0) or close > ema55):
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=amt_trigger["sl"],
@@ -412,12 +832,12 @@ class StrategyEngine:
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) + 5.0, 2),
                     reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | Value Area Defense ({htf_regime['confluence_regime']}).",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
-                )
+                ))
             elif amt_trigger["side"] == "SHORT" and (close <= vp_info.get("vah", 999999.0) or close < ema55):
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=amt_trigger["sl"],
@@ -426,10 +846,10 @@ class StrategyEngine:
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(vp_info.get("poc", close) - 5.0, 2),
                     reason=f"AMT Setup Confirmed: {amt_trigger['reason']} | Value Area Defense ({htf_regime['confluence_regime']}).",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
-                )
+                ))
 
         # 5.1 Institutional Support Reclaim & Mean-Reversion Spring (V-Reversal Setup)
         lowest_recent = float(sub_df["low"].tail(6).min())
@@ -438,7 +858,7 @@ class StrategyEngine:
            close > current_vwap and close > ema21 and ofi_info["buyer_defense"] and (close > bar_open or close > prev_close_val):
             sl_lvl = round(lowest_recent - 5.0, 2)
             if abs(close - sl_lvl) <= 45.0:
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=sl_lvl,
@@ -447,10 +867,10 @@ class StrategyEngine:
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(current_vwap + 15.0, 2),
                     reason="Institutional Spring Reclaim: Sub-AVWAP probe rejected + 21 EMA / AVWAP Reclaimed with Buyer Delta Absorption.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     fib_retracement=0.50,
                     details={"spring_low": lowest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
-                )
+                ))
 
         highest_recent = float(sub_df["high"].tail(6).max())
         vah_lvl = float(vp_info.get("vah", 999999.0))
@@ -458,7 +878,7 @@ class StrategyEngine:
            close < current_vwap and close < ema21 and ofi_info["seller_defense"] and (close < bar_open or close < prev_close_val):
             sl_lvl = round(highest_recent + 5.0, 2)
             if abs(sl_lvl - close) <= 45.0:
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=sl_lvl,
@@ -467,16 +887,16 @@ class StrategyEngine:
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(current_vwap - 15.0, 2),
                     reason="Institutional Distribution Thrust: Above-AVWAP probe rejected + 21 EMA / AVWAP Breakdown with Seller Delta Distribution.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     fib_retracement=0.50,
                     details={"thrust_high": highest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
-                )
+                ))
 
         # 6. Stacked Order Flow Absorption & Footprint Imbalance Setups
         if order_flow["absorption_event"] is not None:
             abs_event = order_flow["absorption_event"]
             if abs_event["type"] == "BUYER_ABSORPTION" and (close > bar_open or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
                     sl_price=abs_event["suggested_sl"],
@@ -485,12 +905,12 @@ class StrategyEngine:
                     target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                     pyramid_trigger=round(close + 15.0, 2),
                     reason=f"Order Flow Buyer Absorption: {abs_event['reason']} | Key Level Defense.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
-                )
+                ))
             elif abs_event["type"] == "SELLER_ABSORPTION" and (close < bar_open or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
                     sl_price=abs_event["suggested_sl"],
@@ -499,14 +919,14 @@ class StrategyEngine:
                     target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                     pyramid_trigger=round(close - 15.0, 2),
                     reason=f"Order Flow Seller Absorption: {abs_event['reason']} | Key Level Defense.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
-                )
+                ))
 
         # 6.1 Stacked Aggressive Delta Imbalance (3+ Bars Cumulative Delta Momentum)
         if order_flow.get("has_stacked_buy") and (close > ema21 or ofi_info["buyer_defense"]):
-            return Signal(
+            return _check_and_return("LONG", Signal(
                 signal_type=SignalType.LONG_ORDER_FLOW,
                 entry_price=close,
                 sl_price=round(order_flow["stacked_support_zone"][0] - 5.0, 2) if order_flow["stacked_support_zone"] else round(close - 1.0 * atr_14, 2),
@@ -515,12 +935,12 @@ class StrategyEngine:
                 target_3_moonshot=round(max(upper_vakc_val, upper_2sd), 2),
                 pyramid_trigger=round(close + 15.0, 2),
                 reason=f"Stacked Buying Imbalance: {order_flow['stacked_buy_count']} consecutive aggressive buy bars | Shelf Support @ {order_flow.get('stacked_support_zone')}.",
-                htf_aligned=True,
+                htf_aligned=htf_aligned_long,
                 fib_retracement=0.50,
                 details={"order_flow": order_flow, "htf_regime": htf_regime}
-            )
+            ))
         elif order_flow.get("has_stacked_sell") and (close < ema21 or ofi_info["seller_defense"]):
-            return Signal(
+            return _check_and_return("SHORT", Signal(
                 signal_type=SignalType.SHORT_ORDER_FLOW,
                 entry_price=close,
                 sl_price=round(order_flow["stacked_resistance_zone"][1] + 5.0, 2) if order_flow["stacked_resistance_zone"] else round(close + 1.0 * atr_14, 2),
@@ -529,10 +949,10 @@ class StrategyEngine:
                 target_3_moonshot=round(min(lower_vakc_val, lower_2sd), 2),
                 pyramid_trigger=round(close - 15.0, 2),
                 reason=f"Stacked Selling Imbalance: {order_flow['stacked_sell_count']} consecutive aggressive sell bars | Shelf Resistance @ {order_flow.get('stacked_resistance_zone')}.",
-                htf_aligned=True,
+                htf_aligned=htf_aligned_short,
                 fib_retracement=0.50,
                 details={"order_flow": order_flow, "htf_regime": htf_regime}
-            )
+            ))
 
         # 7. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
         dist_to_ema21 = abs(close - ema21) / close
@@ -572,18 +992,6 @@ class StrategyEngine:
         long_avwap_cond = close > (current_vwap - 0.35 * (upper_2sd - current_vwap) / 2.0)
         is_trending_flow = hurst_info.get("hurst", 0.50) >= HURST_TRENDING_MIN or hurst_info.get("is_trending", True)
         if close > ema200 and long_avwap_cond and swing_range >= 35.0 and ofi_info["buyer_defense"] and is_trending_flow:
-            if not htf_aligned_long:
-                return Signal(
-                    signal_type=SignalType.WAIT,
-                    entry_price=close,
-                    sl_price=0.0,
-                    target_1=0.0,
-                    target_2=0.0,
-                    reason=f"HTF Confluence Veto: Golden Pocket Long rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bullish.",
-                    htf_aligned=False,
-                    details={"htf_regime": htf_regime, "order_flow": order_flow}
-                )
-                
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=True)
             in_pocket = fib["fib_618"] <= min(close, bar_open) and max(close, bar_open) <= (fib["fib_500"] + 10.0)
             bullish_trigger = (close > bar_open) or (close > prev_close_val)
@@ -594,7 +1002,7 @@ class StrategyEngine:
                 t3_moonshot = round(max(upper_vakc_val, upper_2sd, close + 3.8 * atr_14), 2)
                 pyramid_trigger_lvl = round(swing_high + 2.0, 2)
                 
-                return Signal(
+                return _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=fib["sl_level"],
@@ -603,30 +1011,19 @@ class StrategyEngine:
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
                     reason=f"LONG Setup Confirmed: Above 200 EMA + Above AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | Persistent Trend (H={hurst_info.get('hurst', 0.52):.2f}) | HTF Aligned.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_long,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_high": swing_high, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
+                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow,
+                        "skew": skew_info, "vcr": vcr_info, "hfi_score": hfi_score
                     }
-                )
+                ))
 
         # 10. SHORT Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         short_avwap_cond = close < (current_vwap + 0.35 * (current_vwap - lower_2sd) / 2.0)
         if close < ema200 and short_avwap_cond and swing_range >= 35.0 and ofi_info["seller_defense"] and is_trending_flow:
-            if not htf_aligned_short:
-                return Signal(
-                    signal_type=SignalType.WAIT,
-                    entry_price=close,
-                    sl_price=0.0,
-                    target_1=0.0,
-                    target_2=0.0,
-                    reason=f"HTF Confluence Veto: Golden Pocket Short rejected. 15m ({htf_regime['tf_15m']['bias']}) or 1H ({htf_regime['tf_1h']['bias']}) not Bearish.",
-                    htf_aligned=False,
-                    details={"htf_regime": htf_regime, "order_flow": order_flow}
-                )
-                
             fib = compute_fibonacci_levels(swing_high, swing_low, is_uptrend=False)
             in_pocket = (fib["fib_500"] - 10.0) <= min(close, bar_open) and max(close, bar_open) <= fib["fib_618"]
             bearish_trigger = (close < bar_open) or (close < prev_close_val)
@@ -637,7 +1034,7 @@ class StrategyEngine:
                 t3_moonshot = round(min(lower_vakc_val, lower_2sd, close - 3.8 * atr_14), 2)
                 pyramid_trigger_lvl = round(swing_low - 2.0, 2)
                 
-                return Signal(
+                return _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=fib["sl_level"],
@@ -646,14 +1043,152 @@ class StrategyEngine:
                     target_3_moonshot=t3_moonshot,
                     pyramid_trigger=pyramid_trigger_lvl,
                     reason=f"SHORT Setup Confirmed: Below 200 EMA + Below AVWAP ({gap_info['regime']}) + Golden Pocket + OFI Defense | HTF Aligned.",
-                    htf_aligned=True,
+                    htf_aligned=htf_aligned_short,
                     fib_retracement=0.55,
                     details={
                         "fib": fib, "ema200": ema200, "vwap": current_vwap, "ema21": ema21,
                         "swing_low": swing_low, "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
-                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow
+                        "atr_14": atr_14, "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow,
+                        "skew": skew_info, "vcr": vcr_info, "hfi_score": hfi_score
                     }
-                )
+                ))
+
+        # 11. Options Desk Range Fade Strategy (+Γ Wall Pinning / Mean-Reversion)
+        if options_context and gex_info.get("is_positive_gamma", False):
+            put_w = float(gex_info.get("put_wall_strike", 0.0))
+            call_w = float(gex_info.get("call_wall_strike", 999999.0))
+            max_p = float(options_context.get("pcr", {}).get("max_pain_strike", round(close / 50.0) * 50.0))
+            d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
+            pcr_z = float(options_context.get("pcr_zscore", 0.0))
+
+            if close <= put_w + WALL_BUFFER_PTS and (d_v >= 0.2 or pcr_z >= PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("buyer_defense")):
+                return _check_and_return("LONG", Signal(
+                    signal_type=SignalType.RANGE_FADE_LONG,
+                    entry_price=close,
+                    sl_price=round(put_w - WALL_BUFFER_PTS, 2),
+                    target_1=max_p,
+                    target_2=call_w,
+                    target_3_moonshot=round(call_w + 1.0 * atr_14, 2),
+                    reason=f"Options Desk Range Fade Long: Spot ({close:.1f}) defending Put Wall ({put_w:.0f}) in +Γ regime.",
+                    htf_aligned=htf_aligned_long,
+                    details={"put_wall": put_w, "call_wall": call_w, "max_pain": max_p, "gex": gex_info, "ofi": ofi_info}
+                ))
+            elif close >= call_w - WALL_BUFFER_PTS and (d_v <= -0.2 or pcr_z <= -PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("seller_defense")):
+                return _check_and_return("SHORT", Signal(
+                    signal_type=SignalType.RANGE_FADE_SHORT,
+                    entry_price=close,
+                    sl_price=round(call_w + WALL_BUFFER_PTS, 2),
+                    target_1=max_p,
+                    target_2=put_w,
+                    target_3_moonshot=round(put_w - 1.0 * atr_14, 2),
+                    reason=f"Options Desk Range Fade Short: Spot ({close:.1f}) testing Call Wall ({call_w:.0f}) in +Γ regime.",
+                    htf_aligned=htf_aligned_short,
+                    details={"put_wall": put_w, "call_wall": call_w, "max_pain": max_p, "gex": gex_info, "ofi": ofi_info}
+                ))
+
+        # 12. Options Desk Gamma Breakout Strategy (-Γ Expansion / Wall Clearance)
+        if options_context and not gex_info.get("is_positive_gamma", True):
+            call_w = float(gex_info.get("call_wall_strike", 999999.0))
+            put_w = float(gex_info.get("put_wall_strike", 0.0))
+            d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
+
+            if d_v >= 0.5 and close >= call_w and ofi_info.get("buyer_defense"):
+                return _check_and_return("LONG", Signal(
+                    signal_type=SignalType.GAMMA_BREAKOUT_LONG,
+                    entry_price=close,
+                    sl_price=round(close - 1.0 * atr_14, 2),
+                    target_1=round(close + 1.5 * atr_14, 2),
+                    target_2=round(close + 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close + 5.0 * atr_14, 2),
+                    reason=f"Gamma Breakout Long: Price ({close:.1f}) cleared Call Wall ({call_w:.0f}) in -Γ expansion regime.",
+                    htf_aligned=htf_aligned_long,
+                    details={"call_wall": call_w, "gex": gex_info, "d_vector": d_v}
+                ))
+            elif d_v <= -0.5 and close <= put_w and ofi_info.get("seller_defense"):
+                return _check_and_return("SHORT", Signal(
+                    signal_type=SignalType.GAMMA_BREAKOUT_SHORT,
+                    entry_price=close,
+                    sl_price=round(close + 1.0 * atr_14, 2),
+                    target_1=round(close - 1.5 * atr_14, 2),
+                    target_2=round(close - 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close - 5.0 * atr_14, 2),
+                    reason=f"Gamma Breakdown Short: Price ({close:.1f}) breached Put Wall ({put_w:.0f}) in -Γ expansion regime.",
+                    htf_aligned=htf_aligned_short,
+                    details={"put_wall": put_w, "gex": gex_info, "d_vector": d_v}
+                ))
+
+        # 13. Novel: Expiry Pin Trade (IMP-11) — 3-Vector Pin Trade
+        if options_context:
+            is_expiry_day = options_context.get("is_expiry_day", False)
+            if is_expiry_day and bar_time >= "13:00" and gex_info.get("is_positive_gamma", False):
+                put_w = float(gex_info.get("put_wall_strike", 0.0))
+                call_w = float(gex_info.get("call_wall_strike", 999999.0))
+                max_p = float(options_context.get("pcr", {}).get("max_pain_strike", round(close / 50.0) * 50.0))
+                mp_distance = close - max_p
+                
+                if put_w < close < call_w and abs(mp_distance) > EXPIRY_PIN_MIN_DISTANCE_PTS:
+                    pin_direction = "LONG" if mp_distance < 0 else "SHORT"
+                    if pin_direction == "LONG":
+                        return _check_and_return("LONG", Signal(
+                            signal_type=SignalType.EXPIRY_PIN_LONG,
+                            entry_price=close,
+                            sl_price=round(put_w - 15.0, 2),
+                            target_1=max_p,
+                            target_2=round(max_p + 0.5 * atr_14, 2),
+                            target_3_moonshot=call_w,
+                            reason=f"Expiry Pin Long: GEX+ corridor, spot below Max Pain ({max_p:.0f}) by {abs(mp_distance):.0f} pts. Charm-driven drift expected.",
+                            htf_aligned=htf_aligned_long,
+                            details={"max_pain": max_p, "mp_distance": mp_distance, "gamma_regime": "POSITIVE"}
+                        ))
+                    else:
+                        return _check_and_return("SHORT", Signal(
+                            signal_type=SignalType.EXPIRY_PIN_SHORT,
+                            entry_price=close,
+                            sl_price=round(call_w + 15.0, 2),
+                            target_1=max_p,
+                            target_2=round(max_p - 0.5 * atr_14, 2),
+                            target_3_moonshot=put_w,
+                            reason=f"Expiry Pin Short: GEX+ corridor, spot above Max Pain ({max_p:.0f}) by {abs(mp_distance):.0f} pts. Charm-driven drift expected.",
+                            htf_aligned=htf_aligned_short,
+                            details={"max_pain": max_p, "mp_distance": mp_distance, "gamma_regime": "POSITIVE"}
+                        ))
+
+        # 14. Novel: Gamma Squeeze Breakout (IMP-12) — Dealer hedging cascade
+        if options_context and not gex_info.get("is_positive_gamma", True):
+            d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
+            call_w = float(gex_info.get("call_wall_strike", 999999.0))
+            put_w = float(gex_info.get("put_wall_strike", 0.0))
+            zero_gex = float(gex_info.get("zero_gex_strike", close))
+            avg_vol_gs = float(sub_df['volume'].tail(20).mean()) if 'volume' in sub_df.columns else 0.0
+            curr_vol_gs = float(bar.get('volume', 0))
+            volume_surge = curr_vol_gs > 1.5 * avg_vol_gs if avg_vol_gs > 0 else False
+            
+            # Bullish Gamma Squeeze: spot crossed above zero-GEX in -Gamma with volume
+            if d_v >= 0.3 and close > zero_gex and volume_surge and close > ema21:
+                return _check_and_return("LONG", Signal(
+                    signal_type=SignalType.GAMMA_SQUEEZE_LONG,
+                    entry_price=close,
+                    sl_price=round(zero_gex - 0.5 * atr_14, 2),
+                    target_1=round(close + GAMMA_SQUEEZE_TARGET_MULT * 1.5 * atr_14, 2),
+                    target_2=round(close + GAMMA_SQUEEZE_TARGET_MULT * 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close + GAMMA_SQUEEZE_TARGET_MULT * 5.0 * atr_14, 2),
+                    reason=f"Gamma Squeeze Long: -Γ regime, spot ({close:.1f}) above Zero-GEX ({zero_gex:.0f}). Dealer hedging cascade active. Volume surge confirmed.",
+                    htf_aligned=htf_aligned_long,
+                    details={"zero_gex": zero_gex, "d_vector": d_v, "volume_surge": volume_surge, "gamma_regime": "NEGATIVE"}
+                ))
+            # Bearish Gamma Squeeze: spot crossed below zero-GEX in -Gamma with volume
+            elif d_v <= -0.3 and close < zero_gex and volume_surge and close < ema21:
+                return _check_and_return("SHORT", Signal(
+                    signal_type=SignalType.GAMMA_SQUEEZE_SHORT,
+                    entry_price=close,
+                    sl_price=round(zero_gex + 0.5 * atr_14, 2),
+                    target_1=round(close - GAMMA_SQUEEZE_TARGET_MULT * 1.5 * atr_14, 2),
+                    target_2=round(close - GAMMA_SQUEEZE_TARGET_MULT * 3.0 * atr_14, 2),
+                    target_3_moonshot=round(close - GAMMA_SQUEEZE_TARGET_MULT * 5.0 * atr_14, 2),
+                    reason=f"Gamma Squeeze Short: -Γ regime, spot ({close:.1f}) below Zero-GEX ({zero_gex:.0f}). Dealer hedging cascade active. Volume surge confirmed.",
+                    htf_aligned=htf_aligned_short,
+                    details={"zero_gex": zero_gex, "d_vector": d_v, "volume_surge": volume_surge, "gamma_regime": "NEGATIVE"}
+                ))
 
         return Signal(
             signal_type=SignalType.WAIT,

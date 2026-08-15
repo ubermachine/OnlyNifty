@@ -1,4 +1,4 @@
-"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (JustNifty v4.0 Turbo)."""
+"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (OnlyNifty v5.3 Desk Edition)."""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -20,8 +20,10 @@ except ImportError:
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE, ENVELOPE_PCT,
     DEFAULT_IV, EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA,
-    MA_STRETCH_THRESHOLD, KELLY_FRACTION, MAX_TOLERABLE_MDD
+    MA_STRETCH_THRESHOLD, KELLY_FRACTION, MAX_TOLERABLE_MDD,
+    LUNCH_LULL_SIZE_FACTOR, SIGNAL_MIN_CONFLUENCE
 )
+from src.risk_state import SessionRiskState
 from src.data_engine import DataEngine
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_cpr,
@@ -33,13 +35,14 @@ from src.indicators import (
     compute_vwap_multi_dispersion_and_half_life, detect_footprint_delta_divergences,
     compute_dfa_alpha, compute_vpin_toxicity, compute_volume_synchronized_gamma_tracker
 )
-from src.strategy_rules import StrategyEngine, SignalType
+from src.strategy_rules import StrategyEngine, SignalType, Signal
 from src.options_engine import (
     generate_option_trade_ticket, select_institutional_strike, black_scholes_greeks,
     calculate_position_size, calculate_tca_friction, calculate_pcr_and_max_pain,
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
     calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
-    generate_svi_smile_curve, construct_delta_neutral_iron_condor, calculate_dynamic_kelly
+    generate_svi_smile_curve, construct_delta_neutral_iron_condor, calculate_dynamic_kelly,
+    construct_jade_lizard
 )
 from src.execution import OrderManager, slice_institutional_order
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
@@ -57,13 +60,18 @@ from src.options_flow import (
     compute_oi_based_range_forecast
 )
 from src.volatility_engine import VolatilityIntelligence
-from src.institutional_flow import InstitutionalFlowEngine
+from src.institutional_flow import InstitutionalFlowEngine, compute_institutional_flow_score, compute_dispersion_arbitrage_signal
 from src.portfolio_risk import PortfolioRiskManager
+from src.notifications import TelegramNotifier
+from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from src.options_positioning import OptionsDeskState, compute_options_desk_state
+from src.desk_verdict import build_desk_verdict, DeskVerdict
+
 
 
 # ----------------- STREAMLIT PAGE CONFIG -----------------
 st.set_page_config(
-    page_title="Nifty Institutional Signal Terminal | JustNifty v4.0 Turbo",
+    page_title="Nifty Institutional Signal Terminal | OnlyNifty v5.3",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -213,7 +221,6 @@ st.markdown("""
 def get_data_engine() -> DataEngine:
     return DataEngine(use_cache=True)
 
-@st.cache_resource(show_spinner=False)
 def get_strategy_engine() -> StrategyEngine:
     return StrategyEngine()
 
@@ -233,29 +240,46 @@ def get_signal_journal() -> LiveSignalJournal:
 @st.cache_data(ttl=5, max_entries=10, show_spinner=False)
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = get_data_engine()
-    if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
-        return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
-    return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
+    try:
+        if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
+            return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
+        return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
+    except Exception:
+        # Live feed can transiently fail (rate limits, network); never crash the page —
+        # fall back to synthetic bars so the rest of the pipeline still has data to run on.
+        return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_live_option_chain_data() -> dict:
     engine = get_data_engine()
-    return engine.fetch_live_nse_option_chain(symbol="NIFTY")
+    try:
+        return engine.fetch_live_nse_option_chain(symbol="NIFTY")
+    except Exception:
+        return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE"}
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_heavyweight_flow_index() -> dict:
     engine = get_data_engine()
-    return engine.fetch_heavyweight_flow_index()
+    try:
+        return engine.fetch_heavyweight_flow_index()
+    except Exception:
+        return {"hfi_score": 0.0, "data_quality": "UNAVAILABLE"}
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_sectoral_pulse() -> dict:
     engine = get_data_engine()
-    return engine.fetch_sectoral_pulse()
+    try:
+        return engine.fetch_sectoral_pulse()
+    except Exception:
+        return {"data_quality": "UNAVAILABLE"}
 
 @st.cache_data(ttl=120, max_entries=2, show_spinner=False)
 def get_institutional_oi_data() -> pd.DataFrame:
     engine = get_data_engine()
-    return engine.get_participant_oi_snapshot()
+    try:
+        return engine.get_participant_oi_snapshot()
+    except Exception:
+        return pd.DataFrame()
 
 # ----------------- SIDEBAR CONTROLS -----------------
 st.sidebar.header("⚙️ Risk & Data Stream")
@@ -296,6 +320,20 @@ if st.sidebar.button("🔄 Instant Cache Purge & Rerun", width="stretch"):
     st.cache_data.clear()
     st.rerun()
 
+with st.sidebar.expander("🔔 Telegram Alert Webhook", expanded=False):
+    tg_token_val = st.text_input("Bot Token", value=st.session_state.get("tg_bot_token", TELEGRAM_BOT_TOKEN), type="password", help="Telegram Bot Token from @BotFather")
+    tg_chat_val = st.text_input("Chat / Channel ID", value=st.session_state.get("tg_chat_id", TELEGRAM_CHAT_ID), help="Numeric chat ID or @channel")
+    st.session_state["tg_bot_token"] = tg_token_val
+    st.session_state["tg_chat_id"] = tg_chat_val
+    
+    if st.button("🔔 Send Test Alert", width="stretch"):
+        notifier = TelegramNotifier.get_instance()
+        success, msg = notifier.send_test_alert(tg_token_val, tg_chat_val)
+        if success:
+            st.success("✅ Test alert sent successfully to Telegram!")
+        else:
+            st.error(f"❌ Dispatch failed: {msg}")
+
 # ----------------- PIPELINE EXECUTION & LATENCY INSTRUMENTATION -----------------
 t_pipeline_start = time.perf_counter()
 
@@ -327,30 +365,14 @@ gex_data = compute_dealer_gex(current_spot)
 htf_data = compute_multi_timeframe_regime(df)
 order_flow_data = detect_stacked_order_flow_imbalances(df, key_levels={"CPR_PIVOT": cpr["pivot"], "VAH": vol_profile["vah"], "VAL": vol_profile["val"], "AVWAP": float(df.iloc[-1]["vwap"])})
 vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"].max() - df["low"].min()) / 4.0)
-
-# Evaluate Active Signal & Option Ticket
-signal = strategy_engine.evaluate_bar(df, live_iv=iv_input)
-ticket = generate_option_trade_ticket(current_spot, signal, account_capital, drawdown_input, iv=iv_input, is_0dte_afternoon=is_0dte_mode)
-
-df_kalman = kalman_engine.filter_series(df["close"])
-regime_state = markov_engine.infer_regimes(df)
-ib_state = compute_initial_balance_and_day_type(df)
-dfa_res = compute_dfa_alpha(df["close"])
-vpin_res = compute_vpin_toxicity(df)
-dyn_kelly = calculate_dynamic_kelly(win_rate=0.72, payoff_ratio=2.43, day_type=ib_state["day_type"])
-
-# Volatility Intelligence Engine
-vol_engine = VolatilityIntelligence()
-vol_report = vol_engine.generate_vol_intelligence_report(
-    close_prices=df['close'],
-    current_iv=iv_input,
-    bar_time=df.index[-1].strftime('%H:%M') if hasattr(df.index[-1], 'strftime') else '12:00'
-)
-
-sector_pulse = load_sectoral_pulse()
 hfi_res = load_heavyweight_flow_index()
-vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
-delta_div = detect_footprint_delta_divergences(df)
+
+# Fetch Live Option Chain for Options Desk & GEX Walls (cached, 5s TTL)
+oc_raw = load_live_option_chain_data()
+oc_df = oc_raw.get("dataframe") if isinstance(oc_raw, dict) else oc_raw
+pcr_analytics = calculate_pcr_and_max_pain(oc_df)
+gex_chart_res = compute_strike_level_gex_chart_data(oc_df, current_spot, iv_input, 1.0)
+range_fc_res = compute_oi_based_range_forecast(oc_df, current_spot, pcr_analytics.get("max_pain_strike", current_spot))
 
 # Real-Time Options Flow & Short-Term Direction Deduction Vector
 dir_flow_res = compute_short_term_directional_vector(
@@ -358,6 +380,160 @@ dir_flow_res = compute_short_term_directional_vector(
     df=df,
     live_iv=iv_input,
     hfi_score=hfi_res.get("hfi_score", 0.0)
+)
+
+# Compute Consolidated Options Desk State
+options_desk_state = compute_options_desk_state(
+    option_chain_df=oc_df,
+    spot=current_spot,
+    df_ohlcv=df,
+    pcr_analytics=pcr_analytics,
+    dir_flow_res=dir_flow_res,
+    range_fc_res=range_fc_res,
+    gex_chart_res=gex_chart_res,
+    live_iv=iv_input,
+    hfi_score=hfi_res.get("hfi_score", 0.0)
+)
+
+# Microstructure, Regime & Volatility Intelligence Pipeline
+df_kalman = kalman_engine.filter_series(df["close"])
+hurst_res = compute_hurst_exponent(df["close"])
+regime_state = markov_engine.infer_regimes(df, iv=iv_input, hurst_exponent=hurst_res.get("hurst", 0.50))
+ib_state = compute_initial_balance_and_day_type(df)
+dfa_res = compute_dfa_alpha(df["close"])
+vpin_res = compute_vpin_toxicity(df)
+# Derive Kelly win-rate/payoff inputs from real closed-trade journal stats once enough
+# non-seed samples exist; otherwise fall back to the conservative institutional baseline prior.
+_kelly_journal = get_signal_journal()
+if hasattr(_kelly_journal, "reload_from_disk"):
+    _kelly_journal.reload_from_disk()
+_kelly_closed = SignalPerformanceAnalyzer(_kelly_journal.entries).closed_entries
+if len(_kelly_closed) >= 10:
+    _kelly_wins = [e.realized_r_multiple for e in _kelly_closed if e.realized_r_multiple > 0]
+    _kelly_losses = [e.realized_r_multiple for e in _kelly_closed if e.realized_r_multiple <= 0]
+    kelly_win_rate = len(_kelly_wins) / len(_kelly_closed)
+    _kelly_avg_win = float(np.mean(_kelly_wins)) if _kelly_wins else 1.5
+    _kelly_avg_loss = abs(float(np.mean(_kelly_losses))) if _kelly_losses else 1.0
+    kelly_payoff_ratio = (_kelly_avg_win / _kelly_avg_loss) if _kelly_avg_loss > 0 else 2.43
+else:
+    kelly_win_rate, kelly_payoff_ratio = 0.72, 2.43
+dyn_kelly = calculate_dynamic_kelly(win_rate=kelly_win_rate, payoff_ratio=kelly_payoff_ratio, day_type=ib_state["day_type"])
+sector_pulse = load_sectoral_pulse()
+vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
+delta_div = detect_footprint_delta_divergences(df)
+ofi_data = compute_order_flow_imbalance(df)
+
+vol_engine = VolatilityIntelligence()
+vol_report = vol_engine.generate_vol_intelligence_report(
+    close_prices=df['close'],
+    current_iv=iv_input,
+    bar_time=df.index[-1].strftime('%H:%M') if hasattr(df.index[-1], 'strftime') else '12:00'
+)
+
+# Academic Alpha: Yang-Zhang Volatility & Variance Risk Premium (VRP)
+yz_vol_res = VolatilityIntelligence.compute_yang_zhang_volatility(df)
+vrp_res = VolatilityIntelligence.compute_variance_risk_premium(iv_input, yz_vol_res["realized_vol_yz"])
+vol_report["yz_vol"] = yz_vol_res
+vol_report["vrp_data"] = vrp_res
+vol_report["vrp"] = vrp_res["vrp"]
+
+# Index-to-Constituent Volatility Dispersion Arbitrage
+disp_res = compute_dispersion_arbitrage_signal(iv_input, hfi_res.get("hfi_realized_vol", 0.12))
+
+# Smart Money Institutional Flow Score Aggregator (0-100)
+inst_flow_res = compute_institutional_flow_score(
+    pcr_zscore=options_desk_state.pcr_zscore,
+    dwv_score=options_desk_state.dwv_momentum_score,
+    fii_ls_ratio=fii_data.get("fii_long_short_ratio", 1.0) if 'fii_data' in locals() and isinstance(fii_data, dict) else 1.0,
+    vwap_dispersion_pct=vwap_disp.get("z_score_vwap", 0.0),
+    hfi_score=hfi_res.get("hfi_score", 0.0)
+)
+
+options_context = {
+    "chain_df": oc_df,
+    "pcr": pcr_analytics,
+    "range_fc": range_fc_res,
+    "dir_flow": dir_flow_res,
+    "gex_chart": gex_chart_res,
+    "pcr_zscore": options_desk_state.pcr_zscore,
+    "options_desk_state": options_desk_state,
+    "vol_report": vol_report,
+    "vrp_data": vrp_res,
+    "vrp": vrp_res["vrp"],
+    "yz_vol": yz_vol_res,
+    "disp_data": disp_res,
+    "inst_flow": inst_flow_res,
+    "flow_score": inst_flow_res["flow_score"],
+    "dwv_score": options_desk_state.dwv_momentum_score,
+    "is_0dte": is_0dte_mode
+}
+
+# Evaluate Active Signal
+try:
+    signal = strategy_engine.evaluate_bar(
+        df,
+        live_iv=iv_input,
+        hfi_score=hfi_res.get("hfi_score", 0.0),
+        option_chain_df=oc_df,
+        options_context=options_context
+    )
+except Exception as exc:
+    # Gates fail closed: a broken evaluation must never emit a trade.
+    signal = Signal(
+        signal_type=SignalType.WAIT,
+        entry_price=current_spot,
+        sl_price=0.0,
+        target_1=0.0,
+        target_2=0.0,
+        reason=f"Signal evaluation error — failing closed to WAIT: {type(exc).__name__}",
+        htf_aligned=False,
+        details={"evaluation_error": str(exc)}
+    )
+    st.warning(f"⚠️ Signal engine error — defaulting to WAIT. ({type(exc).__name__}: {exc})")
+
+# Session Risk Rails Gate
+session_risk = SessionRiskState.load_from_disk()
+can_trade, risk_reason = session_risk.can_take_new_trade(current_bar_idx=len(df)-1)
+if not can_trade and signal.signal_type != SignalType.WAIT:
+    signal = Signal(
+        signal_type=SignalType.WAIT,
+        entry_price=current_spot,
+        sl_price=0.0,
+        target_1=0.0,
+        target_2=0.0,
+        reason=f"Session Risk Circuit Breaker: {risk_reason}",
+        htf_aligned=False,
+        details=signal.details
+    )
+
+effective_capital = account_capital
+if getattr(strategy_engine, '_last_lunch_lull', False):
+    effective_capital *= LUNCH_LULL_SIZE_FACTOR
+if signal and signal.details and "size_factor" in signal.details:
+    effective_capital *= signal.details["size_factor"]
+
+ticket = generate_option_trade_ticket(
+    current_spot,
+    signal,
+    effective_capital,
+    drawdown_input,
+    iv=iv_input,
+    is_0dte_afternoon=is_0dte_mode,
+    current_intraday_pnl=session_risk.realized_pnl_today,
+    risk_pct_override=dyn_kelly["dynamic_risk_pct"]
+)
+
+# Synthesize Unified Desk Verdict
+desk_verdict = build_desk_verdict(
+    signal=signal,
+    ticket=ticket,
+    desk_state=options_desk_state,
+    vol_report=vol_report,
+    regime_state=regime_state,
+    htf_data=htf_data,
+    session_state=session_risk,
+    current_spot=current_spot,
+    options_context=options_context
 )
 
 # Real-Time Live Signal Journal & Trade Lifecycle Tracker
@@ -368,10 +544,12 @@ if hasattr(journal_engine, "seed_from_intraday_history") and (len(journal_engine
     journal_engine.seed_from_intraday_history(df, strategy_engine, live_iv=iv_input, capital=account_capital)
     st.session_state["journal_seeded_v38"] = True
 
+last_bar_time_str = df.index[-1].strftime("%H:%M") if hasattr(df.index[-1], "strftime") else "12:00"
 journal_engine.update_open_trades_lifecycle(
     current_spot=current_spot,
     current_high=float(df.iloc[-1]["high"]),
-    current_low=float(df.iloc[-1]["low"])
+    current_low=float(df.iloc[-1]["low"]),
+    bar_time_str=last_bar_time_str
 )
 last_bar_ts = df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 journal_engine.log_signal(
@@ -380,7 +558,7 @@ journal_engine.log_signal(
     current_spot=current_spot,
     bar_timestamp=last_bar_ts,
     regime_info=regime_state,
-    confluence_score=1.0,
+    confluence_score=desk_verdict.confluence_score,
     htf_data=htf_data,
     kalman_vel=float(df_kalman["kalman_velocity"].iloc[-1]) if "kalman_velocity" in df_kalman.columns else 0.0,
     kalman_z=float(df_kalman["kalman_vel_zscore"].iloc[-1]) if "kalman_vel_zscore" in df_kalman.columns else 0.0,
@@ -390,6 +568,17 @@ journal_engine.log_signal(
     df_context=df,
     is_0dte=is_0dte_mode
 )
+
+# Dispatch asynchronous Telegram alert for actionable signals
+tg_notifier = TelegramNotifier.get_instance()
+if journal_engine.entries:
+    latest_entry = journal_engine.entries[-1]
+    tg_notifier.dispatch_signal_alert(
+        entry=latest_entry,
+        bot_token=st.session_state.get("tg_bot_token", TELEGRAM_BOT_TOKEN),
+        chat_id=st.session_state.get("tg_chat_id", TELEGRAM_CHAT_ID),
+        blocking=False
+    )
 
 t_latency_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
 refresh_tag = f"{auto_refresh_choice.upper()}" if auto_refresh_choice != "Off (Manual)" else "MANUAL STREAM"
@@ -441,7 +630,7 @@ if signal.signal_type != SignalType.WAIT:
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">PRO v4.1 TURBO</span>
+        <span class="badge-pro">DESK v5.3</span>
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="display: flex; align-items: center; gap: 14px;">
@@ -455,179 +644,232 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ----------------- UNIFIED MAIN-PAGE DESK VERDICT PANEL -----------------
+verdict_color = "#05df72" if desk_verdict.action == "BUY_CE" else ("#ff3355" if desk_verdict.action == "BUY_PE" else "#fbb024")
+verdict_badge_bg = "rgba(5, 223, 114, 0.12)" if desk_verdict.action == "BUY_CE" else ("rgba(255, 51, 85, 0.12)" if desk_verdict.action == "BUY_PE" else "rgba(251, 176, 36, 0.12)")
+verdict_badge_text = f"● {desk_verdict.action.replace('_', ' ')} CONFIRMED" if desk_verdict.action != "WAIT" else "● NO-TRADE (WAIT)"
 
-# Main Cockpit Split Grid
-cockpit_col1, cockpit_col2 = st.columns([1.35, 1.0])
+if desk_verdict.option_pick:
+    opt = desk_verdict.option_pick
+    ticket_html = f'''<div style="background: #0a101d; border: 1px solid #00d2ff; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 800; color: #00d2ff;">
+🎯 RECOMMENDED TICKET: {opt['symbol']} ({opt['lots']} Lots / {opt['total_qty']} Qty)
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">
+TCA Friction: ₹{opt.get('tca_friction', 0.0):.1f}
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;">
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Entry Premium</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">₹{opt['entry_premium']:.2f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Stop Loss</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">₹{opt['sl_premium']:.2f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Target 1 (50%)</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">₹{opt['target1_premium']:.2f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Target 2 (50%)</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #00d2ff;">₹{opt['target2_premium']:.2f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Moonshot (T3)</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #fbb024;">₹{opt['target3_premium']:.2f}</div>
+</div>
+</div>
+</div>'''
+else:
+    ticket_html = '''<div style="background: rgba(251, 176, 36, 0.04); border: 1px dashed #334155; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; color: #64748b; text-align: center;">
+No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 70.0%).
+</div>'''
 
-with cockpit_col1:
-    sig_badge_class = "signal-long" if "LONG" in signal.signal_type.value else ("signal-short" if "SHORT" in signal.signal_type.value else "signal-wait")
-    sig_badge_text = f"● {signal.signal_type.value} CONFIRMED" if signal.signal_type != SignalType.WAIT else "● AWAITING CONFLUENCE"
-    
+trend_clr = '#05df72' if desk_verdict.trend_bias == 'BULLISH' else ('#ff3355' if desk_verdict.trend_bias == 'BEARISH' else '#fbb024')
+trend_arrow = '▲' if desk_verdict.trend_bias == 'BULLISH' else ('▼' if desk_verdict.trend_bias == 'BEARISH' else '◆')
+qual_clr = '#05df72' if desk_verdict.data_quality == 'VERIFIED' else '#fbb024'
+
+# Conviction strip: how hard to bet, and which evidence families actually agree.
+conv_clr = {
+    'EXTREME': '#05df72',
+    'HIGH': '#00d2ff',
+    'MODERATE': '#fbb024',
+    'LOW': '#64748b'
+}.get(desk_verdict.conviction_tier, '#64748b')
+_fam_icon = {'structure': '🏗️', 'flow': '🌊', 'positioning': '🏛️', 'macro': '⚡'}
+_fam_chips = "".join(
+    f'<span style="font-size: 10px; color: {"#05df72" if v > 0 else ("#ff3355" if v < 0 else "#64748b")}; '
+    f'margin-right: 8px;">{_fam_icon[k]} {"↑" if v > 0 else ("↓" if v < 0 else "→")}</span>'
+    for k, v in desk_verdict.family_votes.items()
+) if desk_verdict.family_votes else ''
+_edge_chip = ''
+if desk_verdict.edge_status and desk_verdict.edge_status != 'UNMEASURED':
+    _edge_clr = {'TRUSTED': '#05df72', 'PAPER': '#fbb024', 'QUARANTINED': '#ff3355'}.get(desk_verdict.edge_status, '#64748b')
+    _edge_chip = f'<span style="font-size: 10px; color: {_edge_clr}; margin-left: 10px;">EDGE: {desk_verdict.edge_status}</span>'
+_conv_notes = " • ".join(desk_verdict.conviction_notes[:3]) if desk_verdict.conviction_notes else ''
+conviction_html = f'''<div style="display: flex; justify-content: space-between; align-items: center; background: #0d131f; border: 1px solid {conv_clr}33; border-left: 3px solid {conv_clr}; border-radius: 6px; padding: 7px 12px; margin-bottom: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 800; color: {conv_clr}; letter-spacing: 0.06em;">{desk_verdict.conviction_tier} CONVICTION</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: #f1f5f9;">{desk_verdict.conviction_score:.0f}<span style="font-size: 9px; color: #64748b;">/100</span></span>
+<span style="font-size: 10px; color: #64748b;">{desk_verdict.family_agreement}/4 families agree</span>
+{_edge_chip}
+</div>
+<div style="display: flex; align-items: center;">{_fam_chips}</div>
+</div>
+<div style="font-size: 10px; color: #64748b; margin: -6px 0 12px 2px;">{_conv_notes}</div>'''
+
+desk_verdict_html = f'''<div style="background: #080c14; border: 1px solid #1c273c; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.35);">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 15px;">🏛️</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #00d2ff;">DESK VERDICT</span>
+<span style="font-size: 11px; color: #475569;">|</span>
+<span style="font-size: 11px; color: #94a3b8; font-weight: 600;">Authoritative Execution & Positioning Cockpit</span>
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">
+QUALITY: <strong style="color: {qual_clr};">{desk_verdict.data_quality}</strong> • CONFLUENCE: <strong style="color: #00d2ff;">{desk_verdict.confluence_score:.1f}% ({desk_verdict.confluence_grade})</strong>
+</div>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #141d2f; padding-bottom: 10px; margin-bottom: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span style="background: {verdict_badge_bg}; color: {verdict_color}; border: 1px solid {verdict_color}; padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 800;">
+{verdict_badge_text}
+</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; color: #f1f5f9;">
+{desk_verdict.action_label}
+</span>
+</div>
+</div>
+<div style="font-size: 12px; color: #94a3b8; margin-bottom: 12px; line-height: 1.4;">
+<strong style="color: #cbd5e1;">Desk Reason:</strong> {desk_verdict.reason}
+</div>
+{conviction_html}
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+<div style="background: #0d131f; border: 1px solid #1a2436; border-radius: 6px; padding: 10px 12px;">
+<div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px;">Institutional Trend & Momentum</div>
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 800; color: {trend_clr};">
+{trend_arrow} {desk_verdict.trend_bias} ({desk_verdict.trend_conviction_pct:.0f}%)
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">
+D = <strong style="color: {dir_flow_res['badge_color']};">{options_desk_state.d_vector:+.2f}</strong> • V = <strong>{df_kalman['kalman_velocity'].iloc[-1]:+.2f}</strong>
+</div>
+</div>
+<div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+Regime: <strong style="color: #cbd5e1;">{regime_state['active_regime']}</strong> | Day: <strong style="color: #cbd5e1;">{ib_state['day_type'][:16]}</strong>
+</div>
+</div>
+<div style="background: #0d131f; border: 1px solid #1a2436; border-radius: 6px; padding: 10px 12px;">
+<div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px;">Expected Range & Dealer Walls</div>
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">
+<span style="color: #05df72;">₹{desk_verdict.range_corridor[0]:.0f}</span> (Put) ── <span style="color: #00d2ff;">● {desk_verdict.spot_position_pct:.0f}%</span> ── <span style="color: #ff3355;">₹{desk_verdict.range_corridor[1]:.0f}</span> (Call)
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #fbb024;">
+Max Pain: ₹{desk_verdict.max_pain:.0f}
+</div>
+</div>
+<div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+Exp Move: <strong style="color: #cbd5e1;">±{desk_verdict.expected_move_pts:.0f} pts</strong> | Actual Range: <strong style="color: #cbd5e1;">{options_desk_state.actual_range_pts:.0f} pts</strong> ({options_desk_state.move_ratio:.1f}x)
+</div>
+</div>
+</div>
+{ticket_html}
+<div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px;">
+<span style="background: #0d131f; border: 1px solid #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #94a3b8;">
+🏗️ <strong style="color: #cbd5e1;">Structure:</strong> {desk_verdict.evidence['structure']}
+</span>
+<span style="background: #0d131f; border: 1px solid #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #94a3b8;">
+🌊 <strong style="color: #cbd5e1;">Flow:</strong> {desk_verdict.evidence['flow']}
+</span>
+<span style="background: #0d131f; border: 1px solid #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #94a3b8;">
+🏛️ <strong style="color: #cbd5e1;">Positioning:</strong> {desk_verdict.evidence['positioning']}
+</span>
+<span style="background: #0d131f; border: 1px solid #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: #94a3b8;">
+⚡ <strong style="color: #cbd5e1;">Macro:</strong> {desk_verdict.evidence['macro']}
+</span>
+</div>
+</div>'''
+st.markdown(desk_verdict_html, unsafe_allow_html=True)
+
+# Expandable Evidence & Microstructure Drill-Downs
+with st.expander("📊 Stochastic Indicators & 9-Cell Confluence Engine", expanded=False):
     st.markdown(f"""
-    <div class="cockpit-box">
-        <div class="cockpit-header">
-            <span class="{sig_badge_class}">{sig_badge_text}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #55657e;">IB: {ib_state['day_type'][:20]} • REGIME: {regime_state['active_regime']}</span>
-        </div>
-        <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px;">
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; color: #f1f5f9;">₹{current_spot:,.2f}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600; color: {'#05df72' if spot_delta >= 0 else '#ff3355'};">
-                {spot_delta:+.2f} ({spot_delta/prev_spot*100:+.2f}%)
-            </span>
-        </div>
-        <div style="font-size: 13px; color: #8e9fb5; margin-bottom: 8px; line-height: 1.4;">
-            <strong>Setup Status:</strong> {signal.reason}
-        </div>
-        <div style="margin-bottom: 10px; background: rgba(11, 15, 25, 0.85); border: 1px solid {dir_flow_res['badge_color']}; border-radius: 6px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; color: {dir_flow_res['badge_color']};">
-                    {dir_flow_res['emoji']} {dir_flow_res['bias'].replace('_', ' ')} (D = {dir_flow_res['directional_vector']:+.2f} | Conviction: {dir_flow_res['conviction_pct']}%)
-                </div>
-                <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                    <strong>Playbook:</strong> {dir_flow_res['suggested_action'][:60]}...
-                </div>
-            </div>
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right;">
-                <div style="color: #00d2ff; font-weight: 700;">Tgt: ₹{dir_flow_res['target_price']:.1f}</div>
-                <div style="color: #ff3355; font-weight: 700;">SL: ₹{dir_flow_res['stop_price']:.1f}</div>
+    <div class="confluence-grid" style="grid-template-columns: repeat(4, 1fr); gap: 6px;">
+        <div class="confluence-cell">
+            <div class="c-lbl">1. HTF Alignment</div>
+            <div class="c-val" style="color: {'#05df72' if htf_data['htf_aligned_long'] else ('#ff3355' if htf_data['htf_aligned_short'] else '#fbb024')};">
+                1H: {htf_data['tf_1h'].get('bias', 'N/A')[:4]} | 15m: {htf_data['tf_15m'].get('bias', 'N/A')[:4]}
             </div>
         </div>
-        <div class="confluence-grid" style="grid-template-columns: repeat(3, 1fr); gap: 6px;">
-            <div class="confluence-cell">
-                <div class="c-lbl">1. HTF Alignment</div>
-                <div class="c-val" style="color: {'#05df72' if htf_data['htf_aligned_long'] else ('#ff3355' if htf_data['htf_aligned_short'] else '#fbb024')};">
-                    1H: {htf_data['tf_1h'].get('bias', 'N/A')[:4]} | 15m: {htf_data['tf_15m'].get('bias', 'N/A')[:4]}
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">2. Kalman Velocity</div>
-                <div class="c-val" style="color: {'#05df72' if df_kalman['kalman_velocity'].iloc[-1] >= 0 else '#ff3355'};">
-                    V={df_kalman['kalman_velocity'].iloc[-1]:+.2f} (Z={df_kalman['kalman_vel_zscore'].iloc[-1]:.1f})
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">3. VWAP Dispersion</div>
-                <div class="c-val" style="color: {'#05df72' if abs(vwap_disp['z_score_vwap']) <= 2.0 else '#ff3355'};">
-                    Z={vwap_disp['z_score_vwap']:+.1f} | τ={vwap_disp['half_life_mins']}m
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">4. DFA Alpha Memory</div>
-                <div class="c-val" style="color: {'#05df72' if dfa_res['is_trending'] else '#fbb024'};">
-                    α={dfa_res['dfa_alpha']:.3f} ({'Trend' if dfa_res['is_trending'] else 'Chop'})
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">5. VPIN Flow Toxicity</div>
-                <div class="c-val" style="color: {'#ff3355' if vpin_res['is_toxic'] else '#05df72'};">
-                    VPIN={vpin_res['vpin']:.2f} ({'⚠️ Toxic' if vpin_res['is_toxic'] else '🟢 Clean'})
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">6. Dynamic Kelly</div>
-                <div class="c-val" style="color: #00d2ff;">
-                    {dyn_kelly['dynamic_risk_pct_str']} ({dyn_kelly['day_type_multiplier']}x Multiplier)
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">7. IV-RV Spread</div>
-                <div class="c-val" style="color: {'#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'};">
-                    IV:{vol_report['iv_rv_spread']['iv']*100:.1f}% RV:{vol_report['iv_rv_spread']['rv']*100:.1f}% ({vol_report['composite_vol_regime'].replace('_', ' ')})
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">8. Order Flow (OFI)</div>
-                <div class="c-val" style="color: {'#05df72' if ofi_data.get('ofi_zscore', 0) > 0.5 else '#ff3355' if ofi_data.get('ofi_zscore', 0) < -0.5 else '#fbb024'};">
-                    Z={ofi_data.get('ofi_zscore', 0):+.2f} ({'Buyers' if ofi_data.get('buyer_defense') else 'Sellers' if ofi_data.get('seller_defense') else 'Neutral'})
-                </div>
-            </div>
-            <div class="confluence-cell">
-                <div class="c-lbl">9. Dealer GEX</div>
-                <div class="c-val" style="color: {'#05df72' if gex_data.get('is_positive_gamma') else '#ff3355'};">
-                    {gex_data.get('gamma_flip_strike', 'N/A')} ({'+Γ Pin' if gex_data.get('is_positive_gamma') else '-Γ Explosive'})
-                </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">2. Kalman Velocity</div>
+            <div class="c-val" style="color: {'#05df72' if df_kalman['kalman_velocity'].iloc[-1] >= 0 else '#ff3355'};">
+                V={df_kalman['kalman_velocity'].iloc[-1]:+.2f} (Z={df_kalman['kalman_vel_zscore'].iloc[-1]:.1f})
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Vol Intelligence Banner
-    vol_regime_color = '#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'
-    st.markdown(f"""
-    <div style="background-color: rgba({','.join(['255,51,85' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '5,223,114' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '251,176,36'])}, 0.06); border-left: 3px solid {vol_regime_color}; padding: 6px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4; margin-top: 6px; border-radius: 4px;">
-        <strong style="color: {vol_regime_color};">Vol Regime: {vol_report['composite_vol_regime'].replace('_', ' ')}</strong> — 
-        IV Percentile: {vol_report['iv_percentile']['iv_percentile']:.0f}% ({vol_report['iv_percentile']['rank_label'].replace('_', ' ')}) |
-        Spread: {vol_report['iv_rv_spread']['spread_pct']:+.1f}% |
-        Quality: {vol_report['intraday_quality']['quality_label'].replace('_', ' ')} ({vol_report['intraday_quality']['sizing_multiplier']:.0%})
-    </div>
-    """, unsafe_allow_html=True)
-
-
-
-
-
-with cockpit_col2:
-    if ticket.get("status") == "READY":
-        target_strike = ticket["symbol"]
-        greeks_str = f"Δ {ticket['delta']:.2f} • Γ {ticket['gamma']:.5f} • Θ -₹{abs(ticket['theta_decay_daily']):.2f}/sh • Vanna {ticket['vanna']:.4f}"
-        ep_str = f"₹{ticket['entry_premium']:.2f}"
-        sl_str = f"₹{ticket['sl_premium']:.2f}"
-        t1_str = f"₹{ticket['target1_premium']:.2f}"
-        t2_str = f"₹{ticket['target2_premium']:.2f}"
-        t3_str = f"₹{ticket['target3_moonshot_premium']:.2f}"
-        lots_str = f"{ticket['lots']} Lots ({ticket['total_qty']} Qty)"
-        risk_rupees_str = f"₹{ticket['max_risk_rupees']:,.2f}"
-        tca_fees_str = f"TCA: ₹{ticket['tca_friction']['total_friction']:.1f}"
-    else:
-        # Default ATM strike reference with Greeks
-        atm_k = int(round(current_spot / 50.0) * 50)
-        target_strike = f"NIFTY {atm_k} CE / PE"
-        greeks_str = "Δ 0.55 • Γ 0.00078 • Θ -₹14.20/sh • Vanna 0.0420"
-        ep_str = "₹142.50"
-        sl_str = "₹112.50"
-        t1_str = "₹182.00"
-        t2_str = "₹228.00"
-        t3_str = "₹285.00"
-        lots_str = "6 Lots (150 Qty)"
-        risk_rupees_str = f"₹{account_capital * risk_pct:,.2f}"
-        tca_fees_str = "TCA Est: ₹182.50"
-
-    st.markdown(f"""
-    <div class="cockpit-box" style="display: flex; flex-direction: column; justify-content: space-between; height: calc(100% - 20px);">
-        <div>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <div>
-                    <div style="font-size: 11px; color: #55657e; text-transform: uppercase; font-weight: 600;">Optimal Strike (Delta 0.50-0.65)</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 19px; font-weight: 800; color: #00d2ff;">{target_strike}</div>
-                </div>
-                <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; background-color: #141c2e; padding: 4px 8px; border-radius: 4px; color: #8e9fb5;">
-                    {tca_fees_str}
-                </div>
-            </div>
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #718096; margin-bottom: 10px;">
-                {greeks_str}
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px;">
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
-                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">Entry Prem</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">{ep_str}</div>
-                </div>
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
-                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">Stop Loss</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">{sl_str}</div>
-                </div>
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
-                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">T1 (35%)</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">{t1_str}</div>
-                </div>
-                <div style="background-color: #080c14; border: 1px solid #1c273c; border-radius: 4px; padding: 6px;">
-                    <div style="font-size: 9px; color: #55657e; text-transform: uppercase; font-weight: 600;">T2 (35%)</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #00d2ff;">{t2_str}</div>
-                </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">3. VWAP Dispersion</div>
+            <div class="c-val" style="color: {'#05df72' if abs(vwap_disp['z_score_vwap']) <= 2.0 else '#ff3355'};">
+                Z={vwap_disp['z_score_vwap']:+.1f} | τ={vwap_disp['half_life_mins']}m
             </div>
         </div>
-        <div style="background-color: rgba(0, 210, 255, 0.04); border-left: 3px solid #00d2ff; padding: 8px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4;">
-            <strong>Profit Maximizer:</strong> Book 35% @ <strong>{t1_str}</strong> (or sell OTM for Free Spread) ➔ Book 35% @ <strong>{t2_str}</strong> ➔ Trail 30% runner to <strong>{t3_str}</strong> on 5m 21 EMA.
+        <div class="confluence-cell">
+            <div class="c-lbl">4. DFA Alpha Memory</div>
+            <div class="c-val" style="color: {'#05df72' if dfa_res['is_trending'] else '#fbb024'};">
+                α={dfa_res['dfa_alpha']:.3f} ({'Trend' if dfa_res['is_trending'] else 'Chop'})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">5. VPIN Flow Toxicity</div>
+            <div class="c-val" style="color: {'#ff3355' if vpin_res['is_toxic'] else '#05df72'};">
+                VPIN={vpin_res['vpin']:.2f} ({'⚠️ Toxic' if vpin_res['is_toxic'] else '🟢 Clean'})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">6. Dynamic Kelly</div>
+            <div class="c-val" style="color: #00d2ff;">
+                {dyn_kelly['dynamic_risk_pct_str']} ({dyn_kelly['day_type_multiplier']}x Multiplier)
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">7. IV-RV Spread</div>
+            <div class="c-val" style="color: {'#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'};">
+                IV:{vol_report['iv_rv_spread']['iv']*100:.1f}% RV:{vol_report['iv_rv_spread']['rv']*100:.1f}%
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">8. Order Flow & Hawkes</div>
+            <div class="c-val" style="color: {'#05df72' if ofi_data.get('ofi_zscore', 0) > 0.5 else '#ff3355' if ofi_data.get('ofi_zscore', 0) < -0.5 else '#fbb024'};">
+                Z={ofi_data.get('ofi_zscore', 0):+.2f} ({'⚡ Surge' if ofi_data.get('is_hawkes_surge') else 'Calm'})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">9. Dealer GEX & Flip</div>
+            <div class="c-val" style="color: {'#05df72' if gex_data.get('is_positive_gamma') else '#ff3355'};">
+                Flip: {options_desk_state.zero_gex_strike:.0f} ({'+Γ Pin' if options_desk_state.is_positive_gamma else '-Γ Breakout'})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">10. Yang-Zhang VRP</div>
+            <div class="c-val" style="color: {'#05df72' if vrp_res['is_positive_vrp'] else '#ff3355'};">
+                VRP: {vrp_res['vrp']*100:+.1f}% ({'Rich' if vrp_res['vrp'] >= 0.03 else 'Normal' if vrp_res['is_positive_vrp'] else 'Inversion'})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">11. Smart Money Flow</div>
+            <div class="c-val" style="color: {'#05df72' if inst_flow_res['flow_score'] >= 70 else '#ff3355' if inst_flow_res['flow_score'] <= 30 else '#00d2ff'};">
+                Score: {inst_flow_res['flow_score']:.1f} ({inst_flow_res['bias']})
+            </div>
+        </div>
+        <div class="confluence-cell">
+            <div class="c-lbl">12. Dispersion & Rough-Vol</div>
+            <div class="c-val" style="color: {'#fbb024' if disp_res['is_arbitrage_opportunity'] else '#cbd5e1'};">
+                Disp: {disp_res['spread_zscore']:+.1f}σ | {'⚡ Rough' if regime_state.get('is_rough_volatility') else 'Smooth'}
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -639,7 +881,7 @@ tab_chart, tab_journal, tab_sizer, tab_oi, tab_backtest, tab_cheatsheet = st.tab
     "🛡️ 1% Risk & Quarter-Kelly Sizer",
     "🏛️ Institutional Breadth & Option Chain",
     "📊 Bar-by-Bar Replay & Backtest Simulator",
-    "🧠 Institutional Desk Wisdom & Master Playbook (v4.0)"
+    "🧠 Institutional Desk Wisdom & Master Playbook"
 ])
 
 
@@ -1390,6 +1632,29 @@ with tab_sizer:
             else:
                 st.info(f"ℹ️ {rv_term_res['breakout_commentary']}")
 
+    # Academic Alpha: Jade Lizard Skew Arbitrage & Yang-Zhang VRP Harvester (v5.7)
+    with st.expander("🦎 Institutional Jade Lizard Skew Arbitrage & Yang-Zhang VRP Harvester", expanded=False):
+        jl_res = construct_jade_lizard(current_spot, iv=iv_input)
+        
+        jl_c1, jl_c2, jl_c3 = st.columns(3)
+        with jl_c1:
+            st.markdown("**🛡️ Jade Lizard Skew Arbitrage Structure:**")
+            st.write(f"• **Short Put Leg:** Strike `{jl_res['legs']['short_put']['strike']}` PE @ ₹`{jl_res['legs']['short_put']['premium']:.1f}` (Δ `{jl_res['legs']['short_put']['delta']:.2f}`)")
+            st.write(f"• **Short Call Leg:** Strike `{jl_res['legs']['short_call']['strike']}` CE @ ₹`{jl_res['legs']['short_call']['premium']:.1f}` (Δ `{jl_res['legs']['short_call']['delta']:.2f}`)")
+            st.write(f"• **Long Call Wing:** Strike `{jl_res['legs']['long_call']['strike']}` CE @ ₹`{jl_res['legs']['long_call']['premium']:.1f}` (Δ `{jl_res['legs']['long_call']['delta']:.2f}`)")
+        with jl_c2:
+            st.markdown("**💰 Payoff & Zero-Upside Risk Invariant:**")
+            st.write(f"• **Total Net Credit:** **`₹{jl_res['total_net_credit_pts']:.1f} pts`** | Call Spread Width: `{jl_res['call_wing_width_pts']:.0f} pts`")
+            risk_label = "✅ **ZERO UPSIDE RISK (Fully Funded)**" if jl_res["has_zero_upside_risk"] else f"⚠️ Upside Risk: ₹{jl_res['upside_risk_pts']:.1f} pts"
+            st.write(f"• **Zero Upside Risk:** {risk_label}")
+            st.write(f"• **Lower Breakeven:** `₹{jl_res['lower_breakeven']:.0f}` | Max Profit: `₹{jl_res['max_profit_pts']:.1f} pts`")
+        with jl_c3:
+            st.markdown("**📊 Yang-Zhang Variance Risk Premium (VRP):**")
+            st.write(f"• **Yang-Zhang Realized Vol ($RV_{{YZ}}$):** **`{yz_vol_res['realized_vol_yz']*100:.1f}%`**")
+            st.write(f"• **Implied Volatility ($IV$):** **`{iv_input*100:.1f}%`**")
+            st.write(f"• **Variance Risk Premium ($VRP$):** **`{vrp_res['vrp']*100:+.1f}%`** (`{vrp_res['regime']}`)")
+            st.caption(f"💡 {vrp_res['advice']}")
+
 # ----- TAB 3: PARTICIPANT OI & LIVE OPTION CHAIN -----
 with tab_oi:
     st.subheader("🏛️ Institutional Heavyweight Breadth, Sectoral Pulse & Option Chain")
@@ -1442,6 +1707,39 @@ with tab_oi:
         <strong style="color: #00d2ff;">Macro Flow Summary:</strong> {flow_summary}{roll_extra}
     </div>
     ''', unsafe_allow_html=True)
+
+    # Academic Alpha: Smart Money Institutional Flow Score & Volatility Dispersion Radar (v5.7)
+    with st.expander("🧠 Smart Money Flow Score & Index-to-Constituent Volatility Dispersion Radar", expanded=True):
+        fsc1, fsc2 = st.columns([1.2, 1.0])
+        with fsc1:
+            st.markdown("**🌊 Composite Smart Money Flow Score (0 - 100):**")
+            score_clr = '#05df72' if inst_flow_res['flow_score'] >= 70.0 else ('#ff3355' if inst_flow_res['flow_score'] <= 30.0 else '#00d2ff')
+            st.markdown(f"""
+            <div style="background-color: #080c14; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; margin-bottom: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 18px; font-weight: 800; color: {score_clr};">{inst_flow_res['flow_score']:.1f} / 100</span>
+                    <span style="font-size: 12px; font-weight: 700; color: {score_clr}; background: rgba(0, 210, 255, 0.1); padding: 3px 8px; border-radius: 4px;">{inst_flow_res['regime']}</span>
+                </div>
+                <div style="font-size: 11px; color: #94a3b8; margin-top: 6px;">
+                    DWV: <code>{inst_flow_res['component_weights']['dwv']:+.2f}</code> | HFI: <code>{inst_flow_res['component_weights']['hfi']:+.2f}</code> | FII: <code>{inst_flow_res['component_weights']['fii']:+.2f}</code> | PCR: <code>{inst_flow_res['component_weights']['pcr']:+.2f}</code> | VWAP: <code>{inst_flow_res['component_weights']['vwap']:+.2f}</code>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with fsc2:
+            st.markdown("**⚡ Volatility Dispersion Arbitrage Radar:**")
+            disp_clr = '#fbb024' if disp_res['is_arbitrage_opportunity'] else '#05df72'
+            st.markdown(f"""
+            <div style="background-color: #080c14; border: 1px solid #1e293b; border-radius: 6px; padding: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 13px; font-weight: 700; color: {disp_clr};">{disp_res['regime']}</span>
+                    <span style="font-size: 12px; font-family: monospace; color: #00d2ff;">Z = {disp_res['spread_zscore']:+.2f}σ</span>
+                </div>
+                <div style="font-size: 11px; color: #cbd5e1; margin-top: 4px;">
+                    Index IV: <strong>{disp_res['nifty_iv']*100:.1f}%</strong> vs Basket RV: <strong>{disp_res['hfi_realized_vol']*100:.1f}%</strong> (Spread: {disp_res['spread']*100:+.1f}%)
+                </div>
+                <div style="font-size: 10px; color: #94a3b8; margin-top: 4px;">{disp_res['recommendation']}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("#### 🏛️ Participant-Wise Open Interest (FII / Prop Desks vs Retail)")
     st.dataframe(get_institutional_oi_data(), width="stretch")
@@ -1769,7 +2067,7 @@ with tab_backtest:
 
 # ----- TAB 5: MASTER RULEBOOK & SETUP SUMMARIES -----
 with tab_cheatsheet:
-    st.subheader("🧠 Institutional Desk Scrutiny, Multi-Agent Consensus & Master Alpha Playbook (v4.0)")
+    st.subheader("🧠 Institutional Desk Scrutiny, Multi-Agent Consensus & Master Alpha Playbook")
     st.caption("Comprehensive peer-reviewed scrutiny from Quantitative Research, Options Structuring, Risk Management (CRO), and Market Microstructure desks.")
     
     # 1. Four Desks Consensus Accordion Cards

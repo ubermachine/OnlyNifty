@@ -37,7 +37,7 @@ MA_STRETCH_THRESHOLD: float = 0.0035    # 0.35% distance threshold from 21/55 EM
 
 # 4. Order Flow Imbalance (OFI) & Cumulative Volume Delta (CVD)
 OFI_ZSCORE_MIN: float = 0.65            # Minimum rolling Z-score OFI required to validate AVWAP defense
-VPIN_TOXICITY_THRESHOLD: float = 0.65   # Volume-Synchronized Probability of Informed Trading limit
+VPIN_TOXICITY_THRESHOLD: float = 0.75   # Volume-Synchronized Probability of Informed Trading limit (0.75 institutional consensus)
 
 # ----------------- DERIVATIVES & SECOND-ORDER GREEKS -----------------
 DELTA_MIN: float = 0.50                 # Minimum Delta for ATM / 1-ITM directional options
@@ -88,3 +88,50 @@ TOP_10_NIFTY_CONSTITUENTS = [
     "TCS.NS", "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS", "BHARTIARTL.NS"
 ]
 
+# ----------------- TELEGRAM NOTIFICATION WEBHOOK (v5.2) -----------------
+import os
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_PARSE_MODE: str = "HTML"
+TELEGRAM_TIMEOUT_SECONDS: float = 5.0
+TELEGRAM_MIN_CONFLUENCE_SCORE: float = 0.70  # Standard Grade alert floor (>=85% is A+ Institutional)
+
+# ----------------- QUANTITATIVE MICROSTRUCTURE & SKEW (v5.2) -----------------
+SKEW_ZSCORE_THRESHOLD: float = 1.50         # Z-Score boundary for 25-Delta Put Skew spikes (Crash Risk Gate)
+GEX_WALL_BUFFER_PTS: float = 15.0           # Spot distance to Call/Put Wall to trigger Pinning / Fade Gate
+VCR_SQUEEZE_THRESHOLD: float = 0.15         # Realized Volatility Ratio (5d / 60d) compression threshold
+CVD_ABSORPTION_THRESHOLD: float = 1.20      # Ratio of Delta expansion to Price displacement for Absorption
+
+# ----------------- SIGNAL QUALITY & UNIVERSAL GATES (Phase 1-5) -----------------
+SIGNAL_MIN_CONFLUENCE: float = 70.0         # Pre-decision score floor; below -> WAIT (Veto, not label)
+COOLDOWN_BARS: int = 12                     # 60 min of 5m bars between fresh entries
+MAX_OPEN_TRADES: int = 1                    # Single active position concurrency limit
+GATE_FAIL_TO_WAIT: bool = True              # Missing gate data -> safe WAIT, never trade
+LUNCH_LULL_SIZE_FACTOR: float = 0.5         # Halved sizing during 11:30-13:00 IST lunch lull
+STOP_MIN_ATR_FRACTION: float = 0.5          # SL >= 0.5 x ATR14
+STOP_MAX_POINTS: float = 60.0               # Absolute SL cap (index points)
+STOP_NOISE_BAND_MULT: float = 2.0           # SL >= 2 x rolling 5m bar range sigma
+VPIN_TOXICITY_THRESHOLD: float = 0.75       # Toxic order flow veto boundary (0.75 consensus)
+MAX_CONSECUTIVE_LOSSES_DAY: int = 2         # 2-strike daily circuit breaker
+DAILY_LOSS_LIMIT_PCT: float = 0.015         # 1.5% max daily account loss limit
+QUARANTINE_MIN_SAMPLES: int = 30            # Minimum sample size before setup can be TRUSTED
+
+# ----------------- OPTIONS DESK & POSITIONING FUSION (v5.2) -----------------
+POSITIONING_VETO_STRENGTH: float = 0.5      # D-vector threshold opposing chart setup to trigger WAIT
+WALL_BUFFER_PTS: float = 25.0               # Buffer around Call/Put walls for range fade and pinning
+POSITIONING_UNVERIFIED_SIZE_CAP: float = 0.5 # Max size factor when options positioning is unverified/synthetic
+PCR_Z_CONTRARIAN_THRESHOLD: float = 2.0     # Z-Score threshold on PCR session history for contrarian fade
+PCR_STRUCTURAL_BASELINE: float = 0.70       # Academic neutral PCR baseline (Blau et al. 2015), NOT 1.0
+PCR_HISTORY_MIN_SAMPLES: int = 20           # Minimum session snapshots required before PCR Z-Score is verified
+OPTIONS_STATE_PATH: str = "data/options_state.json"
+
+# ----------------- SIGNAL IMPROVEMENT GATES (v5.3 Research-Driven) -----------------
+IV_RANK_SPREAD_THRESHOLD: float = 0.50       # IV Percentile above which debit spreads preferred over naked longs
+IV_RANK_CONVEXITY_THRESHOLD: float = 0.20    # IV Percentile below which naked long convexity has structural edge
+VAL_BUFFER_ATR_MULT: float = 0.15            # ATR multiplier for VAL/VAH proximity buffer (replaces hardcoded 5pts)
+GEX_WALL_BUFFER_ATR_MULT: float = 0.40       # ATR multiplier for GEX Wall proximity buffer (replaces hardcoded 15pts)
+CPR_BUFFER_ATR_MULT: float = 0.10            # ATR multiplier for CPR level proximity buffer
+TERM_STRUCTURE_BACKWARDATION_THRESHOLD: float = -0.02  # IV spread threshold for crisis backwardation detection
+TERM_STRUCTURE_CRISIS_SIZE_MULT: float = 0.25          # Sizing multiplier during term structure inversion
+GAMMA_SQUEEZE_TARGET_MULT: float = 2.0       # Target multiplier for gamma squeeze breakout trades
+EXPIRY_PIN_MIN_DISTANCE_PTS: float = 50.0    # Minimum Max Pain distance to trigger expiry pin trade

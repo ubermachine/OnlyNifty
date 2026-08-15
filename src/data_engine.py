@@ -610,7 +610,14 @@ class DataEngine:
     ) -> pd.DataFrame:
         """Generates realistic trending and mean-reverting Nifty 5m/1m data for testing and offline replay."""
         np.random.seed(42)
-        end_time = datetime.now(IST).replace(hour=15, minute=30, second=0, microsecond=0)
+        now_ist = datetime.now(IST)
+        market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        if market_open <= now_ist < market_close:
+            end_time = now_ist
+        else:
+            end_time = market_close
+
         start_time = end_time - timedelta(minutes=bars * interval_mins)
         dates = pd.date_range(start=start_time, periods=bars, freq=f"{interval_mins}min", tz=IST)
         
@@ -660,8 +667,11 @@ class DataEngine:
                 d_str = d_obj.strftime("%d%m%Y")
             else:
                 now_ist = datetime.now(IST)
-                # If weekend or pre-market, pick recent weekday
+                # If before 18:00 IST on a weekday, NSE has not published today's participant OI yet
                 d_obj = now_ist.date()
+                if now_ist.hour < 18:
+                    d_obj = d_obj - timedelta(days=1)
+                # If weekend or pre-market, pick recent weekday
                 if d_obj.weekday() == 5:  # Saturday
                     d_obj = d_obj - timedelta(days=1)
                 elif d_obj.weekday() == 6:  # Sunday

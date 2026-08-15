@@ -37,6 +37,7 @@ class SignalLifecycleStatus(str, Enum):
     STOPPED_OUT = "STOPPED_OUT"
     EXPIRED_EOD = "EXPIRED_EOD"
     CANCELLED = "CANCELLED"
+    SQUARED_OFF = "SQUARED_OFF"
 
 
 @dataclass
@@ -80,6 +81,12 @@ class SignalEntry:
     lifecycle_status: str = SignalLifecycleStatus.TRIGGERED.value
     realized_r_multiple: float = 0.0
     realized_pnl_rupees: float = 0.0
+    realized_pnl_net: float = 0.0
+    is_seed: bool = False
+    setup_id: str = ""
+    structure_epoch: str = ""
+    gate_audit: Dict[str, Any] = field(default_factory=dict)
+    evidence: Dict[str, Any] = field(default_factory=dict)
     exit_timestamp_ist: Optional[str] = None
     exit_spot: Optional[float] = None
     exit_premium: Optional[float] = None
@@ -144,7 +151,8 @@ def calculate_confluence_score(
     regime_state: Optional[Dict[str, Any]] = None,
     ofi_data: Optional[Dict[str, Any]] = None,
     gex_data: Optional[Dict[str, Any]] = None,
-    vol_profile: Optional[Dict[str, Any]] = None
+    vol_profile: Optional[Dict[str, Any]] = None,
+    options_context: Optional[Dict[str, Any]] = None
 ) -> Tuple[float, str]:
     """Computes a rigorous 0-100 Institutional Confluence Score."""
     if signal_obj is None or getattr(signal_obj, "signal_type", None) is None:
@@ -162,18 +170,18 @@ def calculate_confluence_score(
 
     score = 0.0
 
-    # 1. Higher Timeframe Confluence (25 Pts)
+    # 1. Higher Timeframe Confluence (20 Pts)
     if htf_data:
         if is_long and htf_data.get("htf_aligned_long", False):
-            score += 25.0
+            score += 20.0
         elif not is_long and htf_data.get("htf_aligned_short", False):
-            score += 25.0
+            score += 20.0
         elif htf_data.get("confluence_regime") in ["STRONG_BULLISH", "STRONG_BEARISH"]:
-            score += 15.0
+            score += 12.0
         else:
-            score += 8.0
+            score += 6.0
     else:
-        score += 15.0
+        score += 10.0
 
     # 2. Macro Referee & Intermediate EMA Filter (15 Pts)
     if is_long:
@@ -213,6 +221,10 @@ def calculate_confluence_score(
             score += 15.0
         elif ofi_data.get("ofi_zscore", 0.0) != 0.0:
             score += 8.0
+        
+        # Hawkes Process OFI surge bonus
+        if ofi_data.get("is_hawkes_surge", False):
+            score += 5.0
     else:
         score += 8.0
 
@@ -220,16 +232,47 @@ def calculate_confluence_score(
     fib_ret = getattr(signal_obj, "fib_retracement", 0.0)
     if 0.45 <= fib_ret <= 0.65:
         score += 10.0
-    elif "3PM" in sig_type or "ORDER_FLOW" in sig_type:
+    elif "3PM" in sig_type or "ORDER_FLOW" in sig_type or "RANGE_FADE" in sig_type or "GAMMA_BREAKOUT" in sig_type:
         score += 10.0
     else:
         score += 5.0
 
     # 7. Dealer GEX & Markov Regime Alignment (5 Pts)
-    if regime_state and "Trend" in regime_state.get("active_regime", ""):
+    if regime_state and "Trend" in str(regime_state.get("active_regime", "")):
         score += 3.0
-    if gex_data and gex_data.get("is_positive_gamma", True):
-        score += 2.0
+    if regime_state and regime_state.get("is_rough_volatility", False) and ("BREAKOUT" in sig_type or "3PM" in sig_type):
+        # Rough volatility fractal persistence accelerates breakout momentum
+        score += 5.0
+    if gex_data:
+        if gex_data.get("is_positive_gamma", True):
+            score += 2.0
+        elif "BREAKOUT" in sig_type:
+            # Dealer Short Gamma boosts breakout momentum (+10% Gamma Squeeze edge)
+            score += 10.0
+
+    # 8. Options Desk Positioning Votes (Up to +20 Pts Bonus when Verified)
+    if options_context:
+        dir_flow = options_context.get("dir_flow", {})
+        d_vec = float(dir_flow.get("directional_vector", 0.0))
+        if is_long and d_vec >= 0.2:
+            score += 10.0
+        elif not is_long and d_vec <= -0.2:
+            score += 10.0
+        elif (is_long and d_vec <= -0.2) or (not is_long and d_vec >= 0.2):
+            score -= 10.0
+
+        pcr_mom = float(dir_flow.get("sub_scores", {}).get("pcr_momentum", 0.0))
+        if (is_long and pcr_mom > 0) or (not is_long and pcr_mom < 0):
+            score += 5.0
+
+        # DWV (Delta-Weighted Volume) Flow Alignment
+        dwv = float(options_context.get("dwv_score", 0.0))
+        if (is_long and dwv > 0.15) or (not is_long and dwv < -0.15):
+            score += 5.0
+
+        max_p = float(options_context.get("pcr", {}).get("max_pain_strike", close))
+        if (is_long and close < max_p) or (not is_long and close > max_p):
+            score += 5.0
 
     final_score = min(max(round(score, 1), 0.0), 100.0)
 
@@ -285,7 +328,12 @@ class LiveSignalJournal:
         gex_data: Optional[Dict[str, Any]] = None,
         vol_profile: Optional[Dict[str, Any]] = None,
         df_context: Optional[pd.DataFrame] = None,
-        is_0dte: bool = False
+        is_0dte: bool = False,
+        is_seed: bool = False,
+        setup_id: str = "",
+        structure_epoch: str = "",
+        gate_audit: Optional[Dict[str, Any]] = None,
+        evidence: Optional[Dict[str, Any]] = None
     ) -> Optional[SignalEntry]:
         """Logs a generated signal with deduplication and state-transition filtering."""
         now = datetime.now(timezone.utc)
@@ -303,11 +351,26 @@ class LiveSignalJournal:
             # Filter duplicate consecutive WAIT logs
             if self.entries and self.entries[-1].signal_type == "WAIT":
                 return None
+        else:
+            # Structural fingerprint: setup_id + direction + entry/SL band (10pt buckets).
+            # Replaces the old bar_timestamp+direction dedup, which logged a fresh entry
+            # every single bar a setup stayed valid. Same instance -> same epoch -> collapsed;
+            # a materially different entry/SL (a genuinely new instance) still gets logged.
+            if not structure_epoch:
+                epoch_setup = setup_id or sig_type_str
+                epoch_payload = f"{epoch_setup}_{direction}_{round(signal.entry_price, -1)}_{round(signal.sl_price, -1)}"
+                structure_epoch = hashlib.sha256(epoch_payload.encode("utf-8")).hexdigest()[:16]
 
-        # Deduplication Rule: Check if exact same bar timestamp & direction is already logged
-        for existing in self.entries:
-            if existing.bar_timestamp == bar_time_str and existing.direction == direction:
-                return None
+            # Only an OPEN trade on the same structure suppresses a re-log. Once the
+            # trade has closed, the same structure may legitimately re-trigger (re-entry
+            # frequency is governed separately by the session cooldown rails).
+            for existing in self.entries:
+                if (
+                    existing.structure_epoch == structure_epoch
+                    and existing.direction == direction
+                    and existing.is_active()
+                ):
+                    return None
 
         strike = int(ticket.get("strike", int(round(current_spot / 50.0) * 50)))
         opt_type = ticket.get("option_type", "CE" if direction == "LONG" else ("PE" if direction == "SHORT" else "N/A"))
@@ -385,6 +448,11 @@ class LiveSignalJournal:
             capital_risk_rupees=risk_rupees,
             tca_friction_est=tca_friction,
             lifecycle_status=SignalLifecycleStatus.TRIGGERED.value if is_actionable else "AWAITING_SETUP",
+            is_seed=is_seed,
+            setup_id=setup_id or sig_type_str,
+            structure_epoch=structure_epoch,
+            gate_audit=gate_audit or {},
+            evidence=evidence or {},
             greeks_snapshot={
                 "delta": ticket.get("delta", 0.55 if is_actionable else 0.0),
                 "gamma": ticket.get("gamma", 0.0008 if is_actionable else 0.0),
@@ -401,8 +469,14 @@ class LiveSignalJournal:
         self._persist_to_disk()
         return entry
 
-    def update_open_trades_lifecycle(self, current_spot: float, current_high: float, current_low: float) -> int:
-        """Evaluates all active trades against the current bar high/low/close prices."""
+    def update_open_trades_lifecycle(
+        self,
+        current_spot: float,
+        current_high: float,
+        current_low: float,
+        bar_time_str: str = "12:00"
+    ) -> int:
+        """Evaluates all active trades against the current bar high/low/close prices with 50% partial booking at T1."""
         updates_count = 0
         now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -424,21 +498,40 @@ class LiveSignalJournal:
                 entry.peak_favorable_excursion_pts = max(entry.peak_favorable_excursion_pts, entry.spot_price - current_low)
                 entry.peak_adverse_excursion_pts = max(entry.peak_adverse_excursion_pts, current_high - entry.spot_price)
 
+            # Check 15:15 Hard Squareoff
+            if bar_time_str >= "15:15" and entry.is_active():
+                entry.lifecycle_status = SignalLifecycleStatus.SQUARED_OFF.value
+                entry.exit_timestamp_ist = now_ist
+                entry.exit_spot = current_spot
+                entry.notes += " | 15:15 IST Mandatory Squareoff."
+                updates_count += 1
+                continue
+
             if direction == "LONG":
-                # Check SL hit first
+                # Check SL hit
                 if current_low <= sl_spot and sl_spot > 0:
-                    entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
-                    entry.realized_r_multiple = -1.0
-                    entry.realized_pnl_rupees = - entry.capital_risk_rupees - entry.tca_friction_est
-                    entry.exit_timestamp_ist = now_ist
-                    entry.exit_spot = sl_spot
-                    entry.exit_premium = entry.sl_premium
-                    entry.notes += f" | SL Hit @ ₹{current_low:.1f}"
+                    if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.entry_premium
+                        entry.notes += f" | Breakeven SL hit on remaining 50% after T1 profit."
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                    else:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.realized_r_multiple = -1.0
+                        entry.realized_pnl_rupees = - entry.capital_risk_rupees
+                        entry.realized_pnl_net = - entry.capital_risk_rupees - entry.tca_friction_est
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.sl_premium
+                        entry.notes += f" | SL Hit @ ₹{current_low:.1f}"
                     updates_count += 1
                 elif current_high >= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
                     entry.realized_r_multiple = 4.0
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5 - entry.tca_friction_est, 2)
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot
                     entry.exit_premium = entry.target_3_premium
@@ -446,8 +539,9 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_high >= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
-                    entry.realized_r_multiple = entry.r_multiple_t2
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.r_multiple_t2 - entry.tca_friction_est, 2)
+                    entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
@@ -455,24 +549,37 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_high >= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
+                    entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
+                    entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price  # Trail SL to Breakeven
-                    entry.notes += f" | T1 Hit. SL trailed to entry."
+                    entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
                     updates_count += 1
 
             elif direction == "SHORT":
                 if current_high >= sl_spot and sl_spot > 0:
-                    entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
-                    entry.realized_r_multiple = -1.0
-                    entry.realized_pnl_rupees = - entry.capital_risk_rupees - entry.tca_friction_est
-                    entry.exit_timestamp_ist = now_ist
-                    entry.exit_spot = sl_spot
-                    entry.exit_premium = entry.sl_premium
-                    entry.notes += f" | SL Hit @ ₹{current_high:.1f}"
+                    if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.entry_premium
+                        entry.notes += f" | Breakeven SL hit on remaining 50% after T1 profit."
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                    else:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.realized_r_multiple = -1.0
+                        entry.realized_pnl_rupees = - entry.capital_risk_rupees
+                        entry.realized_pnl_net = - entry.capital_risk_rupees - entry.tca_friction_est
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.sl_premium
+                        entry.notes += f" | SL Hit @ ₹{current_high:.1f}"
                     updates_count += 1
                 elif current_low <= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
                     entry.realized_r_multiple = 4.0
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5 - entry.tca_friction_est, 2)
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot
                     entry.exit_premium = entry.target_3_premium
@@ -480,8 +587,9 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_low <= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
-                    entry.realized_r_multiple = entry.r_multiple_t2
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.r_multiple_t2 - entry.tca_friction_est, 2)
+                    entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
@@ -489,8 +597,11 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_low <= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
+                    entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
+                    entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price
-                    entry.notes += f" | T1 Hit. SL trailed to entry."
+                    entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
                     updates_count += 1
 
         if updates_count > 0:
@@ -506,7 +617,8 @@ class LiveSignalJournal:
         capital: float = 500000.0
     ) -> int:
         """
-        Scans through the loaded intraday dataframe and populates all historical signals and their trade outcomes.
+        Scans through the loaded intraday dataframe and populates historical signals and their trade outcomes.
+        Tags seeded entries with is_seed=True and maintains strict idempotency.
         """
         from src.options_engine import generate_option_trade_ticket
         from src.strategy_rules import SignalType
@@ -525,33 +637,56 @@ class LiveSignalJournal:
             cur_high = float(sub_df.iloc[-1]["high"])
             cur_low = float(sub_df.iloc[-1]["low"])
             bar_ts = sub_df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(sub_df.index[-1], "strftime") else str(sub_df.index[-1])
+            bar_t_str = sub_df.index[-1].strftime("%H:%M") if hasattr(sub_df.index[-1], "strftime") else "12:00"
             
             # Update previous open trades first
-            self.update_open_trades_lifecycle(cur_spot, cur_high, cur_low)
+            self.update_open_trades_lifecycle(cur_spot, cur_high, cur_low, bar_time_str=bar_t_str)
             
+            # Deduplication: do not re-evaluate / re-seed if bar already processed
+            if any(e.bar_timestamp == bar_ts for e in self.entries):
+                continue
+
             # Evaluate signal on this bar using full df history context
             sig = strategy_engine.evaluate_bar(df, current_idx=i, live_iv=live_iv)
             if sig.signal_type != SignalType.WAIT:
                 tkt = generate_option_trade_ticket(cur_spot, sig, capital, 0.0, iv=live_iv)
                 if tkt.get("status") == "READY":
+                    # Prefer the score computed at decision time (Phase 1 pre-decision scoring);
+                    # only a few ungated branches (e.g. the 3PM breakout) skip it, so fall back
+                    # to computing it now rather than a hardcoded placeholder.
+                    if sig.details and "confluence_score" in sig.details:
+                        c_score = sig.details["confluence_score"]
+                    else:
+                        c_score, _ = calculate_confluence_score(sig, sub_df)
+                    # Real regime for this historical bar, from the same Markov switcher
+                    # instance the engine used internally, not a hardcoded placeholder.
+                    try:
+                        regime_snapshot = strategy_engine.markov_switcher.infer_regimes(sub_df)
+                    except Exception:
+                        regime_snapshot = {"active_regime": "UNKNOWN"}
                     entry = self.log_signal(
                         signal=sig,
                         ticket=tkt,
                         current_spot=cur_spot,
                         bar_timestamp=bar_ts,
-                        regime_info={"active_regime": "TRENDING_EXPANSION"},
-                        confluence_score=85.0,
-                        df_context=sub_df
+                        regime_info=regime_snapshot,
+                        confluence_score=c_score,
+                        df_context=sub_df,
+                        is_seed=True,
+                        setup_id=sig.signal_type.value,
+                        gate_audit=sig.details.get("gate_audit", {}) if sig.details else {}
                     )
                     if entry:
                         seeded_count += 1
                         
         # Final pass update
         if len(df) > 0:
+            final_t_str = df.index[-1].strftime("%H:%M") if hasattr(df.index[-1], "strftime") else "15:30"
             self.update_open_trades_lifecycle(
                 current_spot=float(df.iloc[-1]["close"]),
                 current_high=float(df.iloc[-1]["high"]),
-                current_low=float(df.iloc[-1]["low"])
+                current_low=float(df.iloc[-1]["low"]),
+                bar_time_str=final_t_str
             )
             
         return seeded_count
@@ -687,7 +822,7 @@ class SignalPerformanceAnalyzer:
     and behavioral tilt / losing streak diagnostics.
     """
 
-    def __init__(self, entries: Optional[List[SignalEntry]] = None):
+    def __init__(self, entries: Optional[List[SignalEntry]] = None, include_seeds: bool = False):
         raw = entries or []
         self.raw_entries: List[SignalEntry] = list(raw)
         # Filter completed / closed actionable trades
@@ -695,6 +830,7 @@ class SignalPerformanceAnalyzer:
         self.closed_entries: List[SignalEntry] = [
             e for e in self.raw_entries
             if not e.is_active() and e.signal_type not in ["WAIT", wait_val]
+            and (include_seeds or not getattr(e, "is_seed", False))
         ]
         self.entries: List[SignalEntry] = self.closed_entries
 

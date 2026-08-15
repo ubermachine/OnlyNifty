@@ -32,7 +32,9 @@ class BacktestEngine:
         df_5m: pd.DataFrame,
         enable_3tier: bool = True,
         enable_dynamic_trailing: bool = True,
-        enable_pyramiding: bool = False
+        enable_pyramiding: bool = False,
+        option_chain_df: Optional[pd.DataFrame] = None,
+        options_context: Optional[Dict[str, Any]] = None
     ) -> BacktestResults:
         """Executes high-fidelity bar-by-bar institutional simulation with 3-tier exits, dynamic trailing, and 4-leg TCA friction."""
         if df_5m.empty or len(df_5m) < 25:
@@ -100,12 +102,18 @@ class BacktestEngine:
             
             if not in_trade:
                 if not is_session_locked:
-                    signal = self.strategy.evaluate_bar(df_5m, current_idx=i)
+                    signal = self.strategy.evaluate_bar(
+                        df_5m,
+                        current_idx=i,
+                        option_chain_df=option_chain_df,
+                        options_context=options_context
+                    )
                     if signal.signal_type in [SignalType.LONG, SignalType.SHORT, SignalType.LONG_3PM, SignalType.SHORT_3PM]:
                         ticket = generate_option_trade_ticket(
                             close, signal, capital, current_dd_pct,
                             t_days=0.15 if is_0dte_afternoon else 4.0,
-                            is_0dte_afternoon=is_0dte_afternoon
+                            is_0dte_afternoon=is_0dte_afternoon,
+                            current_intraday_pnl=gross_pnl_accumulated - total_tca_accumulated
                         )
                         if ticket.get("status") == "READY" and ticket.get("lots", 0) > 0:
                             in_trade = True

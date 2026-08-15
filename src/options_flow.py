@@ -341,13 +341,11 @@ def compute_short_term_directional_vector(
     
     s_hfi = max(min(float(hfi_score), 1.0), -1.0)
     
-    d_intraday = (
-        0.30 * s_doi +
-        0.25 * s_vc +
-        0.20 * s_pcr +
-        0.15 * s_straddle +
-        0.10 * s_hfi
-    )
+    # IMP-2: Equal-weight D-vector (Timmermann 2006 academic evidence)
+    # Simple equal-weighted combinations often outperform optimized weights
+    # due to parameter instability and estimation errors.
+    # Previous: 0.30*doi + 0.25*vc + 0.20*pcr + 0.15*straddle + 0.10*hfi
+    d_intraday = 0.20 * s_doi + 0.20 * s_vc + 0.20 * s_pcr + 0.20 * s_straddle + 0.20 * s_hfi
     d_intraday = max(min(round(d_intraday, 3), 1.0), -1.0)
     conviction_pct = round(abs(d_intraday) * 100.0, 1)
     
@@ -396,6 +394,7 @@ def compute_short_term_directional_vector(
         "suggested_action": action,
         "target_price": target_price,
         "stop_price": stop_price,
+        "weighting_method": "equal_weight_timmermann_2006",
         "straddle_metrics": straddle_res,
         "oi_metrics": oi_res,
         "pcr_metrics": pcr_res,
@@ -414,12 +413,40 @@ def compute_short_term_directional_vector(
 # v5.1 STRIKE-LEVEL & HEATMAP ANALYTICS FUNCTIONS
 # =============================================================================
 
-def _extract_normalized_chain(option_chain_df: Optional[pd.DataFrame], spot: float) -> pd.DataFrame:
+def _extract_normalized_chain(option_chain_df: Any, spot: float) -> pd.DataFrame:
     """
     Normalizes option chain DataFrame column names and extracts standard derivatives metrics.
     If DataFrame is empty or None, generates a sensible synthetic fallback around spot.
     """
-    if option_chain_df is None or option_chain_df.empty:
+    if option_chain_df is not None and isinstance(option_chain_df, dict):
+        if "dataframe" in option_chain_df and isinstance(option_chain_df["dataframe"], pd.DataFrame):
+            option_chain_df = option_chain_df["dataframe"]
+        elif "records" in option_chain_df and isinstance(option_chain_df["records"], dict) and "data" in option_chain_df["records"]:
+            # NSE API format
+            rows = []
+            for item in option_chain_df["records"]["data"]:
+                stk = item.get("strikePrice")
+                ce = item.get("CE", {})
+                pe = item.get("PE", {})
+                rows.append({
+                    "strike": float(stk),
+                    "ce_oi": float(ce.get("openInterest", 0)),
+                    "pe_oi": float(pe.get("openInterest", 0)),
+                    "ce_change_oi": float(ce.get("changeinOpenInterest", 0)),
+                    "pe_change_oi": float(pe.get("changeinOpenInterest", 0)),
+                    "ce_volume": float(ce.get("totalTradedVolume", 0)),
+                    "pe_volume": float(pe.get("totalTradedVolume", 0)),
+                    "ce_ltp": float(ce.get("lastPrice", 0)),
+                    "pe_ltp": float(pe.get("lastPrice", 0))
+                })
+            option_chain_df = pd.DataFrame(rows)
+        else:
+            try:
+                option_chain_df = pd.DataFrame(option_chain_df)
+            except Exception:
+                option_chain_df = None
+
+    if option_chain_df is None or not isinstance(option_chain_df, pd.DataFrame) or option_chain_df.empty:
         atm = int(round(spot / 50.0) * 50)
         strikes = [atm + i * 50 for i in range(-12, 13)]
         rows = []
@@ -697,6 +724,14 @@ def compute_strike_level_gex_chart_data(
       strikes, net_gex_per_strike, call_gex_per_strike, put_gex_per_strike,
       call_wall_strike, put_wall_strike, zero_gex_strike, net_dealer_regime.
     """
+    # NOTE (IMP-7 India GEX Correction): Indian F&O market structure differs
+    # from US. In India, retail/proprietary traders dominate the short OI side,
+    # not market makers. The GEX computation should account for participant-wise
+    # OI distribution when available. When participant data shows retail/prop
+    # dominance (>70% of short OI), the gamma regime interpretation may need
+    # inversion. Currently, we flag this as a data_quality note rather than
+    # inverting automatically, to avoid false regime flips.
+    
     spot = max(float(spot), 1.0)
     clean_df = _extract_normalized_chain(option_chain_df, spot=spot)
 
@@ -760,6 +795,7 @@ def compute_strike_level_gex_chart_data(
         "net_dealer_regime": net_dealer_regime,
         "total_net_gex_cr": round(float(total_net_gex), 2),
         "total_call_gex_cr": round(float(total_call_gex), 2),
-        "total_put_gex_cr": round(float(total_put_gex), 2)
+        "total_put_gex_cr": round(float(total_put_gex), 2),
+        "india_gex_note": "Indian market: Retail/prop traders dominate short OI. GEX regime may differ from US-style dealer model."
     }
 

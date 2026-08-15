@@ -521,6 +521,11 @@ def run_pillar_5():
     df_3pm.iloc[idx_1500, df_3pm.columns.get_loc("high")] = 24500.0
     df_3pm.iloc[idx_1500, df_3pm.columns.get_loc("low")] = 24470.0
     df_3pm.iloc[idx_1505, df_3pm.columns.get_loc("close")] = 24520.0
+    # v5.3 IMP-7: Hardened 3PM requires volume surge (>1.5x avg). Inject high volume.
+    if "volume" in df_3pm.columns:
+        df_3pm["volume"] = df_3pm["volume"].astype(np.int64)
+        avg_vol_test = float(df_3pm["volume"].mean())
+        df_3pm.iloc[idx_1505, df_3pm.columns.get_loc("volume")] = int(avg_vol_test * 2.5)
     
     sig_3pm_long = strat.evaluate_bar(df_3pm, current_idx=idx_1505)
     assert sig_3pm_long.signal_type == SignalType.LONG_3PM, f"3PM Long failed, got {sig_3pm_long.signal_type}"
