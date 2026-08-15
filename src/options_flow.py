@@ -1,5 +1,5 @@
 """
-JustNifty v4.1 Institutional Options Flow & Short-Term Direction Deduction Engine.
+JustNifty v5.1 Institutional Options Flow & Strike-Level Heatmap Analytics Engine.
 
 Provides real-time mathematical derivatives microstructure analytics:
 1. Combined ATM Straddle & Expected Day Range Corridor (Upper / Lower Breakevens)
@@ -7,6 +7,9 @@ Provides real-time mathematical derivatives microstructure analytics:
 3. Dealer Vanna-Charm Mechanical Drift Vector (Continuous Delta-Hedging Flow)
 4. PCR 15-Minute Momentum Velocity (dPCR/dt)
 5. Composite Short-Term Directional Vector (D_intraday in [-1.0, +1.0]) with Conviction Scoring
+6. Strike-Level Open Interest Change Heatmap & Writing Bias Classification (v5.1)
+7. Strike-by-Strike Dealer Gamma Exposure (GEX) Distribution & Gamma Flip Analytics (v5.1)
+8. Institutional OI-Based Range Forecast & Location Bias Classification (v5.1)
 """
 
 import math
@@ -15,8 +18,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from src.config import DEFAULT_IV, RISK_FREE_RATE
-from src.options_engine import black_scholes_greeks
+from src.config import DEFAULT_IV, RISK_FREE_RATE, LOT_SIZE
+from src.options_engine import black_scholes_greeks, calculate_pcr_and_max_pain
 
 
 def compute_atm_straddle_metrics(
@@ -405,3 +408,358 @@ def compute_short_term_directional_vector(
             "s_hfi": round(s_hfi, 3)
         }
     }
+
+
+# =============================================================================
+# v5.1 STRIKE-LEVEL & HEATMAP ANALYTICS FUNCTIONS
+# =============================================================================
+
+def _extract_normalized_chain(option_chain_df: Optional[pd.DataFrame], spot: float) -> pd.DataFrame:
+    """
+    Normalizes option chain DataFrame column names and extracts standard derivatives metrics.
+    If DataFrame is empty or None, generates a sensible synthetic fallback around spot.
+    """
+    if option_chain_df is None or option_chain_df.empty:
+        atm = int(round(spot / 50.0) * 50)
+        strikes = [atm + i * 50 for i in range(-12, 13)]
+        rows = []
+        for k in strikes:
+            dist = abs(k - spot)
+            base_oi = max(int(1000000 * math.exp(-0.5 * (dist / 300.0) ** 2)), 25000)
+            rows.append({
+                "strike": float(k),
+                "ce_oi": base_oi if k >= spot else int(base_oi * 0.7),
+                "pe_oi": base_oi if k <= spot else int(base_oi * 0.7),
+                "ce_change_oi": int(base_oi * 0.15) if k >= spot else int(base_oi * -0.05),
+                "pe_change_oi": int(base_oi * 0.15) if k <= spot else int(base_oi * -0.05),
+                "ce_volume": int(base_oi * 0.4),
+                "pe_volume": int(base_oi * 0.4),
+                "ce_ltp": max(spot - k + 30.0, 10.0) if spot > k else max(100.0 - dist * 0.3, 5.0),
+                "pe_ltp": max(k - spot + 30.0, 10.0) if k > spot else max(100.0 - dist * 0.3, 5.0)
+            })
+        return pd.DataFrame(rows)
+
+    df = option_chain_df.copy()
+    col_map = {c: str(c).strip().lower().replace(" ", "_") for c in df.columns}
+    df.rename(columns=col_map, inplace=True)
+
+    strike_col = next((c for c in ["strike", "strikeprice", "strike_price"] if c in df.columns), None)
+    if not strike_col:
+        for c in df.columns:
+            if pd.to_numeric(df[c], errors="coerce").notnull().all():
+                strike_col = c
+                break
+    if not strike_col:
+        strike_col = df.columns[0]
+
+    ce_oi_col = next((c for c in ["ce_oi", "ce_open_interest", "call_oi", "openinterest_ce", "ce_openinterest"] if c in df.columns), None)
+    pe_oi_col = next((c for c in ["pe_oi", "pe_open_interest", "put_oi", "openinterest_pe", "pe_openinterest"] if c in df.columns), None)
+    
+    ce_chg_col = next((c for c in ["ce_change_oi", "ce_changeinopeninterest", "ce_change_in_open_interest", "call_change_oi", "ce_chg_oi"] if c in df.columns), None)
+    pe_chg_col = next((c for c in ["pe_change_oi", "pe_changeinopeninterest", "pe_change_in_open_interest", "put_change_oi", "pe_chg_oi"] if c in df.columns), None)
+    
+    ce_vol_col = next((c for c in ["ce_volume", "ce_total_volume", "ce_totaltradedvolume", "call_volume", "ce_vol"] if c in df.columns), None)
+    pe_vol_col = next((c for c in ["pe_volume", "pe_total_volume", "pe_totaltradedvolume", "put_volume", "pe_vol"] if c in df.columns), None)
+
+    ce_ltp_col = next((c for c in ["ce_ltp", "ce_lastprice", "ce_last_price", "call_ltp", "call_price"] if c in df.columns), None)
+    pe_ltp_col = next((c for c in ["pe_ltp", "pe_lastprice", "pe_last_price", "put_ltp", "put_price"] if c in df.columns), None)
+
+    clean_df = pd.DataFrame()
+    clean_df["strike"] = pd.to_numeric(df[strike_col], errors="coerce")
+    clean_df = clean_df.dropna(subset=["strike"]).sort_values("strike").reset_index(drop=True)
+
+    clean_df["ce_oi"] = pd.to_numeric(df[ce_oi_col], errors="coerce").fillna(0) if ce_oi_col else 0
+    clean_df["pe_oi"] = pd.to_numeric(df[pe_oi_col], errors="coerce").fillna(0) if pe_oi_col else 0
+    
+    clean_df["ce_change_oi"] = pd.to_numeric(df[ce_chg_col], errors="coerce").fillna(0) if ce_chg_col else 0
+    clean_df["pe_change_oi"] = pd.to_numeric(df[pe_chg_col], errors="coerce").fillna(0) if pe_chg_col else 0
+
+    clean_df["ce_volume"] = pd.to_numeric(df[ce_vol_col], errors="coerce").fillna(0) if ce_vol_col else 0
+    clean_df["pe_volume"] = pd.to_numeric(df[pe_vol_col], errors="coerce").fillna(0) if pe_vol_col else 0
+
+    clean_df["ce_ltp"] = pd.to_numeric(df[ce_ltp_col], errors="coerce").fillna(0.0) if ce_ltp_col else 0.0
+    clean_df["pe_ltp"] = pd.to_numeric(df[pe_ltp_col], errors="coerce").fillna(0.0) if pe_ltp_col else 0.0
+
+    return clean_df
+
+
+def compute_oi_based_range_forecast(
+    option_chain_df: Optional[pd.DataFrame] = None,
+    spot: float = 24800.0,
+    max_pain: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Identifies Put Wall (support), Call Wall (resistance), Max Pain, and computes
+    spot position percentage and location bias within the institutional derivatives corridor.
+    
+    Parameters:
+    - option_chain_df: Raw or normalized option chain DataFrame.
+    - spot: Current spot price of underlying index.
+    - max_pain: Optional override for Max Pain strike price.
+    
+    Returns:
+    - Dict with put_wall, call_wall, max_pain, spot_position_pct, location_bias, expected_corridor, etc.
+    """
+    spot = max(float(spot), 1.0)
+    clean_df = _extract_normalized_chain(option_chain_df, spot=spot)
+
+    if clean_df.empty:
+        atm = int(round(spot / 50.0) * 50)
+        call_wall = float(atm + 200)
+        put_wall = float(atm - 200)
+        max_pain_val = float(max_pain) if (max_pain is not None and max_pain > 0) else float(atm)
+    else:
+        # Support is strike with highest Put OI
+        max_pe_idx = clean_df["pe_oi"].idxmax()
+        put_wall = float(clean_df.loc[max_pe_idx, "strike"])
+        
+        # Resistance is strike with highest Call OI
+        max_ce_idx = clean_df["ce_oi"].idxmax()
+        call_wall = float(clean_df.loc[max_ce_idx, "strike"])
+        
+        if max_pain is not None and float(max_pain) > 0:
+            max_pain_val = float(max_pain)
+        else:
+            mp_res = calculate_pcr_and_max_pain(clean_df)
+            max_pain_val = float(mp_res.get("max_pain_strike", round(spot / 50.0) * 50))
+
+    if call_wall <= put_wall:
+        # Guard against inverted or anomalous wall ordering
+        call_wall = max(call_wall, put_wall + 100.0)
+        put_wall = min(put_wall, call_wall - 100.0)
+
+    range_width = max(call_wall - put_wall, 1.0)
+    raw_pct = ((spot - put_wall) / range_width) * 100.0
+    spot_position_pct = max(0.0, min(100.0, round(raw_pct, 1)))
+
+    if spot_position_pct <= 35.0:
+        location_bias = "NEAR_SUPPORT_ACCUMULATION"
+        bias_desc = f"Spot is near Put Wall support (₹{put_wall:.0f}). High probability of accumulation bounce."
+    elif spot_position_pct >= 65.0:
+        location_bias = "NEAR_RESISTANCE_DISTRIBUTION"
+        bias_desc = f"Spot is near Call Wall resistance (₹{call_wall:.0f}). Heavy overhead writing supply."
+    else:
+        location_bias = "MID_RANGE_CONSOLIDATION"
+        bias_desc = f"Spot is rangebound between ₹{put_wall:.0f} and ₹{call_wall:.0f} with Max Pain at ₹{max_pain_val:.0f}."
+
+    return {
+        "spot": round(float(spot), 2),
+        "put_wall": round(float(put_wall), 2),
+        "call_wall": round(float(call_wall), 2),
+        "support_strike": round(float(put_wall), 2),
+        "resistance_strike": round(float(call_wall), 2),
+        "max_pain": round(float(max_pain_val), 2),
+        "range_width_pts": round(float(range_width), 2),
+        "spot_position_pct": spot_position_pct,
+        "location_bias": location_bias,
+        "expected_corridor": (round(float(put_wall), 2), round(float(call_wall), 2)),
+        "bias_description": bias_desc
+    }
+
+
+def compute_oi_change_heatmap(
+    option_chain_df: Optional[pd.DataFrame] = None,
+    spot: float = 24800.0,
+    range_pts: float = 500.0,
+    highlight_threshold_mult: float = 2.0
+) -> Dict[str, Any]:
+    """
+    Computes strike-level Open Interest change heatmap, hot strike additions,
+    writing bias, color intensity score in [-1.0, +1.0], and range forecast.
+    
+    Parameters:
+    - option_chain_df: Option chain DataFrame.
+    - spot: Current index spot price.
+    - range_pts: Range around spot to analyze (e.g. +/- 500 points).
+    - highlight_threshold_mult: Multiplier above mean OI addition to flag a hot strike (default 2.0x).
+    
+    Returns:
+    - Dict with heatmap_rows, hot_ce_strikes, hot_pe_strikes, total_ce_writing,
+      total_pe_writing, writing_bias, support, resistance, range_forecast.
+    """
+    spot = max(float(spot), 1.0)
+    clean_df = _extract_normalized_chain(option_chain_df, spot=spot)
+
+    # Filter strikes within +/- range_pts
+    filtered_df = clean_df[
+        (clean_df["strike"] >= (spot - range_pts)) & 
+        (clean_df["strike"] <= (spot + range_pts))
+    ].copy().sort_values("strike").reset_index(drop=True)
+
+    if filtered_df.empty:
+        filtered_df = clean_df.copy().sort_values("strike").reset_index(drop=True)
+
+    # Compute mean positive additions for thresholding
+    ce_pos = filtered_df[filtered_df["ce_change_oi"] > 0]["ce_change_oi"]
+    mean_ce_add = float(ce_pos.mean()) if not ce_pos.empty else float(filtered_df["ce_change_oi"].abs().mean() or 10000.0)
+    
+    pe_pos = filtered_df[filtered_df["pe_change_oi"] > 0]["pe_change_oi"]
+    mean_pe_add = float(pe_pos.mean()) if not pe_pos.empty else float(filtered_df["pe_change_oi"].abs().mean() or 10000.0)
+
+    ce_thresh = highlight_threshold_mult * mean_ce_add
+    pe_thresh = highlight_threshold_mult * mean_pe_add
+
+    heatmap_rows: List[Dict[str, Any]] = []
+    hot_ce_strikes: List[float] = []
+    hot_pe_strikes: List[float] = []
+
+    for _, row in filtered_df.iterrows():
+        k = float(row["strike"])
+        ce_oi = int(row["ce_oi"])
+        pe_oi = int(row["pe_oi"])
+        ce_chg = int(row["ce_change_oi"])
+        pe_chg = int(row["pe_change_oi"])
+        ce_vol = int(row["ce_volume"])
+        pe_vol = int(row["pe_volume"])
+        
+        net_strike_oi_delta = pe_chg - ce_chg
+        is_hot_ce = bool(ce_chg > ce_thresh and ce_chg > 0)
+        is_hot_pe = bool(pe_chg > pe_thresh and pe_chg > 0)
+
+        if is_hot_ce:
+            hot_ce_strikes.append(k)
+        if is_hot_pe:
+            hot_pe_strikes.append(k)
+
+        abs_sum = abs(pe_chg) + abs(ce_chg)
+        intensity = float(net_strike_oi_delta / (abs_sum + 1e-6)) if abs_sum > 0 else 0.0
+        color_intensity = round(max(-1.0, min(1.0, intensity)), 3)
+
+        ce_regime = "CALL_WRITING_RESISTANCE" if ce_chg > 0 else ("CALL_UNWINDING_COVER" if ce_chg < 0 else "NEUTRAL")
+        pe_regime = "PUT_WRITING_SUPPORT" if pe_chg > 0 else ("PUT_UNWINDING_EXIT" if pe_chg < 0 else "NEUTRAL")
+
+        heatmap_rows.append({
+            "strike": k,
+            "ce_oi": ce_oi,
+            "pe_oi": pe_oi,
+            "ce_change_oi": ce_chg,
+            "pe_change_oi": pe_chg,
+            "ce_volume": ce_vol,
+            "pe_volume": pe_vol,
+            "net_strike_oi_delta": net_strike_oi_delta,
+            "is_hot_ce": is_hot_ce,
+            "is_hot_pe": is_hot_pe,
+            "color_intensity": color_intensity,
+            "ce_regime": ce_regime,
+            "pe_regime": pe_regime
+        })
+
+    total_ce_writing = int(sum(max(0, r["ce_change_oi"]) for r in heatmap_rows))
+    total_pe_writing = int(sum(max(0, r["pe_change_oi"]) for r in heatmap_rows))
+
+    if total_ce_writing > 1.25 * max(total_pe_writing, 1):
+        writing_bias = "CALL_WRITING_HEAVY_RESISTANCE"
+    elif total_pe_writing > 1.25 * max(total_ce_writing, 1):
+        writing_bias = "PUT_WRITING_HEAVY_SUPPORT"
+    else:
+        writing_bias = "BALANCED_RANGE"
+
+    # Support (highest PE OI strike) and Resistance (highest CE OI strike)
+    max_pe_idx = clean_df["pe_oi"].idxmax() if not clean_df.empty else 0
+    support = float(clean_df.loc[max_pe_idx, "strike"]) if not clean_df.empty else round(spot - 150.0, 2)
+    
+    max_ce_idx = clean_df["ce_oi"].idxmax() if not clean_df.empty else 0
+    resistance = float(clean_df.loc[max_ce_idx, "strike"]) if not clean_df.empty else round(spot + 150.0, 2)
+
+    range_fc = compute_oi_based_range_forecast(option_chain_df, spot=spot)
+
+    return {
+        "heatmap_rows": heatmap_rows,
+        "hot_ce_strikes": hot_ce_strikes,
+        "hot_pe_strikes": hot_pe_strikes,
+        "total_ce_writing": total_ce_writing,
+        "total_pe_writing": total_pe_writing,
+        "writing_bias": writing_bias,
+        "support": support,
+        "resistance": resistance,
+        "range_forecast": range_fc
+    }
+
+
+def compute_strike_level_gex_chart_data(
+    option_chain_df: Optional[pd.DataFrame] = None,
+    spot: float = 24800.0,
+    iv: float = DEFAULT_IV,
+    t_days: float = 4.0
+) -> Dict[str, Any]:
+    """
+    Computes strike-by-strike Dealer Gamma Exposure (in ₹ Crores) using Black-Scholes gamma.
+    Identifies Call Wall strike (max call GEX), Put Wall strike (max put GEX), and Zero-GEX flip level.
+    
+    Parameters:
+    - option_chain_df: Option chain DataFrame.
+    - spot: Index spot price.
+    - iv: Implied Volatility (annualized, e.g. 0.12 or 12.0).
+    - t_days: Days to expiry.
+    
+    Returns:
+    - Structured dict ready for Plotly bar chart rendering:
+      strikes, net_gex_per_strike, call_gex_per_strike, put_gex_per_strike,
+      call_wall_strike, put_wall_strike, zero_gex_strike, net_dealer_regime.
+    """
+    spot = max(float(spot), 1.0)
+    clean_df = _extract_normalized_chain(option_chain_df, spot=spot)
+
+    sigma_clean = (iv / 100.0) if iv > 1.0 else iv
+    sigma_clean = max(sigma_clean, 0.01)
+
+    strikes: List[float] = []
+    call_gex_per_strike: List[float] = []
+    put_gex_per_strike: List[float] = []
+    net_gex_per_strike: List[float] = []
+
+    total_net_gex = 0.0
+    total_call_gex = 0.0
+    total_put_gex = 0.0
+
+    for _, row in clean_df.iterrows():
+        s = float(row["strike"])
+        c_oi = float(row["ce_oi"])
+        p_oi = float(row["pe_oi"])
+
+        g_c = black_scholes_greeks(spot, s, t_days=t_days, sigma=sigma_clean, is_call=True)["gamma"]
+        g_p = black_scholes_greeks(spot, s, t_days=t_days, sigma=sigma_clean, is_call=False)["gamma"]
+
+        call_gex_cr = (g_c * c_oi * spot * LOT_SIZE * 0.01) / 1e7
+        put_gex_cr = - (g_p * p_oi * spot * LOT_SIZE * 0.01) / 1e7
+        net_gex_cr = call_gex_cr + put_gex_cr
+
+        strikes.append(s)
+        call_gex_per_strike.append(round(float(call_gex_cr), 3))
+        put_gex_per_strike.append(round(float(put_gex_cr), 3))
+        net_gex_per_strike.append(round(float(net_gex_cr), 3))
+
+        total_net_gex += net_gex_cr
+        total_call_gex += call_gex_cr
+        total_put_gex += put_gex_cr
+
+    if strikes:
+        call_wall_idx = int(np.argmax(call_gex_per_strike))
+        call_wall_strike = float(strikes[call_wall_idx])
+
+        put_wall_idx = int(np.argmin(put_gex_per_strike))  # most negative put gex
+        put_wall_strike = float(strikes[put_wall_idx])
+
+        zero_gex_idx = int(np.argmin([abs(g) for g in net_gex_per_strike]))
+        zero_gex_strike = float(strikes[zero_gex_idx])
+    else:
+        call_wall_strike = round(spot + 150.0, 2)
+        put_wall_strike = round(spot - 150.0, 2)
+        zero_gex_strike = round(spot, 2)
+
+    net_dealer_regime = "DEALER_LONG_GAMMA" if total_net_gex >= 0 else "DEALER_SHORT_GAMMA"
+
+    return {
+        "strikes": strikes,
+        "net_gex_per_strike": net_gex_per_strike,
+        "call_gex_per_strike": call_gex_per_strike,
+        "put_gex_per_strike": put_gex_per_strike,
+        "call_wall_strike": call_wall_strike,
+        "put_wall_strike": put_wall_strike,
+        "zero_gex_strike": zero_gex_strike,
+        "net_dealer_regime": net_dealer_regime,
+        "total_net_gex_cr": round(float(total_net_gex), 2),
+        "total_call_gex_cr": round(float(total_call_gex), 2),
+        "total_put_gex_cr": round(float(total_put_gex), 2)
+    }
+

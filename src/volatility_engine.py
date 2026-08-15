@@ -14,7 +14,7 @@ options traders from the rest:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 from src.config import DEFAULT_IV
 
 
@@ -381,3 +381,232 @@ class VolatilityIntelligence:
             "sell_vol_score": round(sell_vol_score, 2),
             "buy_vol_score": round(buy_vol_score, 2)
         }
+
+    # ────────────────── 7. Volatility Cone Analysis ──────────────────
+
+    @staticmethod
+    def compute_volatility_cone(
+        close_prices: Union[pd.Series, np.ndarray, List[float]],
+        windows: Optional[List[int]] = None,
+        percentiles: Optional[List[int]] = None,
+        annualization_factor: float = 252 * 75
+    ) -> Dict[str, Any]:
+        """
+        Constructs an institutional Volatility Cone across multiple lookback windows
+        ([5, 10, 20, 60]). Computes historical rolling realized volatility distributions
+        and percentile quantiles ([10, 25, 50, 75, 90]) to pinpoint volatility coiling/expansion.
+        """
+        if windows is None:
+            windows = [5, 10, 20, 60]
+        if percentiles is None:
+            percentiles = [10, 25, 50, 75, 90]
+
+        if isinstance(close_prices, pd.DataFrame):
+            prices_arr = close_prices["close"].values if "close" in close_prices.columns else close_prices.iloc[:, 0].values
+        elif isinstance(close_prices, pd.Series):
+            prices_arr = close_prices.values
+        else:
+            prices_arr = np.array(close_prices, dtype=np.float64)
+
+        prices_arr = np.maximum(prices_arr, 1.0)
+        n_points = len(prices_arr)
+
+        cone_table = []
+        cone_data = {}
+
+        if n_points < 3:
+            for w in windows:
+                w_dict = {
+                    "window": w, "min": 0.08, "p10": 0.10, "p25": 0.12,
+                    "p50": 0.14, "p75": 0.16, "p90": 0.18, "max": 0.22,
+                    "mean": 0.14, "current_rv": 0.14, "rv_percentile": 50.0
+                }
+                cone_data[w] = w_dict
+                cone_table.append(w_dict)
+            return {
+                "windows": windows,
+                "percentiles": percentiles,
+                "cone_data": cone_data,
+                "cone_dataframe": pd.DataFrame(cone_table),
+                "summary": "Insufficient price history; returning baseline volatility cone."
+            }
+
+        log_returns = np.diff(np.log(prices_arr))
+
+        for w in windows:
+            effective_w = min(w, len(log_returns))
+            if effective_w < 2:
+                roll_rvs = np.array([0.14])
+            else:
+                roll_rvs = []
+                for i in range(effective_w, len(log_returns) + 1):
+                    window_slice = log_returns[i - effective_w : i]
+                    std_val = float(np.std(window_slice, ddof=1)) * np.sqrt(annualization_factor)
+                    roll_rvs.append(std_val)
+                roll_rvs = np.array(roll_rvs) if roll_rvs else np.array([0.14])
+
+            current_rv = float(roll_rvs[-1]) if len(roll_rvs) > 0 else 0.14
+            min_val = float(np.min(roll_rvs))
+            max_val = float(np.max(roll_rvs))
+            mean_val = float(np.mean(roll_rvs))
+
+            pctile_values = {}
+            for p in percentiles:
+                pctile_values[f"p{p}"] = round(float(np.percentile(roll_rvs, p)), 4)
+
+            count_below = sum(1 for v in roll_rvs if v < current_rv)
+            rv_rank = round((count_below / max(len(roll_rvs), 1)) * 100.0, 1)
+
+            w_record = {
+                "window": w,
+                "min": round(min_val, 4),
+                **pctile_values,
+                "max": round(max_val, 4),
+                "mean": round(mean_val, 4),
+                "current_rv": round(current_rv, 4),
+                "rv_percentile": rv_rank
+            }
+            cone_data[w] = w_record
+            cone_table.append(w_record)
+
+        df_cone = pd.DataFrame(cone_table)
+        short_w = windows[0]
+        short_pct = cone_data[short_w]["rv_percentile"]
+        if short_pct <= 20.0:
+            summary_txt = f"Extreme Volatility Compression: Short-term ({short_w}-period) RV is in bottom {short_pct:.0f}% quantile."
+        elif short_pct >= 80.0:
+            summary_txt = f"Extreme Volatility Expansion: Short-term ({short_w}-period) RV is in top {100-short_pct:.0f}% quantile."
+        else:
+            summary_txt = f"Normal Volatility Regime: Short-term ({short_w}-period) RV is at {short_pct:.0f}th percentile."
+
+        return {
+            "windows": windows,
+            "percentiles": percentiles,
+            "cone_data": cone_data,
+            "cone_dataframe": df_cone,
+            "summary": summary_txt
+        }
+
+    # ────────────────── 8. RV Term Structure & Breakout Signal ──────────────────
+
+    @staticmethod
+    def compute_rv_term_structure(
+        close_prices: Union[pd.Series, np.ndarray, List[float]],
+        annualization_factor: float = 252 * 75
+    ) -> Dict[str, Any]:
+        """
+        Calculates 5d, 10d, 20d, 60d (or period equivalent) Realized Volatility term structure.
+        Classifies term structure as 'INVERTED_EXPANDING', 'NORMAL_COMPRESSING', or 'FLAT',
+        and generates an institutional Compression Breakout Signal.
+        """
+        if isinstance(close_prices, pd.DataFrame):
+            prices = close_prices["close"] if "close" in close_prices.columns else close_prices.iloc[:, 0]
+        elif isinstance(close_prices, list):
+            prices = pd.Series(close_prices)
+        else:
+            prices = close_prices
+
+        rv_5 = VolatilityIntelligence.compute_realized_volatility(prices, window=5, annualization_factor=annualization_factor)["realized_vol"]
+        rv_10 = VolatilityIntelligence.compute_realized_volatility(prices, window=10, annualization_factor=annualization_factor)["realized_vol"]
+        rv_20 = VolatilityIntelligence.compute_realized_volatility(prices, window=20, annualization_factor=annualization_factor)["realized_vol"]
+        rv_60 = VolatilityIntelligence.compute_realized_volatility(prices, window=60, annualization_factor=annualization_factor)["realized_vol"]
+
+        slope = round(rv_60 - rv_5, 4)
+        compression_ratio = round(rv_5 / max(rv_20, 0.001), 3)
+
+        if rv_5 > rv_20 * 1.10 or rv_5 > rv_60 * 1.15:
+            classification = "INVERTED_EXPANDING"
+            commentary = "Short-term RV significantly exceeds baseline. Volatility is expanding rapidly (shock/trend momentum)."
+        elif rv_5 < rv_20 * 0.90 or rv_5 < rv_60 * 0.85:
+            classification = "NORMAL_COMPRESSING"
+            commentary = "Short-term RV below baseline. Volatility is compressing (range consolidation / mean-reversion)."
+        else:
+            classification = "FLAT"
+            commentary = "Realized volatility term structure is balanced and flat across maturities."
+
+        is_breakout = bool(compression_ratio < 0.70 or (rv_5 < 0.09 and compression_ratio < 0.85))
+        if is_breakout:
+            breakout_msg = "VOLATILITY_COILING_ALERT: RV5 is severely suppressed relative to RV20 (ratio < 0.70). High probability of sharp expansion."
+        else:
+            breakout_msg = "Normal volatility dispersion; no active coiling squeeze detected."
+
+        return {
+            "rv_5": round(rv_5, 4),
+            "rv_10": round(rv_10, 4),
+            "rv_20": round(rv_20, 4),
+            "rv_60": round(rv_60, 4),
+            "term_structure_slope": slope,
+            "compression_ratio": compression_ratio,
+            "classification": classification,
+            "compression_breakout_signal": is_breakout,
+            "breakout_commentary": breakout_msg,
+            "commentary": commentary
+        }
+
+    # ────────────────── 9. IV Term Structure & Contango/Backwardation ──────────────────
+
+    @staticmethod
+    def compute_iv_term_structure(
+        expiry_iv_pairs: Union[List[Tuple[Any, float]], List[Dict[str, Any]], Dict[str, float]]
+    ) -> Dict[str, Any]:
+        """
+        Computes Implied Volatility term structure across multiple expiries.
+        Determines near vs far IV spread, classifies Contango vs Backwardation,
+        and provides structural options trading recommendations.
+        """
+        parsed_pairs: List[Tuple[str, float]] = []
+
+        if isinstance(expiry_iv_pairs, dict):
+            for k, v in expiry_iv_pairs.items():
+                parsed_pairs.append((str(k), float(v)))
+        elif isinstance(expiry_iv_pairs, list):
+            for item in expiry_iv_pairs:
+                if isinstance(item, (tuple, list)) and len(item) >= 2:
+                    parsed_pairs.append((str(item[0]), float(item[1])))
+                elif isinstance(item, dict):
+                    exp = item.get("expiry") or item.get("dte") or item.get("name") or "Expiry"
+                    iv = item.get("iv") or item.get("implied_vol") or 0.14
+                    parsed_pairs.append((str(exp), float(iv)))
+
+        if not parsed_pairs:
+            parsed_pairs = [("Near Expiry", 0.135), ("Far Expiry", 0.145)]
+
+        near_label, near_iv = parsed_pairs[0]
+        far_label, far_iv = parsed_pairs[-1]
+
+        iv_spread = round(far_iv - near_iv, 4)
+        spread_bps = round(iv_spread * 10000.0, 1)
+
+        if iv_spread > 0.005:
+            term_structure = "CONTANGO"
+            implication = (
+                "Normal Contango: Longer-dated options carry higher IV. "
+                "Front-month options suffer less Vega drag; favorable for calendar spreads and long near-dated convexity."
+            )
+        elif iv_spread < -0.005:
+            term_structure = "BACKWARDATION"
+            implication = (
+                "Inverted Backwardation: Front-month IV is elevated due to immediate event risk / panic. "
+                "Premium is rich on the near-term curve; favor selling near-dated premium or debit diagonal spreads."
+            )
+        else:
+            term_structure = "FLAT"
+            implication = (
+                "Flat IV Term Structure: Implied volatility is uniform across maturities. "
+                "Standard directional structures without term spread edge."
+            )
+
+        curve = [{"expiry": p[0], "iv": round(p[1], 4), "iv_pct": round(p[1] * 100.0, 2)} for p in parsed_pairs]
+
+        return {
+            "near_expiry": near_label,
+            "near_iv": round(near_iv, 4),
+            "far_expiry": far_label,
+            "far_iv": round(far_iv, 4),
+            "iv_spread": iv_spread,
+            "spread_bps": spread_bps,
+            "term_structure": term_structure,
+            "curve": curve,
+            "implication": implication
+        }
+

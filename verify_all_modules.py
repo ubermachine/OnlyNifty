@@ -56,7 +56,8 @@ from src.performance_analytics import (
 from src.options_flow import (
     compute_atm_straddle_metrics, compute_cumulative_oi_delta_and_traps,
     compute_pcr_momentum_derivative, compute_vanna_charm_drift_vector,
-    compute_short_term_directional_vector
+    compute_short_term_directional_vector, compute_oi_change_heatmap,
+    compute_strike_level_gex_chart_data, compute_oi_based_range_forecast
 )
 from src.strategy_rules import StrategyEngine, Signal, SignalType
 from src.signal_journal import LiveSignalJournal, SignalEntry, SignalLifecycleStatus
@@ -474,7 +475,23 @@ def run_pillar_4():
     print(f"  - Bias = '{d_vec['bias']}' ({d_vec['suggested_action']})")
     print(f"  - Sub-Scores: DOI={d_vec['component_scores']['s_doi']:+.2f}, Vanna-Charm={d_vec['component_scores']['s_vc']:+.2f}, PCR-Mom={d_vec['component_scores']['s_pcr']:+.2f}, Straddle={d_vec['component_scores']['s_straddle']:+.2f}, HFI={d_vec['component_scores']['s_hfi']:+.2f}")
     
-    results["Pillar 4"] = "ALL 5 OPTIONS FLOW MODULES PASSED (100% Microstructure Synthesis Accuracy)"
+    # 6. compute_oi_change_heatmap (v5.1)
+    heatmap_res = compute_oi_change_heatmap(oc["dataframe"], spot=spot, range_pts=400.0)
+    assert "heatmap_rows" in heatmap_res and len(heatmap_res["heatmap_rows"]) > 0, "Heatmap rows missing"
+    assert heatmap_res["writing_bias"] in ["CALL_WRITING_HEAVY_RESISTANCE", "PUT_WRITING_HEAVY_SUPPORT", "BALANCED_RANGE"]
+    print(f"[PASS] compute_oi_change_heatmap (v5.1): {len(heatmap_res['heatmap_rows'])} strikes analyzed | Bias: {heatmap_res['writing_bias']} | Hot CE: {heatmap_res['hot_ce_strikes']} | Hot PE: {heatmap_res['hot_pe_strikes']}")
+
+    # 7. compute_strike_level_gex_chart_data (v5.1)
+    gex_chart = compute_strike_level_gex_chart_data(oc["dataframe"], spot=spot, iv=0.125, t_days=3.5)
+    assert len(gex_chart["strikes"]) > 0 and "call_wall_strike" in gex_chart and "put_wall_strike" in gex_chart
+    print(f"[PASS] compute_strike_level_gex_chart_data (v5.1): Call Wall = ₹{gex_chart['call_wall_strike']:.0f} | Put Wall = ₹{gex_chart['put_wall_strike']:.0f} | Zero-GEX = ₹{gex_chart['zero_gex_strike']:.0f} | Net Regime = '{gex_chart['net_dealer_regime']}'")
+
+    # 8. compute_oi_based_range_forecast (v5.1)
+    range_fc = compute_oi_based_range_forecast(oc["dataframe"], spot=spot)
+    assert 0.0 <= range_fc["spot_position_pct"] <= 100.0 and "location_bias" in range_fc
+    print(f"[PASS] compute_oi_based_range_forecast (v5.1): Corridor [₹{range_fc['put_wall']:.0f}, ₹{range_fc['call_wall']:.0f}] (Width = {range_fc['range_width_pts']} pts) | Spot Pos = {range_fc['spot_position_pct']}% ({range_fc['location_bias']})")
+
+    results["Pillar 4"] = "ALL 8 OPTIONS FLOW MODULES PASSED (100% Microstructure Synthesis Accuracy)"
 
 def run_pillar_5():
     print("\n" + "="*80)

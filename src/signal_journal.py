@@ -18,9 +18,10 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict, field
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from src.strategy_rules import Signal, SignalType
 
@@ -675,3 +676,398 @@ class LiveSignalJournal:
             os.replace(temp_file, self.persistence_file)
         except Exception:
             pass
+
+
+class SignalPerformanceAnalyzer:
+    """
+    Institutional Signal Performance & Execution Analytics Suite.
+    
+    Provides deep-dive trade attribution, win rate decompositions across setup types,
+    intraday execution time buckets, macro/Markov regimes, confluence correlation analysis,
+    and behavioral tilt / losing streak diagnostics.
+    """
+
+    def __init__(self, entries: Optional[List[SignalEntry]] = None):
+        raw = entries or []
+        self.raw_entries: List[SignalEntry] = list(raw)
+        # Filter completed / closed actionable trades
+        wait_val = SignalType.WAIT.value if hasattr(SignalType.WAIT, "value") else "WAIT"
+        self.closed_entries: List[SignalEntry] = [
+            e for e in self.raw_entries
+            if not e.is_active() and e.signal_type not in ["WAIT", wait_val]
+        ]
+        self.entries: List[SignalEntry] = self.closed_entries
+
+    def win_rate_by_signal_type(self) -> pd.DataFrame:
+        """Computes trade counts, win rate, average R-multiple, and PnL grouped by signal type."""
+        columns = [
+            "signal_type", "total_trades", "winning_trades", "losing_trades",
+            "win_rate_pct", "avg_r_multiple", "total_pnl_rupees", "profit_factor", "avg_confluence"
+        ]
+        if not self.closed_entries:
+            return pd.DataFrame(columns=columns)
+
+        groups: Dict[str, List[SignalEntry]] = {}
+        for e in self.closed_entries:
+            stype = str(e.signal_type)
+            groups.setdefault(stype, []).append(e)
+
+        records = []
+        for stype, group in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
+            total = len(group)
+            wins = sum(1 for e in group if e.realized_r_multiple > 0)
+            losses = sum(1 for e in group if e.realized_r_multiple <= 0)
+            win_rate = round((wins / total) * 100.0, 1) if total > 0 else 0.0
+            avg_r = round(float(np.mean([e.realized_r_multiple for e in group])), 2)
+            total_pnl = round(float(sum(e.realized_pnl_rupees for e in group)), 2)
+            gross_gain = sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees > 0)
+            gross_loss = abs(sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees < 0))
+            pf = round(gross_gain / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_gain > 0 else 0.0)
+            avg_conf = round(float(np.mean([e.confluence_score for e in group])), 1)
+
+            records.append({
+                "signal_type": stype,
+                "total_trades": total,
+                "winning_trades": wins,
+                "losing_trades": losses,
+                "win_rate_pct": win_rate,
+                "avg_r_multiple": avg_r,
+                "total_pnl_rupees": total_pnl,
+                "profit_factor": pf,
+                "avg_confluence": avg_conf
+            })
+
+        return pd.DataFrame(records)
+
+    def win_rate_by_time_bucket(self, bucket_minutes: int = 30) -> pd.DataFrame:
+        """Computes trade attribution and win rate broken down into intraday time windows."""
+        columns = [
+            "time_bucket", "total_trades", "winning_trades", "losing_trades",
+            "win_rate_pct", "avg_r_multiple", "total_pnl_rupees", "profit_factor"
+        ]
+        if not self.closed_entries:
+            return pd.DataFrame(columns=columns)
+
+        def _get_bucket_key(entry: SignalEntry) -> Tuple[int, str]:
+            raw_ts = entry.timestamp_ist or entry.bar_timestamp or "09:15"
+            cleaned = raw_ts.replace("IST", "").strip()
+            time_part = cleaned.split(" ")[1] if " " in cleaned else cleaned
+            parts = time_part.split(":")
+            try:
+                hour = int(parts[0])
+                minute = int(parts[1]) if len(parts) > 1 else 0
+            except Exception:
+                hour, minute = 9, 15
+            
+            total_mins = hour * 60 + minute
+            start_mins = (total_mins // bucket_minutes) * bucket_minutes
+            end_mins = start_mins + bucket_minutes
+            start_str = f"{start_mins // 60:02d}:{start_mins % 60:02d}"
+            end_str = f"{end_mins // 60:02d}:{end_mins % 60:02d}"
+            label = f"{start_str} - {end_str}"
+            return start_mins, label
+
+        buckets: Dict[Tuple[int, str], List[SignalEntry]] = {}
+        for e in self.closed_entries:
+            k = _get_bucket_key(e)
+            buckets.setdefault(k, []).append(e)
+
+        records = []
+        for (start_min, label), group in sorted(buckets.items(), key=lambda x: x[0][0]):
+            total = len(group)
+            wins = sum(1 for e in group if e.realized_r_multiple > 0)
+            losses = sum(1 for e in group if e.realized_r_multiple <= 0)
+            win_rate = round((wins / total) * 100.0, 1) if total > 0 else 0.0
+            avg_r = round(float(np.mean([e.realized_r_multiple for e in group])), 2)
+            total_pnl = round(float(sum(e.realized_pnl_rupees for e in group)), 2)
+            gross_gain = sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees > 0)
+            gross_loss = abs(sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees < 0))
+            pf = round(gross_gain / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_gain > 0 else 0.0)
+
+            records.append({
+                "time_bucket": label,
+                "total_trades": total,
+                "winning_trades": wins,
+                "losing_trades": losses,
+                "win_rate_pct": win_rate,
+                "avg_r_multiple": avg_r,
+                "total_pnl_rupees": total_pnl,
+                "profit_factor": pf
+            })
+
+        return pd.DataFrame(records)
+
+    def win_rate_by_regime(self) -> pd.DataFrame:
+        """Computes win rate and performance metrics segmented by market/Markov regime."""
+        columns = [
+            "regime", "total_trades", "winning_trades", "losing_trades",
+            "win_rate_pct", "avg_r_multiple", "total_pnl_rupees", "profit_factor"
+        ]
+        if not self.closed_entries:
+            return pd.DataFrame(columns=columns)
+
+        groups: Dict[str, List[SignalEntry]] = {}
+        for e in self.closed_entries:
+            regime = e.markov_regime or "Normal"
+            groups.setdefault(regime, []).append(e)
+
+        records = []
+        for regime, group in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
+            total = len(group)
+            wins = sum(1 for e in group if e.realized_r_multiple > 0)
+            losses = sum(1 for e in group if e.realized_r_multiple <= 0)
+            win_rate = round((wins / total) * 100.0, 1) if total > 0 else 0.0
+            avg_r = round(float(np.mean([e.realized_r_multiple for e in group])), 2)
+            total_pnl = round(float(sum(e.realized_pnl_rupees for e in group)), 2)
+            gross_gain = sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees > 0)
+            gross_loss = abs(sum(e.realized_pnl_rupees for e in group if e.realized_pnl_rupees < 0))
+            pf = round(gross_gain / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_gain > 0 else 0.0)
+
+            records.append({
+                "regime": regime,
+                "total_trades": total,
+                "winning_trades": wins,
+                "losing_trades": losses,
+                "win_rate_pct": win_rate,
+                "avg_r_multiple": avg_r,
+                "total_pnl_rupees": total_pnl,
+                "profit_factor": pf
+            })
+
+        return pd.DataFrame(records)
+
+    def confluence_vs_outcome_correlation(self) -> Dict[str, Any]:
+        """
+        Computes Pearson correlation (r, p-value) between institutional confluence scores
+        and trade outcomes, and bins performance into 5 institutional confluence buckets
+        ([0-50, 50-65, 65-75, 75-85, 85-100]).
+        """
+        bucket_defs = [
+            ("0-50", 0.0, 50.0),
+            ("50-65", 50.0, 65.0),
+            ("65-75", 65.0, 75.0),
+            ("75-85", 75.0, 85.0),
+            ("85-100", 85.0, 100.01)
+        ]
+
+        if not self.closed_entries:
+            empty_buckets = [
+                {"bucket": name, "count": 0, "win_rate_pct": 0.0, "avg_r_multiple": 0.0, "total_pnl_rupees": 0.0}
+                for name, _, _ in bucket_defs
+            ]
+            return {
+                "pearson_r": 0.0,
+                "p_value": 1.0,
+                "buckets": empty_buckets,
+                "bucket_dict": {b["bucket"]: b for b in empty_buckets},
+                "correlation_strength": "NEUTRAL",
+                "statistically_significant": False,
+                "sample_size": 0
+            }
+
+        scores = [float(e.confluence_score) for e in self.closed_entries]
+        r_multiples = [float(e.realized_r_multiple) for e in self.closed_entries]
+
+        # Pearson correlation
+        if len(scores) >= 2 and np.std(scores) > 1e-6 and np.std(r_multiples) > 1e-6:
+            try:
+                r_val, p_val = stats.pearsonr(scores, r_multiples)
+                r_val = float(r_val) if not np.isnan(r_val) else 0.0
+                p_val = float(p_val) if not np.isnan(p_val) else 1.0
+            except Exception:
+                r_matrix = np.corrcoef(scores, r_multiples)
+                r_val = float(r_matrix[0, 1]) if not np.isnan(r_matrix[0, 1]) else 0.0
+                p_val = 0.05 if abs(r_val) > 0.5 else 0.5
+        else:
+            r_val, p_val = 0.0, 1.0
+
+        if r_val >= 0.5:
+            strength = "STRONG_POSITIVE"
+        elif r_val >= 0.2:
+            strength = "MODERATE_POSITIVE"
+        elif r_val <= -0.2:
+            strength = "NEGATIVE"
+        else:
+            strength = "WEAK_NEUTRAL"
+
+        # Bucket performance
+        bucket_results = []
+        bucket_dict = {}
+        for name, low, high in bucket_defs:
+            if name == "85-100":
+                b_entries = [e for e in self.closed_entries if low <= e.confluence_score <= 100.0]
+            else:
+                b_entries = [e for e in self.closed_entries if low <= e.confluence_score < high]
+
+            cnt = len(b_entries)
+            if cnt > 0:
+                wins = sum(1 for e in b_entries if e.realized_r_multiple > 0)
+                wr = round((wins / cnt) * 100.0, 1)
+                avg_r = round(float(np.mean([e.realized_r_multiple for e in b_entries])), 2)
+                pnl = round(float(sum(e.realized_pnl_rupees for e in b_entries)), 2)
+            else:
+                wr, avg_r, pnl = 0.0, 0.0, 0.0
+
+            b_data = {
+                "bucket": name,
+                "count": cnt,
+                "win_rate_pct": wr,
+                "avg_r_multiple": avg_r,
+                "total_pnl_rupees": pnl
+            }
+            bucket_results.append(b_data)
+            bucket_dict[name] = b_data
+
+        return {
+            "pearson_r": round(r_val, 4),
+            "p_value": round(p_val, 4),
+            "buckets": bucket_results,
+            "bucket_dict": bucket_dict,
+            "correlation_strength": strength,
+            "statistically_significant": bool(p_val < 0.05) if len(scores) >= 5 else False,
+            "sample_size": len(self.closed_entries)
+        }
+
+    def streak_and_tilt_analysis(self) -> Dict[str, Any]:
+        """
+        Analyzes consecutive win/loss streaks and evaluates behavioral tilt risk.
+        Flags tilt when 3+ consecutive losses coincide with elevated trading frequency.
+        """
+        if not self.closed_entries:
+            return {
+                "current_streak_type": "NONE",
+                "current_streak_count": 0,
+                "max_win_streak": 0,
+                "max_loss_streak": 0,
+                "consecutive_losses": 0,
+                "tilt_detected": False,
+                "tilt_warning_level": "NORMAL",
+                "avg_trade_interval_minutes": 0.0,
+                "loss_streak_interval_minutes": 0.0,
+                "frequency_acceleration_ratio": 1.0,
+                "recommended_action": "NORMAL_TRADING"
+            }
+
+        ordered = sorted(self.closed_entries, key=lambda x: getattr(x, "timestamp_utc_ms", 0))
+        outcomes = [1 if e.realized_r_multiple > 0 else -1 for e in ordered]
+
+        max_win = 0
+        max_loss = 0
+        cur_type = "NONE"
+        cur_count = 0
+
+        temp_type = "NONE"
+        temp_count = 0
+
+        for outcome in outcomes:
+            o_type = "WIN" if outcome > 0 else "LOSS"
+            if o_type == temp_type:
+                temp_count += 1
+            else:
+                temp_type = o_type
+                temp_count = 1
+
+            if temp_type == "WIN" and temp_count > max_win:
+                max_win = temp_count
+            elif temp_type == "LOSS" and temp_count > max_loss:
+                max_loss = temp_count
+
+        cur_type = temp_type
+        cur_count = temp_count
+        consecutive_losses = cur_count if cur_type == "LOSS" else 0
+
+        timestamps = []
+        for e in ordered:
+            if hasattr(e, "timestamp_utc_ms") and e.timestamp_utc_ms > 0:
+                timestamps.append(e.timestamp_utc_ms / (1000.0 * 60.0))
+            else:
+                timestamps.append(float(len(timestamps) * 5.0))
+
+        intervals = [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))] if len(timestamps) > 1 else []
+        avg_interval = float(np.mean(intervals)) if intervals else 30.0
+
+        loss_streak_intervals = []
+        if consecutive_losses >= 2:
+            loss_streak_timestamps = timestamps[-consecutive_losses:]
+            loss_streak_intervals = [loss_streak_timestamps[i] - loss_streak_timestamps[i-1] for i in range(1, len(loss_streak_timestamps))]
+
+        loss_interval_mean = float(np.mean(loss_streak_intervals)) if loss_streak_intervals else avg_interval
+        freq_ratio = (avg_interval / max(loss_interval_mean, 1.0)) if avg_interval > 0 else 1.0
+
+        tilt_flag = False
+        tilt_level = "NORMAL"
+        action = "NORMAL_TRADING"
+
+        if consecutive_losses >= 4:
+            tilt_flag = True
+            tilt_level = "CRITICAL"
+            action = "MANDATORY_SESSION_HALT_COOLDOWN"
+        elif consecutive_losses >= 3:
+            if freq_ratio >= 1.3 or loss_interval_mean <= 15.0 or len(ordered) <= 4:
+                tilt_flag = True
+                tilt_level = "ELEVATED"
+                action = "MANDATORY_COOLDOWN_30M_SIZE_REDUCTION"
+            else:
+                tilt_flag = False
+                tilt_level = "WARNING"
+                action = "REDUCE_SIZE_STRICT_A_PLUS_ONLY"
+
+        return {
+            "current_streak_type": cur_type,
+            "current_streak_count": cur_count,
+            "max_win_streak": max_win,
+            "max_loss_streak": max_loss,
+            "consecutive_losses": consecutive_losses,
+            "tilt_detected": tilt_flag,
+            "tilt_warning_level": tilt_level,
+            "avg_trade_interval_minutes": round(avg_interval, 1),
+            "loss_streak_interval_minutes": round(loss_interval_mean, 1),
+            "frequency_acceleration_ratio": round(freq_ratio, 2),
+            "recommended_action": action
+        }
+
+    def generate_performance_report(self) -> Dict[str, Any]:
+        """Compiles the full institutional performance and execution audit report."""
+        df_sig = self.win_rate_by_signal_type()
+        df_time = self.win_rate_by_time_bucket()
+        df_regime = self.win_rate_by_regime()
+        conf_corr = self.confluence_vs_outcome_correlation()
+        streak_tilt = self.streak_and_tilt_analysis()
+
+        total_closed = len(self.closed_entries)
+        wins = sum(1 for e in self.closed_entries if e.realized_r_multiple > 0)
+        losses = sum(1 for e in self.closed_entries if e.realized_r_multiple <= 0)
+        win_rate = round((wins / total_closed) * 100.0, 1) if total_closed > 0 else 0.0
+
+        total_r = round(float(sum(e.realized_r_multiple for e in self.closed_entries)), 2)
+        avg_r = round(total_r / total_closed, 2) if total_closed > 0 else 0.0
+        total_pnl = round(float(sum(e.realized_pnl_rupees for e in self.closed_entries)), 2)
+
+        gross_gains = sum(e.realized_pnl_rupees for e in self.closed_entries if e.realized_pnl_rupees > 0)
+        gross_losses = abs(sum(e.realized_pnl_rupees for e in self.closed_entries if e.realized_pnl_rupees < 0))
+        pf = round(gross_gains / gross_losses, 2) if gross_losses > 0 else (99.0 if gross_gains > 0 else 0.0)
+
+        r_arr = np.array([e.realized_r_multiple for e in self.closed_entries], dtype=np.float64) if self.closed_entries else np.array([0.0])
+        r_std = float(np.std(r_arr, ddof=1)) if len(r_arr) > 1 else 0.01
+        sqn = round(float(np.sqrt(total_closed) * (avg_r / max(r_std, 0.001))), 2) if total_closed > 0 else 0.0
+
+        return {
+            "summary": {
+                "total_closed_trades": total_closed,
+                "winning_trades": wins,
+                "losing_trades": losses,
+                "win_rate_pct": win_rate,
+                "profit_factor": pf,
+                "total_r_multiple": total_r,
+                "avg_r_multiple": avg_r,
+                "total_realized_pnl": total_pnl,
+                "system_quality_number_sqn": sqn
+            },
+            "by_signal_type": df_sig.to_dict(orient="records") if not df_sig.empty else [],
+            "by_time_bucket": df_time.to_dict(orient="records") if not df_time.empty else [],
+            "by_regime": df_regime.to_dict(orient="records") if not df_regime.empty else [],
+            "confluence_correlation": conf_corr,
+            "streak_and_tilt": streak_tilt,
+            "report_timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        }
+
