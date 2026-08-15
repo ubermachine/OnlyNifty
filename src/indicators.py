@@ -669,7 +669,15 @@ def detect_volume_profile_triggers(
     return {"trigger": "IN_VALUE", "side": "NEUTRAL", "confidence": 0.50, "reason": "Auction trading within Value Area equilibrium."}
 
 def compute_dealer_gex(spot: float, call_oi: float = 14500000.0, put_oi: float = 12800000.0) -> Dict[str, Any]:
-    """Computes Net Dealer Gamma Exposure (GEX) in ₹ Crores and Gamma Flip Level."""
+    """
+    Coarse Net Dealer GEX proxy in ₹ Crores, for use ONLY when no option chain is available.
+
+    WARNING: the default call_oi/put_oi are placeholder constants with call_oi > put_oi, so
+    calling this WITHOUT real OI always yields is_positive_gamma=True — a silent, permanent
+    "dealers are long gamma / expect pinning" verdict. Callers must pass live OI, and must
+    treat walls_verified=False as untrusted. Prefer compute_strike_level_gex_chart_data,
+    which derives gamma per strike from the real chain.
+    """
     net_oi_diff = (call_oi - put_oi) / 100000.0
     gex_crores = net_oi_diff * (spot / 24000.0) * 4.5
     is_positive_gex = gex_crores >= 0

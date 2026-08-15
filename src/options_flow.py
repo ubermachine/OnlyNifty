@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from src.config import DEFAULT_IV, RISK_FREE_RATE, LOT_SIZE
+from src.config import DEFAULT_IV, RISK_FREE_RATE, LOT_SIZE, NIFTY_WEEKLY_EXPIRY_WEEKDAY
 from src.options_engine import black_scholes_greeks, calculate_pcr_and_max_pain
 
 
@@ -108,17 +108,22 @@ def compute_cumulative_oi_delta_and_traps(
     Computes Cumulative OI Delta (COID), Net Put-Call OI velocity, and 4-Quadrant Trap Classifications.
     """
     if option_chain_df is None or option_chain_df.empty:
+        # No chain -> NO directional opinion. This previously returned a fabricated
+        # +0.45 "LONG_BUILDUP" pulse, which is the highest-weighted pillar of the
+        # D-vector: with the chain absent the desk asserted bullish accumulation from
+        # nothing, biasing D permanently positive. Missing data must fail neutral.
         atm = int(round(spot / 50.0) * 50)
         return {
-            "net_oi_delta": 450000,
-            "net_oi_pulse_score": 0.45,
+            "net_oi_delta": 0,
+            "net_oi_pulse_score": 0.0,
             "call_wall": atm + 150,
             "put_wall": atm - 150,
-            "active_quadrant": "LONG_BUILDUP",
+            "active_quadrant": "NO_DATA",
             "trap_flag": False,
-            "trap_warning": "No Trap Detected (Active Accumulation)",
-            "total_ce_oi_change": -20000,
-            "total_pe_oi_change": 430000,
+            "trap_warning": "Option chain unavailable — no OI opinion.",
+            "total_ce_oi_change": 0,
+            "total_pe_oi_change": 0,
+            "data_quality": "UNVERIFIED",
             "strike_diagnostics": []
         }
         
@@ -340,7 +345,17 @@ def compute_short_term_directional_vector(
     s_vc = vc_res["drift_score"]
     
     s_hfi = max(min(float(hfi_score), 1.0), -1.0)
-    
+
+    # Expiry proximity drives the IMP-6 charm/vanna weight boost downstream. Derived from
+    # the bar timestamp rather than assumed, and reported honestly as False when the
+    # dataframe carries no usable index.
+    is_expiry_day = False
+    try:
+        if df is not None and len(df) > 0 and hasattr(df.index[-1], "weekday"):
+            is_expiry_day = df.index[-1].weekday() == NIFTY_WEEKLY_EXPIRY_WEEKDAY
+    except Exception:
+        is_expiry_day = False
+
     # IMP-2: Equal-weight D-vector (Timmermann 2006 academic evidence)
     # Simple equal-weighted combinations often outperform optimized weights
     # due to parameter instability and estimation errors.
@@ -385,27 +400,49 @@ def compute_short_term_directional_vector(
         target_price = straddle_res["upper_breakeven"]
         stop_price = straddle_res["lower_breakeven"]
 
+    component_scores = {
+        "s_doi": round(s_doi, 3),
+        "s_vc": round(s_vc, 3),
+        "s_pcr": round(s_pcr, 3),
+        "s_straddle": round(s_straddle, 3),
+        "s_hfi": round(s_hfi, 3)
+    }
+
+    # Semantic aliases. options_positioning.compute_options_desk_state and
+    # signal_journal.calculate_confluence_score read `short_term_bias`,
+    # `conviction_percentage` and `sub_scores.{vanna_charm,straddle_state,pcr_momentum}`.
+    # Those keys never existed here, so every one of those reads silently returned its
+    # default: trend_bias was pinned to NEUTRAL, conviction to 0.0, and the desk's
+    # 4-pillar agreement_count to a constant 2. Emitting both spellings repairs all
+    # downstream consumers without breaking the existing `bias`/`component_scores` readers.
+    sub_scores = {
+        "delta_oi": round(s_doi, 3),
+        "vanna_charm": round(s_vc, 3),
+        "pcr_momentum": round(s_pcr, 3),
+        "straddle_state": round(s_straddle, 3),
+        "hfi": round(s_hfi, 3)
+    }
+
     return {
         "directional_vector": d_intraday,
         "conviction_pct": conviction_pct,
+        "conviction_percentage": conviction_pct,
         "bias": bias,
+        "short_term_bias": bias,
         "emoji": emoji,
         "badge_color": badge_color,
         "suggested_action": action,
         "target_price": target_price,
         "stop_price": stop_price,
         "weighting_method": "equal_weight_timmermann_2006",
+        "is_expiry_day": is_expiry_day,
+        "data_quality": "VERIFIED" if (option_chain_df is not None and not option_chain_df.empty) else "SYNTHETIC",
         "straddle_metrics": straddle_res,
         "oi_metrics": oi_res,
         "pcr_metrics": pcr_res,
         "vanna_charm_metrics": vc_res,
-        "component_scores": {
-            "s_doi": round(s_doi, 3),
-            "s_vc": round(s_vc, 3),
-            "s_pcr": round(s_pcr, 3),
-            "s_straddle": round(s_straddle, 3),
-            "s_hfi": round(s_hfi, 3)
-        }
+        "component_scores": component_scores,
+        "sub_scores": sub_scores
     }
 
 
@@ -752,8 +789,14 @@ def compute_strike_level_gex_chart_data(
         c_oi = float(row["ce_oi"])
         p_oi = float(row["pe_oi"])
 
-        g_c = black_scholes_greeks(spot, s, t_days=t_days, sigma=sigma_clean, is_call=True)["gamma"]
-        g_p = black_scholes_greeks(spot, s, t_days=t_days, sigma=sigma_clean, is_call=False)["gamma"]
+        # Put-call parity: gamma is IDENTICAL for a call and a put at the same strike.
+        # black_scholes_greeks adds PUT_SKEW_PREMIUM to sigma when is_call=False, which is
+        # defensible for pricing but arbitrage-violating for gamma — it inflated every put
+        # leg ~17% and manufactured a DEALER_LONG_GAMMA reading on a symmetric chain.
+        # Compute gamma once per strike and share it across both legs.
+        g_strike = black_scholes_greeks(spot, s, t_days=t_days, sigma=sigma_clean, is_call=True)["gamma"]
+        g_c = g_strike
+        g_p = g_strike
 
         call_gex_cr = (g_c * c_oi * spot * LOT_SIZE * 0.01) / 1e7
         put_gex_cr = - (g_p * p_oi * spot * LOT_SIZE * 0.01) / 1e7
@@ -775,8 +818,29 @@ def compute_strike_level_gex_chart_data(
         put_wall_idx = int(np.argmin(put_gex_per_strike))  # most negative put gex
         put_wall_strike = float(strikes[put_wall_idx])
 
-        zero_gex_idx = int(np.argmin([abs(g) for g in net_gex_per_strike]))
-        zero_gex_strike = float(strikes[zero_gex_idx])
+        # The gamma flip is where CUMULATIVE net GEX crosses zero — not where a single
+        # strike's |GEX| is smallest. argmin(|net_gex|) always returns an outer wing
+        # (gamma -> 0 far from spot), which put the "flip" hundreds of points away and
+        # made gamma_flip_distance_pts meaningless.
+        cumulative = np.cumsum(net_gex_per_strike)
+        scale = float(np.max(np.abs(cumulative))) if len(cumulative) else 0.0
+
+        if scale < 1e-9:
+            # Perfectly balanced chain (or no gamma at all): the flip is undefined
+            # everywhere rather than located at a particular strike. Report spot so
+            # gamma_flip_distance_pts reads ~0 instead of naming an arbitrary wing.
+            zero_gex_strike = round(spot, 2)
+        else:
+            zero_gex_strike = round(spot, 2)
+            for i in range(1, len(cumulative)):
+                y0, y1 = float(cumulative[i - 1]), float(cumulative[i])
+                # Ignore numerically-zero plateaus; only a genuine sign change is a flip.
+                if abs(y0) < 1e-9 * scale or abs(y1) < 1e-9 * scale:
+                    continue
+                if np.sign(y1) != np.sign(y0):
+                    x0, x1 = float(strikes[i - 1]), float(strikes[i])
+                    zero_gex_strike = round(x0 + (x1 - x0) * (-y0 / (y1 - y0)), 2) if y1 != y0 else x0
+                    break
     else:
         call_wall_strike = round(spot + 150.0, 2)
         put_wall_strike = round(spot - 150.0, 2)

@@ -125,8 +125,15 @@ def black_scholes_greeks(
     if use_vol_surface:
         sigma = compute_volatility_surface(spot, strike, base_iv=sigma, is_call=is_call)
     else:
-        if not is_call:
-            sigma = sigma + PUT_SKEW_PREMIUM
+        # Downside skew is a function of MONEYNESS, not of the call/put flag. Applying it
+        # only to puts gave a put a different sigma — and therefore a different gamma and
+        # vega — than a call at the SAME strike, which violates put-call parity and is
+        # arbitrage-admitting. It inflated every put leg's gamma ~17% and manufactured a
+        # DEALER_LONG_GAMMA regime reading on a perfectly symmetric chain.
+        # Strikes below spot carry the skew premium for BOTH option types, so parity holds.
+        if strike < spot:
+            moneyness_depth = min((spot - strike) / spot, 0.10) / 0.10
+            sigma = sigma + PUT_SKEW_PREMIUM * moneyness_depth
         sigma = max(sigma, 0.01)
     
     sqrt_t = math.sqrt(t_years)

@@ -251,14 +251,21 @@ def compute_options_desk_state(
             call_wall = rf_call
             put_wall = rf_put
 
-    # Expected Move
-    expected_move_pts = round(spot * max(live_iv, 0.05) * np.sqrt(1.0 / 365.0) * 0.8, 1)
-    
+    # Expected Move — the conventional 1-sigma straddle-implied close-to-close move.
+    sigma_daily_pts = spot * max(live_iv, 0.05) * np.sqrt(1.0 / 365.0)
+    expected_move_pts = round(sigma_daily_pts * 0.8, 1)
+
     actual_range_pts = 0.0
     if df_ohlcv is not None and not df_ohlcv.empty:
         actual_range_pts = round(float(df_ohlcv["high"].max() - df_ohlcv["low"].min()), 1)
 
-    move_ratio = round(actual_range_pts / max(expected_move_pts, 1.0), 2)
+    # move_ratio compares a HIGH-LOW RANGE against an expected range, so it must not be
+    # divided by the 1-sigma POINT move. For driftless Brownian motion the expected range
+    # is E[max-min] = 2*sqrt(2/pi)*sigma ~= 1.596*sigma. Dividing the range by the 1-sigma
+    # move instead made move_ratio structurally ~2.0 on a perfectly ordinary day, so any
+    # "range exhausted" threshold near 1.3 fired essentially every bar.
+    expected_range_pts = 1.596 * sigma_daily_pts
+    move_ratio = round(actual_range_pts / max(expected_range_pts, 1.0), 2)
 
     # 5. OI Heatmap Writing Bias & ITM/OTM Shift
     writing_bias = "BALANCED_RANGE"

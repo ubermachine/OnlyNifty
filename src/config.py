@@ -45,7 +45,12 @@ DELTA_MAX: float = 0.65                 # Maximum Delta for institutional direct
 DELTA_DEEP_ITM_0DTE: float = 0.78       # Target Delta on Thursday 0DTE after 12:30 (Deep ITM Synthetic)
 RISK_FREE_RATE: float = 0.065           # 6.5% RBI reference repo rate
 DEFAULT_IV: float = 0.12                # 12.0% India VIX / IV baseline
-PUT_SKEW_PREMIUM: float = 0.025         # +250 bps structural downside put skew
+PUT_SKEW_PREMIUM: float = 0.025         # +250 bps structural downside put skew (PRICING ONLY — never applied to gamma, see below)
+
+# NSE has revised the Nifty weekly expiry day more than once (historically Thursday,
+# later moved to Tuesday). VERIFY THIS AGAINST THE CURRENT NSE CIRCULAR before trading —
+# it gates all 0DTE/expiry-pin/charm logic. Python weekday(): Mon=0, Tue=1, Wed=2, Thu=3.
+NIFTY_WEEKLY_EXPIRY_WEEKDAY: int = 1    # 1 = Tuesday (CONFIRM against current NSE contract spec)
 
 # ----------------- TRANSACTION COST ANALYSIS (TCA) - NSE FRICTION -----------------
 STT_SELL_PCT: float = 0.001             # 0.10% Securities Transaction Tax on sell turnover (Oct 2024 mandate)
