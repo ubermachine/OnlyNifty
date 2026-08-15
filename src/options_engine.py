@@ -1428,6 +1428,7 @@ def generate_option_trade_ticket(
         "signal": signal.signal_type.value,
         "symbol": strike_info["symbol"],
         "strike": strike_info["strike"],
+        "target_strike": strike_info["strike"],
         "option_type": strike_info["option_type"],
         "regime_mode": strike_info["regime_mode"],
         "spot_entry": spot,

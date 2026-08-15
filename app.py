@@ -434,7 +434,9 @@ if signal.signal_type != SignalType.WAIT:
     current_sig_key = f"{signal.signal_type.value}_{last_bar_ts}"
     if last_toast_sig != current_sig_key:
         st.session_state["last_toast_signal_id"] = current_sig_key
-        st.toast(f"🎯 {signal.signal_type.value} @ ₹{current_spot:,.2f} | Strike: {ticket['target_strike']} {ticket['option_type']}", icon="🚨")
+        strike_val = ticket.get("target_strike") or ticket.get("strike") or int(round(current_spot / 50.0) * 50)
+        opt_val = ticket.get("option_type") or ("CE" if "LONG" in signal.signal_type.value else "PE")
+        st.toast(f"🎯 {signal.signal_type.value} @ ₹{current_spot:,.2f} | Strike: {strike_val} {opt_val}", icon="🚨")
 
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
@@ -552,11 +554,11 @@ with cockpit_col1:
     # Vol Intelligence Banner
     vol_regime_color = '#ff3355' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '#05df72' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '#fbb024'
     st.markdown(f"""
-    <div style="background-color: rgba({','.join(['255,51,85' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '5,223,114' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '251,176,36'])}, 0.06); border-left: 3px solid {{vol_regime_color}}; padding: 6px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4; margin-top: 6px; border-radius: 4px;">
-        <strong style="color: {{vol_regime_color}};">Vol Regime: {{vol_report['composite_vol_regime'].replace('_', ' ')}}</strong> — 
-        IV Percentile: {{vol_report['iv_percentile']['iv_percentile']:.0f}}% ({{vol_report['iv_percentile']['rank_label'].replace('_', ' ')}}) |
-        Spread: {{vol_report['iv_rv_spread']['spread_pct']:+.1f}}% |
-        Quality: {{vol_report['intraday_quality']['quality_label'].replace('_', ' ')}} ({{vol_report['intraday_quality']['sizing_multiplier']:.0%}})
+    <div style="background-color: rgba({','.join(['255,51,85' if vol_report['composite_vol_regime'] == 'SELL_VOL' else '5,223,114' if vol_report['composite_vol_regime'] == 'BUY_VOL' else '251,176,36'])}, 0.06); border-left: 3px solid {vol_regime_color}; padding: 6px 10px; font-size: 11px; color: #8e9fb5; line-height: 1.4; margin-top: 6px; border-radius: 4px;">
+        <strong style="color: {vol_regime_color};">Vol Regime: {vol_report['composite_vol_regime'].replace('_', ' ')}</strong> — 
+        IV Percentile: {vol_report['iv_percentile']['iv_percentile']:.0f}% ({vol_report['iv_percentile']['rank_label'].replace('_', ' ')}) |
+        Spread: {vol_report['iv_rv_spread']['spread_pct']:+.1f}% |
+        Quality: {vol_report['intraday_quality']['quality_label'].replace('_', ' ')} ({vol_report['intraday_quality']['sizing_multiplier']:.0%})
     </div>
     """, unsafe_allow_html=True)
 
@@ -1325,10 +1327,10 @@ with tab_sizer:
     active_sigs = [e.to_dict() for e in journal_engine.entries if e.is_active()]
     if not active_sigs:
         active_sigs = [{
-            "selected_strike": ticket["target_strike"],
-            "option_type": ticket["option_type"],
+            "selected_strike": ticket.get("target_strike") or ticket.get("strike") or int(round(current_spot / 50.0) * 50),
+            "option_type": ticket.get("option_type", "CE"),
             "lots_suggested": calc_lots,
-            "direction": "LONG" if "CE" in ticket["option_type"] else "SHORT",
+            "direction": "LONG" if "CE" in ticket.get("option_type", "CE") else "SHORT",
             "entry_premium": calc_ep,
             "sl_premium": calc_sl
         }]
@@ -1419,15 +1421,25 @@ with tab_oi:
     
     st.markdown("#### 🌊 Institutional Derivatives Flow Intelligence (FII vs DII)")
     fii_c1, fii_c2, fii_c3, fii_c4 = st.columns(4)
-    fii_c1.metric("FII Futures Long / Short Ratio", f"{fii_snap['fii_ls_ratio']:.2f}", f"5D Change: {fii_trend['ls_ratio_change_today']:+.2f}")
-    fii_c2.metric("FII 5-Day Flow Trend", f"{fii_trend['trend']}", f"{fii_trend['consecutive_days']} Consecutive Days")
-    fii_c3.metric("FII Options PCR", f"{fii_snap['fii_options_pcr']:.2f}", f"DII: {fii_snap['dii_net_bias'].replace('_',' ')}")
-    fii_c4.metric("Institutional Consensus", f"{inst_report['macro_bias_score']:+.2f}", f"{inst_report['institutional_consensus_bias'].replace('_',' ')}")
+    fii_ls_val = fii_snap.get('fii_ls_ratio', 1.0)
+    fii_ls_change = fii_trend.get('ls_ratio_change_today', fii_trend.get('net_5d_change', 0.0))
+    fii_c1.metric("FII Futures Long / Short Ratio", f"{fii_ls_val:.2f}", f"5D: {fii_ls_change:+.2f}")
+    trend_lbl = str(fii_trend.get('trend', fii_trend.get('trend_classification', 'NEUTRAL'))).replace('_', ' ')
+    trend_days = fii_trend.get('consecutive_days', 5)
+    fii_c2.metric("FII 5-Day Flow Trend", trend_lbl, f"{trend_days} Days")
+    fii_pcr_val = fii_snap.get('fii_options_pcr', 1.0)
+    dii_bias_str = str(fii_snap.get('dii_net_bias', 'NEUTRAL')).replace('_', ' ')
+    fii_c3.metric("FII Options PCR", f"{fii_pcr_val:.2f}", f"DII: {dii_bias_str}")
+    macro_score = inst_report.get('macro_bias_score', 0.0)
+    macro_lbl = str(inst_report.get('institutional_consensus_bias', 'NEUTRAL')).replace('_', ' ')
+    fii_c4.metric("Institutional Consensus", f"{macro_score:+.2f}", macro_lbl)
     
+    flow_summary = inst_report.get('flow_summary', 'Institutional derivatives positioning updated.')
+    roll_sig_str = str(fii_roll.get('rollover_signal', 'NORMAL')).replace('_', ' ') if fii_roll.get('is_expiry_week') else ''
+    roll_extra = f" • <strong>Rollover:</strong> {roll_sig_str}" if roll_sig_str else ""
     st.markdown(f'''
     <div style="background-color: #0d1527; border: 1px solid #1c2e4a; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; color: #94a3b8;">
-        <strong style="color: #00d2ff;">Macro Flow Summary:</strong> {inst_report['flow_summary']}
-        {' • <strong>Rollover:</strong> ' + fii_roll['rollover_signal'].replace('_',' ') if fii_roll['is_expiry_week'] else ''}
+        <strong style="color: #00d2ff;">Macro Flow Summary:</strong> {flow_summary}{roll_extra}
     </div>
     ''', unsafe_allow_html=True)
 
