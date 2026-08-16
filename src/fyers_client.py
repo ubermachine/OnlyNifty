@@ -24,8 +24,10 @@ DATA_BASE = "https://api-t1.fyers.in/data"
 
 def _headers() -> Dict[str, str]:
     cfg = _load_config()
+    client_id = cfg["client_id"].strip()
+    auth_app_id = client_id if client_id.endswith("-100") else f"{client_id}-100"
     return {
-        "Authorization": f"{cfg['client_id']}:{get_access_token()}",
+        "Authorization": f"{auth_app_id}:{get_access_token()}",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 

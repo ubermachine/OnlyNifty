@@ -242,13 +242,19 @@ def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = get_data_engine()
     try:
         if "Fyers" in mode_choice:
-            return engine.fetch_fyers_nifty(interval=tf, period="5d")
+            try:
+                df = engine.fetch_fyers_nifty(interval=tf, period="5d")
+                if not df.empty and len(df) >= 10:
+                    return df
+            except Exception:
+                pass
+            # Tier 2 Fallback to real market data via Yahoo Finance
+            return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
         elif "yfinance" in mode_choice or "Public" in mode_choice:
             return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
         return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
     except Exception:
-        # Live feed can transiently fail (rate limits, network); never crash the page —
-        # fall back to synthetic bars so the rest of the pipeline still has data to run on.
+        # Final fallback to synthetic bars so pipeline remains operational
         return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
