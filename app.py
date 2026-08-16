@@ -252,12 +252,12 @@ def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
         return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
-def load_live_option_chain_data() -> dict:
+def load_live_option_chain_data(mode_key: str = "Live") -> dict:
     engine = get_data_engine()
     try:
         return engine.fetch_live_nse_option_chain(symbol="NIFTY")
-    except Exception:
-        return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE"}
+    except Exception as e:
+        return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE", "error": str(e)}
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_heavyweight_flow_index() -> dict:
@@ -406,7 +406,7 @@ vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"
 hfi_res = load_heavyweight_flow_index()
 
 # Fetch Live Option Chain for Options Desk & GEX Walls (cached, 5s TTL)
-oc_raw = load_live_option_chain_data()
+oc_raw = load_live_option_chain_data(data_mode)
 oc_df = oc_raw.get("dataframe") if isinstance(oc_raw, dict) else oc_raw
 pcr_analytics = calculate_pcr_and_max_pain(oc_df)
 gex_chart_res = compute_strike_level_gex_chart_data(oc_df, current_spot, iv_input, 1.0)
@@ -1876,7 +1876,7 @@ with tab_oi:
 
     
     if "Official" in oc_mode:
-        live_oc_data = load_live_option_chain_data()
+        live_oc_data = load_live_option_chain_data(data_mode)
         oc_df = live_oc_data.get("dataframe", pd.DataFrame())
         underlying_val = live_oc_data.get("underlying_value", current_spot)
         expiry_list = live_oc_data.get("expiry_dates", [])
