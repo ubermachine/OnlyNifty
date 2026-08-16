@@ -1,4 +1,10 @@
-"""Nifty Tier-1 Institutional Signal Terminal & Quantitative Main Dashboard (OnlyNifty v5.3 Desk Edition)."""
+import os
+import sys
+
+# Ensure repository root is first in sys.path to prevent collisions on Streamlit Cloud (/mount/src/onlynifty)
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import streamlit as st
 import plotly.graph_objects as go
