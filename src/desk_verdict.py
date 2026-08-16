@@ -17,6 +17,8 @@ from src.config import (
     WALL_BUFFER_PTS,
     PCR_Z_CONTRARIAN_THRESHOLD,
     POSITIONING_UNVERIFIED_SIZE_CAP,
+    MIN_CONVICTION_TO_TRADE,
+    EVIDENCE_OPPOSITION_THRESHOLD,
     LOT_SIZE
 )
 
@@ -52,6 +54,49 @@ class DeskVerdict:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def _desk_only_candidate_direction(
+    spot: float,
+    desk_state: Optional[OptionsDeskState],
+    vol_report: Optional[Dict[str, Any]],
+    put_wall: float,
+    call_wall: float,
+    d_vector: float,
+    data_quality: str
+) -> Optional[str]:
+    """
+    What the desk WOULD trade on its own when the chart says WAIT.
+
+    Split out as a pure pre-check so conflict detection can run against the intended
+    direction. Previously the desk-only branches lived after conflict detection and
+    keyed it off the chart signal, so on a WAIT every conflict rule was unreachable
+    and the desk could invent a trade nothing had vetted. Mirrors the branch
+    conditions exactly; returns None when the desk would stand aside.
+    """
+    if desk_state is None or data_quality != "VERIFIED":
+        return None
+
+    is_crisis = False
+    if vol_report and isinstance(vol_report, dict):
+        ts = vol_report.get("term_structure_regime")
+        if isinstance(ts, dict):
+            is_crisis = bool(ts.get("is_crisis", False))
+
+    if desk_state.is_positive_gamma:
+        if (not is_crisis and spot <= put_wall + WALL_BUFFER_PTS
+                and (d_vector >= 0.2 or desk_state.pcr_zscore >= PCR_Z_CONTRARIAN_THRESHOLD)):
+            return "LONG"
+        if (spot >= call_wall - WALL_BUFFER_PTS
+                and (d_vector <= -0.2 or desk_state.pcr_zscore <= -PCR_Z_CONTRARIAN_THRESHOLD)):
+            return "SHORT"
+    else:
+        if abs(d_vector) >= 0.5:
+            if not is_crisis and d_vector >= 0.5 and spot >= call_wall:
+                return "LONG"
+            if d_vector <= -0.5 and spot <= put_wall:
+                return "SHORT"
+    return None
 
 
 def compute_evidence_families(
@@ -368,16 +413,31 @@ def build_desk_verdict(
     is_chart_long = "LONG" in sig_type_str
     is_chart_short = "SHORT" in sig_type_str
 
+    # Resolve the INTENDED direction before testing anything against it. These flags
+    # previously came only from the chart signal, so on a WAIT they were both False —
+    # every conflict rule below became structurally unreachable, and the desk-only
+    # branches further down could invent a trade that no conflict had ever been
+    # evaluated against (including a direction the ladder had just vetoed).
+    desk_only_dir = None
+    if not (is_chart_long or is_chart_short):
+        desk_only_dir = _desk_only_candidate_direction(
+            spot=spot, desk_state=desk_state, vol_report=vol_report,
+            put_wall=put_wall, call_wall=call_wall, d_vector=d_vector,
+            data_quality=data_quality
+        )
+    intended_long = is_chart_long or desk_only_dir == "LONG"
+    intended_short = is_chart_short or desk_only_dir == "SHORT"
+
     if desk_state is not None:
-        if is_chart_long and d_vector <= -POSITIONING_VETO_STRENGTH:
-            conflicts.append(f"POSITIONING_OPPOSES_CHART: Chart LONG vs Bearish Options Flow (D={d_vector:+.2f})")
-        elif is_chart_short and d_vector >= POSITIONING_VETO_STRENGTH:
-            conflicts.append(f"POSITIONING_OPPOSES_CHART: Chart SHORT vs Bullish Options Flow (D={d_vector:+.2f})")
+        if intended_long and d_vector <= -POSITIONING_VETO_STRENGTH:
+            conflicts.append(f"POSITIONING_OPPOSES_CHART: Long vs Bearish Options Flow (D={d_vector:+.2f})")
+        elif intended_short and d_vector >= POSITIONING_VETO_STRENGTH:
+            conflicts.append(f"POSITIONING_OPPOSES_CHART: Short vs Bullish Options Flow (D={d_vector:+.2f})")
 
         # Wall fading into positive gamma
-        if is_chart_long and desk_state.is_positive_gamma and spot >= call_wall - WALL_BUFFER_PTS:
+        if intended_long and desk_state.is_positive_gamma and spot >= call_wall - WALL_BUFFER_PTS:
             conflicts.append(f"GEX_CALL_WALL_BLOCK: Long near Call Wall ({call_wall:.0f}) in positive gamma (+Γ).")
-        elif is_chart_short and desk_state.is_positive_gamma and spot <= put_wall + WALL_BUFFER_PTS:
+        elif intended_short and desk_state.is_positive_gamma and spot <= put_wall + WALL_BUFFER_PTS:
             conflicts.append(f"GEX_PUT_WALL_BLOCK: Short near Put Wall ({put_wall:.0f}) in positive gamma (+Γ).")
 
     # Smart Money Institutional Flow Conflicts
@@ -388,16 +448,16 @@ def build_desk_verdict(
         flow_score_val = options_context["inst_flow"].get("flow_score")
 
     if flow_score_val is not None:
-        if is_chart_long and flow_score_val < 30.0:
+        if intended_long and flow_score_val < 30.0:
             conflicts.append(f"INSTITUTIONAL_FLOW_VETO: Smart Money Flow Score ({flow_score_val:.1f}/100) indicates institutional selling.")
-        elif is_chart_short and flow_score_val > 70.0:
+        elif intended_short and flow_score_val > 70.0:
             conflicts.append(f"INSTITUTIONAL_FLOW_VETO: Smart Money Flow Score ({flow_score_val:.1f}/100) indicates institutional accumulation.")
 
     # Term Structure & VRP Crisis Conflict
     if vol_report and vol_report.get("term_structure_regime"):
         ts_regime = vol_report["term_structure_regime"]
         if isinstance(ts_regime, dict) and ts_regime.get("is_crisis", False):
-            if is_chart_long:
+            if intended_long:
                 conflicts.append(f"TERM_STRUCTURE_CRISIS: IV backwardation detected. Long trades carry extreme risk.")
 
     vrp_val = None
@@ -411,6 +471,26 @@ def build_desk_verdict(
         can_trade, risk_reason = session_state.can_take_new_trade()
         if not can_trade:
             conflicts.append(f"SESSION_RISK_LOCKED: {risk_reason}")
+
+    # 4b. Net evidence opposes the intended trade.
+    # The four families are synthesised into a net directional score and, until now,
+    # that score was reported on the verdict and never consulted when picking a side.
+    # If the independent evidence nets meaningfully AGAINST the direction, that is a
+    # disagreement worth naming — the same standing as a positioning or flow conflict.
+    _pre_votes, _, _pre_direction = compute_evidence_families(
+        desk_state=desk_state, htf_data=htf_data, regime_state=regime_state,
+        vol_report=vol_report, options_context=options_context
+    )
+    if intended_long and _pre_direction <= -EVIDENCE_OPPOSITION_THRESHOLD:
+        conflicts.append(
+            f"EVIDENCE_OPPOSES_TRADE: Long vs net bearish evidence "
+            f"({_pre_direction:+.2f} across {sum(1 for v in _pre_votes.values() if v < 0)} families)."
+        )
+    elif intended_short and _pre_direction >= EVIDENCE_OPPOSITION_THRESHOLD:
+        conflicts.append(
+            f"EVIDENCE_OPPOSES_TRADE: Short vs net bullish evidence "
+            f"({_pre_direction:+.2f} across {sum(1 for v in _pre_votes.values() if v > 0)} families)."
+        )
 
     # 5. Build Evidence Map
     zg_str = f" | Flip: {desk_state.zero_gex_strike:.0f}" if desk_state and desk_state.zero_gex_strike > 0 else ""
@@ -559,6 +639,21 @@ def build_desk_verdict(
         edge_status=edge_status,
         is_breakout=is_breakout_action
     )
+
+    # 8b. Conviction floor — an actual veto, not a caption.
+    # Conviction was computed after the action was already decided and used only to
+    # prefix the label, so a LOW-conviction setup still emitted a full trade ticket
+    # with entry, stops and lot count. That repeats the original sin this whole branch
+    # exists to undo: the system grading its own trade poorly and taking it anyway.
+    if action != "WAIT" and conviction_score < MIN_CONVICTION_TO_TRADE:
+        conflicts.append(
+            f"CONVICTION_FLOOR: {conviction_score:.0f} < {MIN_CONVICTION_TO_TRADE:.0f} "
+            f"({conviction_tier}, {family_agreement}/4 families agree)."
+        )
+        action = "WAIT"
+        action_label = "NO-TRADE (WAIT) — BELOW CONVICTION FLOOR"
+        reason = " | ".join(conflicts)
+        option_pick = None
 
     if action != "WAIT":
         action_label = f"[{conviction_tier}] {action_label}"

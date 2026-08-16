@@ -135,6 +135,19 @@ QUARANTINE_MIN_SAMPLES: int = 30            # Minimum sample size before setup c
 # (mean block ~2x the outcome horizon) when the sample supports it.
 EDGE_OVERLAP_VIF: float = 2.0
 
+# Desk verdict conviction floor. Conviction was previously computed AFTER the action was
+# chosen and used only to prefix the label, so a LOW-conviction setup still produced a
+# full ticket. This makes it a veto. Deliberately set at the MODERATE boundary rather
+# than higher: the weights feeding conviction are reasoned defaults, not fitted, so the
+# floor should reject the clearly-weak rather than pretend to fine-grained selectivity.
+MIN_CONVICTION_TO_TRADE: float = 45.0
+
+# Net family evidence (weighted, [-1, +1]) that must oppose a trade before it counts as
+# a named conflict. The four families are not fully independent (measured N_eff ~1.8),
+# so this is set well above the noise floor.
+EVIDENCE_OPPOSITION_THRESHOLD: float = 0.35
+
+
 
 # ----------------- OPTIONS DESK & POSITIONING FUSION (v5.2) -----------------
 POSITIONING_VETO_STRENGTH: float = 0.5      # D-vector threshold opposing chart setup to trigger WAIT
