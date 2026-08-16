@@ -16,7 +16,8 @@ from src.config import (
     POSITIONING_VETO_STRENGTH,
     WALL_BUFFER_PTS,
     PCR_Z_CONTRARIAN_THRESHOLD,
-    POSITIONING_UNVERIFIED_SIZE_CAP
+    POSITIONING_UNVERIFIED_SIZE_CAP,
+    LOT_SIZE
 )
 
 
@@ -169,8 +170,11 @@ def compute_evidence_families(
     elif vol_report and isinstance(vol_report.get("vrp_data"), dict):
         vrp_val = vol_report["vrp_data"].get("vrp")
     if vrp_val is not None:
-        # Positive VRP (IV richer than realized) is the normal, risk-on state.
-        macro_sum += 0.5 if float(vrp_val) > 0 else -0.5
+        # Positive VRP (IV richer than realized) is the normal, risk-on state — but a
+        # fixed +/-0.5 on the SIGN alone always cleared the +/-0.15 deadband, so MACRO
+        # could never abstain: the whole family collapsed to sign(VRP). Scale by
+        # magnitude so an ordinary VRP reads as neutral and only a pronounced one votes.
+        macro_sum += float(np.clip(float(vrp_val) / 0.04, -1.0, 1.0)) * 0.5
         macro_bits.append(f"VRP {float(vrp_val):+.1%}")
 
     if macro_sum > 0.15:
@@ -252,11 +256,17 @@ def compute_conviction(
     if edge_status == "QUARANTINED":
         score = min(score, 20.0)
         notes.append("setup QUARANTINED by walk-forward edge table")
-    elif edge_status == "PAPER":
+    elif edge_status in ("PAPER", "UNMEASURED"):
+        # UNMEASURED must not outrank PAPER. Leaving it uncapped meant a setup with NO
+        # out-of-sample evidence scored HIGHER than one with some — and since
+        # data/edge_table.json is absent in practice, the uncapped branch was the one
+        # always taken. Unmeasured is the weaker claim and is capped accordingly.
         score = min(score, 65.0)
-        notes.append("setup still PAPER (insufficient OOS samples)")
+        notes.append(
+            "setup still PAPER (insufficient OOS samples)" if edge_status == "PAPER"
+            else "setup UNMEASURED (no walk-forward edge data)"
+        )
     elif edge_status == "TRUSTED":
-        score += 5.0
         notes.append("setup TRUSTED by walk-forward edge table")
 
     score = float(np.clip(score, 0.0, 100.0))
@@ -463,7 +473,7 @@ def build_desk_verdict(
                 "target2_premium": ticket.get("target2_premium", 0.0),
                 "target3_premium": ticket.get("target3_premium", 0.0),
                 "lots": ticket.get("lots", 1),
-                "total_qty": ticket.get("total_qty", 25),
+                "total_qty": ticket.get("total_qty", LOT_SIZE),
                 "tca_friction": ticket.get("tca_friction", 0.0),
                 "r_t1": ticket.get("r_multiple_t1", 1.5),
                 "r_t2": ticket.get("r_multiple_t2", 3.0)

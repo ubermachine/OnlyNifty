@@ -134,7 +134,8 @@ def compute_options_desk_state(
     live_iv: float = DEFAULT_IV,
     hfi_score: float = 0.0,
     history: Optional[Dict[str, List[float]]] = None,
-    persist_history: bool = True
+    persist_history: bool = True,
+    chain_source: str = ""
 ) -> OptionsDeskState:
     """
     Synthesizes real-time options positioning, order flow vectors, and dealer Greeks
@@ -142,6 +143,12 @@ def compute_options_desk_state(
     """
     data_quality = "VERIFIED"
     if option_chain_df is None or (isinstance(option_chain_df, pd.DataFrame) and option_chain_df.empty):
+        data_quality = "POSITIONING_UNVERIFIED"
+    elif "synthetic" in str(chain_source).lower() or "fallback" in str(chain_source).lower():
+        # DataEngine falls back to generate_synthetic_option_chain() on any fetch failure,
+        # which returns a POPULATED frame at a hardcoded spot with randomised OI deltas.
+        # An .empty check alone therefore stamped fabricated positioning as VERIFIED, and
+        # the desk would emit confident walls/fades off numbers that re-roll every refresh.
         data_quality = "POSITIONING_UNVERIFIED"
 
     # 1. 5-Pillar Directional Vector (D)

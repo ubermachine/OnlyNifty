@@ -301,7 +301,9 @@ class VolatilityIntelligence:
         session_low: float = 0.0,
         session_open: float = 0.0,
         bar_time: str = "12:00",
-        iv_history: Optional[List[float]] = None
+        iv_history: Optional[List[float]] = None,
+        near_expiry_iv: float = 0.0,
+        far_expiry_iv: float = 0.0
     ) -> Dict[str, Any]:
         """
         Master orchestrator: generates the complete Volatility Intelligence Report
@@ -383,6 +385,23 @@ class VolatilityIntelligence:
                 "No structural edge in buying or selling premium."
             )
 
+        # Term structure regime. compute_term_structure_regime existed but was never
+        # called from anywhere, so every consumer of report["term_structure_regime"]
+        # (desk_verdict conflict detection + evidence, strategy_rules gate 8,
+        # decision_engine gate 7) silently read {} — the IV-backwardation crash veto
+        # could never fire. Emitted here so the gate is live. When no second expiry is
+        # supplied we report UNKNOWN/is_crisis=False rather than inventing an inversion.
+        if near_expiry_iv > 0.0 and far_expiry_iv > 0.0:
+            ts_regime = self.compute_term_structure_regime(near_expiry_iv, far_expiry_iv)
+        else:
+            ts_regime = {
+                "regime": "UNKNOWN",
+                "is_crisis": False,
+                "slope": 0.0,
+                "data_quality": "UNVERIFIED",
+                "note": "No multi-expiry IV supplied; term structure not assessed."
+            }
+
         return {
             "realized_vol": rv_data,
             "iv_rv_spread": spread_data,
@@ -391,6 +410,7 @@ class VolatilityIntelligence:
             "intraday_quality": quality_data,
             "composite_vol_regime": composite_regime,
             "composite_advice": composite_advice,
+            "term_structure_regime": ts_regime,
             "sell_vol_score": round(sell_vol_score, 2),
             "buy_vol_score": round(buy_vol_score, 2)
         }

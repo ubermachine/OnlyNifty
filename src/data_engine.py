@@ -922,7 +922,17 @@ class DataEngine:
                 "status": "BULLISH" if chg_pct > 0.15 else ("BEARISH" if chg_pct < -0.15 else "NEUTRAL")
             })
 
-        hfi_score = round(weighted_score * 10.0, 2) # Normalized to [-10, +10]
+        # HFI must be emitted on [-1, +1]: every consumer treats it that way
+        # (options_flow clips to +/-1, institutional_flow clips to +/-1, and the
+        # strategy_rules Heavyweight veto fires at |HFI| > 0.20).
+        # The previous `* 10.0` put it on roughly [-4, +4] in practice -- weighted_score
+        # is sum(chg_pct% * weight), so an ordinary ~0.5% move across the top-5 gave
+        # HFI ~1.6, which saturated the clip AND blew through the 0.20 veto. Effect:
+        # on any normal trending day one whole direction was vetoed on nearly every bar.
+        # tanh keeps it bounded and smooth with no saturation cliff. The 0.5 divisor is
+        # a reasoned default (~0.25% weighted heavyweight move ~= the 0.20 veto line),
+        # NOT a fitted value -- worth calibrating against the edge table later.
+        hfi_score = round(float(np.tanh(weighted_score / 0.5)), 3)  # [-1, +1]
         
         # Inter-market alignment logic
         hdfc_chg = next((s["change_pct"] for s in stocks_data if s["symbol"] == "HDFCBANK"), 0.0)

@@ -393,7 +393,8 @@ options_desk_state = compute_options_desk_state(
     range_fc_res=range_fc_res,
     gex_chart_res=gex_chart_res,
     live_iv=iv_input,
-    hfi_score=hfi_res.get("hfi_score", 0.0)
+    hfi_score=hfi_res.get("hfi_score", 0.0),
+    chain_source=str(oc_raw.get("source", "")) if isinstance(oc_raw, dict) else ""
 )
 
 # Microstructure, Regime & Volatility Intelligence Pipeline
@@ -493,7 +494,25 @@ except Exception as exc:
     st.warning(f"⚠️ Signal engine error — defaulting to WAIT. ({type(exc).__name__}: {exc})")
 
 # Session Risk Rails Gate
+# The counters MUST be rebuilt from the journal before the gate reads them:
+# record_entry/record_exit were never called from the live app, so trades_today,
+# consecutive_losses, realized_pnl_today and open_trades_count sat at their defaults
+# and can_take_new_trade() always returned ALLOWED — the 3-trade budget, 2-strike halt,
+# 1.5% daily loss limit and one-open-trade cap had never fired once.
 session_risk = SessionRiskState.load_from_disk()
+session_risk.account_capital = account_capital
+
+_bar_pos = {}
+for _i, _ts in enumerate(df.index):
+    if hasattr(_ts, "strftime"):
+        _bar_pos[_ts.strftime("%Y-%m-%d %H:%M")] = _i
+
+session_risk.sync_from_journal(
+    entries=getattr(_kelly_journal, "entries", []),
+    current_bar_idx=len(df) - 1,
+    bar_index_of=lambda ts: _bar_pos.get(str(ts)) if ts else None
+)
+
 can_trade, risk_reason = session_risk.can_take_new_trade(current_bar_idx=len(df)-1)
 if not can_trade and signal.signal_type != SignalType.WAIT:
     signal = Signal(
@@ -521,7 +540,8 @@ ticket = generate_option_trade_ticket(
     iv=iv_input,
     is_0dte_afternoon=is_0dte_mode,
     current_intraday_pnl=session_risk.realized_pnl_today,
-    risk_pct_override=dyn_kelly["dynamic_risk_pct"]
+    risk_pct_override=dyn_kelly["dynamic_risk_pct"],
+    lot_size=int(contract_lot_size)
 )
 
 # Synthesize Unified Desk Verdict

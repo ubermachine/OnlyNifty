@@ -175,12 +175,16 @@ class TestConvictionTiers:
         assert any("UNVERIFIED" in n for n in notes)
 
     def test_range_exhaustion_penalises_late_breakouts(self):
+        # edge_status=TRUSTED so the UNMEASURED/PAPER 65-cap does not clip both sides
+        # to the same value and hide the dampener under test.
         votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 1}
         fresh, _, _, _ = compute_conviction(
-            "BUY_CE", votes, 80.0, desk_state=make_desk_state(move_ratio=0.5), is_breakout=True
+            "BUY_CE", votes, 80.0, desk_state=make_desk_state(move_ratio=0.5),
+            edge_status="TRUSTED", is_breakout=True
         )
         late, _, _, notes = compute_conviction(
-            "BUY_CE", votes, 80.0, desk_state=make_desk_state(move_ratio=1.8), is_breakout=True
+            "BUY_CE", votes, 80.0, desk_state=make_desk_state(move_ratio=1.8),
+            edge_status="TRUSTED", is_breakout=True
         )
         assert late < fresh
         assert any("exhausted" in n for n in notes)
@@ -188,13 +192,26 @@ class TestConvictionTiers:
     def test_sitting_on_gamma_flip_reduces_conviction(self):
         votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 1}
         stable, _, _, _ = compute_conviction(
-            "BUY_CE", votes, 80.0, desk_state=make_desk_state(gamma_flip_distance_pts=200.0)
+            "BUY_CE", votes, 80.0, edge_status="TRUSTED",
+            desk_state=make_desk_state(gamma_flip_distance_pts=200.0)
         )
         unstable, _, _, notes = compute_conviction(
-            "BUY_CE", votes, 80.0, desk_state=make_desk_state(gamma_flip_distance_pts=5.0)
+            "BUY_CE", votes, 80.0, edge_status="TRUSTED",
+            desk_state=make_desk_state(gamma_flip_distance_pts=5.0)
         )
         assert unstable < stable
         assert any("gamma flip" in n for n in notes)
+
+    def test_unmeasured_never_outranks_paper(self):
+        # Less evidence must not score higher: UNMEASURED was uncapped while PAPER
+        # capped at 65, and with no edge_table.json on disk the uncapped branch was
+        # the one always taken.
+        votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 1}
+        unmeasured, _, _, _ = compute_conviction("BUY_CE", votes, 95.0, edge_status="UNMEASURED")
+        paper, _, _, _ = compute_conviction("BUY_CE", votes, 95.0, edge_status="PAPER")
+        trusted, _, _, _ = compute_conviction("BUY_CE", votes, 95.0, edge_status="TRUSTED")
+        assert unmeasured <= paper
+        assert trusted >= paper
 
 
 class TestVerdictIntegration:

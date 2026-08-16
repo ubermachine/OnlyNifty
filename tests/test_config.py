@@ -16,7 +16,10 @@ from src.config import (
 def test_config_constants():
     assert DEFAULT_CAPITAL == 500000.0
     assert MAX_RISK_PCT == 0.01
-    assert LOT_SIZE == 25
+    # NSE revised the Nifty contract 25 -> 75 (SEBI Oct-2024 min contract value ~Rs.15L).
+    # This must track the live contract master: a stale value silently scales every
+    # position size and R-multiple by the ratio of the error.
+    assert LOT_SIZE == 75
     assert EMA_FAST == 21
     assert EMA_MID == 55
     assert EMA_SLOW == 200

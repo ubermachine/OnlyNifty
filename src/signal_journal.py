@@ -24,6 +24,7 @@ import pandas as pd
 from scipy import stats
 
 from src.strategy_rules import Signal, SignalType
+from src.config import LOT_SIZE
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -400,7 +401,7 @@ class LiveSignalJournal:
         r_t2 = round(abs(t2_spot - current_spot) / max(sl_pts_spot, 1.0), 2) if (t2_spot > 0 and sl_pts_spot > 0) else 0.0
 
         lots = int(ticket.get("lots", 6 if is_actionable else 0))
-        total_qty = int(ticket.get("total_qty", lots * 25))
+        total_qty = int(ticket.get("total_qty", lots * LOT_SIZE))
         risk_rupees = float(ticket.get("actual_risk_rupees", ticket.get("max_risk_rupees", 5000.0 if is_actionable else 0.0)))
         tca_friction = float(ticket.get("tca_friction", {}).get("total_friction", 180.0) if isinstance(ticket.get("tca_friction"), dict) else (180.0 if is_actionable else 0.0))
 
@@ -503,7 +504,19 @@ class LiveSignalJournal:
                 entry.lifecycle_status = SignalLifecycleStatus.SQUARED_OFF.value
                 entry.exit_timestamp_ist = now_ist
                 entry.exit_spot = current_spot
-                entry.notes += " | 15:15 IST Mandatory Squareoff."
+                # Book the ACTUAL mark-to-market at squareoff. Previously this set only
+                # the status, leaving realized_r_multiple / realized_pnl_rupees at 0.0 —
+                # so every timed-out trade entered the stats as a costless scratch,
+                # deflating average loss and inflating the payoff ratio that feeds Kelly.
+                sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
+                move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
+                squared_r = round(move_pts / sl_pts, 2)
+                if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value or entry.realized_r_multiple > 0:
+                    squared_r = round(max(squared_r, entry.realized_r_multiple), 2)
+                entry.realized_r_multiple = squared_r
+                entry.realized_pnl_rupees = round(entry.capital_risk_rupees * squared_r, 2)
+                entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                entry.notes += f" | 15:15 IST Mandatory Squareoff @ {squared_r:+.2f}R."
                 updates_count += 1
                 continue
 
@@ -529,8 +542,14 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_high >= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    entry.realized_r_multiple = 4.0
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5, 2)
+                    # R and rupees must agree. This booked 4.0R while paying 3.5x risk,
+                    # so every T3 inflated the R series (and therefore Kelly's payoff
+                    # input) by ~14% relative to the cash actually earned. Derive R from
+                    # the real T3 distance instead of asserting a constant.
+                    _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
+                    _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
+                    entry.realized_r_multiple = _t3_r
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * _t3_r, 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot
@@ -577,8 +596,14 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_low <= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    entry.realized_r_multiple = 4.0
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * 3.5, 2)
+                    # R and rupees must agree. This booked 4.0R while paying 3.5x risk,
+                    # so every T3 inflated the R series (and therefore Kelly's payoff
+                    # input) by ~14% relative to the cash actually earned. Derive R from
+                    # the real T3 distance instead of asserting a constant.
+                    _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
+                    _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
+                    entry.realized_r_multiple = _t3_r
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * _t3_r, 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot

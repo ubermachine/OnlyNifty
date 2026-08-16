@@ -151,6 +151,80 @@ class SessionRiskState:
                 was_win = realized_pnl > 0 or r_multiple > 0
         self.record_exit(realized_pnl, was_win, persist_path)
 
+    def sync_from_journal(
+        self,
+        entries: Any,
+        current_bar_idx: int = -1,
+        bar_index_of: Optional[Any] = None,
+        persist: bool = True,
+        persist_path: Optional[str] = None
+    ) -> "SessionRiskState":
+        """
+        Rebuilds today's risk counters from the signal journal, which is the source of
+        truth for what was actually traded.
+
+        Why derive instead of increment: record_entry/record_exit were never called from
+        the live app, so trades_today / consecutive_losses / realized_pnl_today /
+        open_trades_count sat at their defaults forever and can_take_new_trade() always
+        returned ALLOWED — the trade budget, 2-strike halt, daily loss limit and
+        concurrency cap never fired once. Streamlit also re-executes the whole script on
+        every autorefresh, so incremental counters would double-count on each rerun.
+        Recomputing from the journal is idempotent and rerun-safe.
+
+        `bar_index_of` is an optional callable mapping an entry's bar_timestamp to a bar
+        index, used to enforce the cooldown; when absent the cooldown is left untouched.
+        """
+        self.check_day_reset()
+        today = self.date
+
+        def _is_today(e: Any) -> bool:
+            ts = str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))
+            return ts.startswith(today)
+
+        # Seeded (replayed-history) rows are audit context, never real executions.
+        live = [
+            e for e in (entries or [])
+            if _is_today(e)
+            and not getattr(e, "is_seed", False)
+            and str(getattr(e, "signal_type", "")) not in ("WAIT", "")
+            and int(getattr(e, "selected_strike", 0) or 0) > 0
+        ]
+
+        self.trades_today = len(live)
+        self.open_trades_count = sum(1 for e in live if hasattr(e, "is_active") and e.is_active())
+
+        closed = [e for e in live if hasattr(e, "is_active") and not e.is_active()]
+        self.realized_pnl_today = round(
+            sum(float(getattr(e, "realized_pnl_rupees", 0.0) or 0.0) for e in closed), 2
+        )
+
+        # Trailing consecutive losses, newest first.
+        streak = 0
+        for e in reversed(closed):
+            if float(getattr(e, "realized_r_multiple", 0.0) or 0.0) > 0:
+                break
+            streak += 1
+        self.consecutive_losses = streak
+
+        if callable(bar_index_of) and live:
+            idx = bar_index_of(getattr(live[-1], "bar_timestamp", None))
+            if idx is not None and idx >= 0:
+                self.last_entry_bar_idx = int(idx)
+
+        # Re-arm the breakers off the freshly derived numbers.
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            self.locked = True
+            self.lock_reason = f"2-Strike Loss Circuit Breaker ({self.consecutive_losses} consecutive losses)."
+        elif self.realized_pnl_today <= -self.daily_loss_limit_rupees:
+            self.locked = True
+            self.lock_reason = f"Daily Loss Limit Breached (PnL: ₹{self.realized_pnl_today:.2f} <= -₹{self.daily_loss_limit_rupees:.2f})."
+
+        if persist:
+            save_path = persist_path or self.persistence_file
+            if save_path:
+                self.save_to_disk(save_path)
+        return self
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
