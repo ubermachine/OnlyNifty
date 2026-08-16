@@ -1,8 +1,10 @@
 import os
 import sys
 
-# Ensure repository root is first in sys.path to prevent collisions on Streamlit Cloud (/mount/src/onlynifty)
+# Ensure repository root is first in sys.path and remove parent dirs (e.g. /mount/src) that shadow 'src'
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.abspath(os.path.dirname(_REPO_ROOT))
+sys.path = [p for p in sys.path if os.path.abspath(p) != _PARENT_DIR]
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
