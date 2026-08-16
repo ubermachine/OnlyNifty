@@ -2,7 +2,7 @@
   "date": "2026-08-16",
   "trades_today": 0,
   "consecutive_losses": 0,
-  "realized_pnl_today": 0.0,
+  "realized_pnl_today": 0,
   "open_trades_count": 0,
   "last_entry_bar_idx": -999,
   "locked": false,

@@ -644,6 +644,37 @@ class VolatilityIntelligence:
         }
 
     @staticmethod
+    def atm_iv_from_chain(chain_df: Any, spot: float) -> float:
+        """
+        Mean of the ATM call/put implied vols, as a decimal.
+
+        Raw NSE/Fyers chains carry ce_iv/pe_iv in PERCENT, and the normalizer used
+        elsewhere drops those columns entirely — which is why the term-structure gate
+        had no inputs to work with. Returns 0.0 when unavailable so callers report
+        UNKNOWN rather than inventing a slope.
+        """
+        try:
+            import pandas as _pd
+            if chain_df is None or not isinstance(chain_df, _pd.DataFrame) or chain_df.empty:
+                return 0.0
+            strike_col = "strike" if "strike" in chain_df.columns else (
+                "strikePrice" if "strikePrice" in chain_df.columns else None
+            )
+            if strike_col is None or "ce_iv" not in chain_df.columns or "pe_iv" not in chain_df.columns:
+                return 0.0
+            df = chain_df.copy()
+            df["_dist"] = (df[strike_col].astype(float) - float(spot)).abs()
+            row = df.sort_values("_dist").iloc[0]
+            ivs = [float(row.get(c, 0.0) or 0.0) for c in ("ce_iv", "pe_iv")]
+            ivs = [v for v in ivs if v > 0.0]
+            if not ivs:
+                return 0.0
+            atm_iv = sum(ivs) / len(ivs)
+            return round(atm_iv / 100.0 if atm_iv > 1.0 else atm_iv, 4)
+        except Exception:
+            return 0.0
+
+    @staticmethod
     def compute_term_structure_regime(
         near_expiry_iv: float,
         far_expiry_iv: float

@@ -271,6 +271,7 @@ class DataEngine:
 
     def generate_synthetic_option_chain(self, spot: float = 24395.85) -> Dict[str, Any]:
         """Generates realistic synthetic NSE Option Chain with OI and Greeks for offline resilience."""
+        rng = np.random.RandomState(42)
         atm_center = int(round(spot / 50.0) * 50)
         strikes = [atm_center + (i * 50) for i in range(-12, 13)]
         
@@ -290,8 +291,8 @@ class DataEngine:
             ce_oi = int(max(int(1200000 * base_dist * round_boost * (1.0 + 0.5 * moneyness)), 45000))
             pe_oi = int(max(int(1350000 * base_dist * round_boost * (1.0 - 0.5 * moneyness)), 42000))
             
-            ce_chg = int(ce_oi * np.random.uniform(-0.15, 0.25))
-            pe_chg = int(pe_oi * np.random.uniform(-0.10, 0.30))
+            ce_chg = int(ce_oi * rng.uniform(-0.15, 0.25))
+            pe_chg = int(pe_oi * rng.uniform(-0.10, 0.30))
             
             ce_price = max(round(spot - k + 45.0, 2) if spot > k else round(max(150.0 - abs(k - spot) * 0.45, 8.0), 2), 2.0)
             pe_price = max(round(k - spot + 45.0, 2) if k > spot else round(max(150.0 - abs(spot - k) * 0.45, 8.0), 2), 2.0)
@@ -536,6 +537,91 @@ class DataEngine:
             return n.market_status()
         except Exception:
             return {"marketState": [{"market": "Capital Market", "marketStatus": "Closed"}]}
+
+    def fetch_futures_basis(self, spot: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Cash-futures basis and the near/next calendar spread, via the broker API.
+
+        This is one of the few reads available to the desk that is genuinely ORTHOGONAL
+        to the option chain: it comes from a different instrument and a different set of
+        participants. Premium expansion signals long buildup and comfortable carry;
+        a discount signals stress, hedging pressure or unwinding. The near->next spread
+        prices how willingly positions are being carried across expiry.
+
+        Returns basis in points and annualised terms, with data_quality set so callers
+        can fail neutral rather than infer direction from a missing feed.
+        """
+        out: Dict[str, Any] = {
+            "spot": 0.0, "near_fut": 0.0, "next_fut": 0.0,
+            "basis_pts": 0.0, "basis_pct": 0.0, "annualised_basis_pct": 0.0,
+            "calendar_spread_pts": 0.0, "structure": "UNKNOWN",
+            "bias_score": 0.0, "data_quality": "UNVERIFIED",
+            "near_symbol": "", "next_symbol": ""
+        }
+        try:
+            from src import fyers_client
+
+            now = datetime.now(IST)
+            months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                      "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+            yy = now.year % 100
+            near_sym = f"NSE:NIFTY{yy}{months[now.month - 1]}FUT"
+            nxt_m = now.month % 12
+            nxt_yy = yy + 1 if now.month == 12 else yy
+            next_sym = f"NSE:NIFTY{nxt_yy}{months[nxt_m]}FUT"
+
+            def _lp(sym: str) -> float:
+                q = fyers_client.get_quote(sym)
+                d = q.get("d") or q
+                return float(d.get("lp") or 0.0) if isinstance(d, dict) else 0.0
+
+            near = _lp(near_sym)
+            nxt = _lp(next_sym)
+
+            if spot is None or float(spot) <= 0:
+                sq = fyers_client.get_quote("NSE:NIFTY50-INDEX")
+                sd = sq.get("d") or sq
+                spot = float(sd.get("lp") or 0.0) if isinstance(sd, dict) else 0.0
+            spot = float(spot or 0.0)
+
+            if near <= 0 or spot <= 0:
+                return out
+
+            basis = near - spot
+            # Trading days to month end is a coarse proxy for time-to-expiry; enough to
+            # put the basis on a comparable annualised footing across the cycle.
+            days_left = max((28 - now.day), 1)
+            ann = (basis / spot) * (365.0 / days_left) * 100.0
+
+            # Score the DEVIATION FROM FAIR-VALUE CARRY, not the raw basis. Index futures
+            # sit at a premium in normal conditions (cost of carry ~ the risk-free rate),
+            # so scoring the raw annualised basis would vote bullish on almost every
+            # ordinary day — a constant tilt dressed as a signal. Only the excess or
+            # shortfall against carry is information.
+            from src.config import RISK_FREE_RATE
+            fair_carry_pct = RISK_FREE_RATE * 100.0
+            excess = ann - fair_carry_pct
+            bias = float(np.tanh(excess / 8.0))
+
+            if basis > 0:
+                structure = "CONTANGO_PREMIUM"
+            elif basis < 0:
+                structure = "BACKWARDATION_DISCOUNT"
+            else:
+                structure = "FLAT"
+
+            out.update({
+                "spot": round(spot, 2), "near_fut": round(near, 2), "next_fut": round(nxt, 2),
+                "basis_pts": round(basis, 2), "basis_pct": round(basis / spot * 100.0, 4),
+                "annualised_basis_pct": round(ann, 2),
+                "calendar_spread_pts": round(nxt - near, 2) if nxt > 0 else 0.0,
+                "structure": structure, "bias_score": round(bias, 3),
+                "data_quality": "VERIFIED",
+                "near_symbol": near_sym, "next_symbol": next_sym
+            })
+        except Exception:
+            pass
+        return out
 
     def fetch_live_vix(self) -> float:
         """Fetches real-time India VIX, preferring Fyers over NSE."""
@@ -948,11 +1034,15 @@ class DataEngine:
         - Divergence between Reliance and HDFC Bank -> Mixed Chop / Range-Bound Risk (-0.5)
         """
         heavyweights = [
-            {"symbol": "HDFCBANK.NS", "name": "HDFC Bank", "weight": 0.135, "fallback_price": 1640.0, "fallback_chg": 0.65},
-            {"symbol": "RELIANCE.NS", "name": "Reliance Ind", "weight": 0.098, "fallback_price": 2980.0, "fallback_chg": 0.45},
-            {"symbol": "ICICIBANK.NS", "name": "ICICI Bank", "weight": 0.078, "fallback_price": 1180.0, "fallback_chg": 0.80},
-            {"symbol": "INFY.NS", "name": "Infosys", "weight": 0.059, "fallback_price": 1820.0, "fallback_chg": -0.20},
-            {"symbol": "ITC.NS", "name": "ITC Ltd", "weight": 0.042, "fallback_price": 490.0, "fallback_chg": 0.10}
+            # fallback_chg MUST be 0.0. These were +0.65/+0.45/+0.80/-0.20/+0.10, which
+            # produced a confident STRONG_BULLISH HFI from constants on any fetch
+            # failure -- biasing the desk long during exactly the correlated outages
+            # that accompany market stress. Missing data gets no directional opinion.
+            {"symbol": "HDFCBANK.NS", "name": "HDFC Bank", "weight": 0.135, "fallback_price": 1640.0, "fallback_chg": 0.0},
+            {"symbol": "RELIANCE.NS", "name": "Reliance Ind", "weight": 0.098, "fallback_price": 2980.0, "fallback_chg": 0.0},
+            {"symbol": "ICICIBANK.NS", "name": "ICICI Bank", "weight": 0.078, "fallback_price": 1180.0, "fallback_chg": 0.0},
+            {"symbol": "INFY.NS", "name": "Infosys", "weight": 0.059, "fallback_price": 1820.0, "fallback_chg": 0.0},
+            {"symbol": "ITC.NS", "name": "ITC Ltd", "weight": 0.042, "fallback_price": 490.0, "fallback_chg": 0.0}
         ]
 
         stocks_data = []
@@ -960,9 +1050,11 @@ class DataEngine:
         advances = 0
         declines = 0
 
+        live_resolved = 0
         for hw in heavyweights:
             chg_pct = hw["fallback_chg"]
             price = hw["fallback_price"]
+            _was_live = False
             try:
                 import yfinance as yf
                 t = yf.Ticker(hw["symbol"])

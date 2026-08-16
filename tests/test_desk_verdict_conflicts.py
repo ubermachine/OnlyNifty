@@ -139,12 +139,20 @@ class TestConflictDetection:
 
 class TestDeskOnlyBranches:
     def test_put_wall_fade_fires_when_chart_is_wait(self):
-        # Spot defending the put wall in +gamma with supportive flow.
+        # Spot defending the put wall in +gamma with supportive flow. Corroborating
+        # structure/flow/macro supplied as a live setup would carry them, so this
+        # exercises the fade branch rather than incidentally testing the conviction floor.
         verdict = build_desk_verdict(
             signal=make_wait_signal(),
             ticket={"status": "WAIT"},
             desk_state=make_desk_state(d_vector=0.35),
             current_spot=24405.0,
+            htf_data={"htf_aligned_long": True},
+            options_context={
+                "flow_score": 68.0,
+                "futures_basis": {"data_quality": "VERIFIED", "bias_score": 0.5,
+                                  "basis_pts": 60.0, "annualised_basis_pct": 11.0},
+            },
         )
         assert verdict.action == "BUY_CE"
         assert "Put Wall" in verdict.action_label
@@ -155,6 +163,8 @@ class TestDeskOnlyBranches:
             ticket={"status": "WAIT"},
             desk_state=make_desk_state(d_vector=-0.35, trend_bias="BEARISH"),
             current_spot=24595.0,
+            htf_data={"htf_aligned_short": True},
+            options_context={"flow_score": 30.0, "futures_basis": {"data_quality": "VERIFIED", "bias_score": -0.5, "basis_pts": -20.0, "annualised_basis_pct": 1.0}},
         )
         assert verdict.action == "BUY_PE"
         assert "Call Wall" in verdict.action_label
@@ -169,6 +179,8 @@ class TestDeskOnlyBranches:
                 gamma_regime="DEALER_SHORT_GAMMA",
             ),
             current_spot=24650.0,
+            htf_data={"htf_aligned_long": True},
+            options_context={"flow_score": 72.0, "futures_basis": {"data_quality": "VERIFIED", "bias_score": 0.6, "basis_pts": 70.0, "annualised_basis_pct": 12.0}},
         )
         assert verdict.action == "BUY_CE"
         assert "Breakout" in verdict.action_label
@@ -192,3 +204,60 @@ class TestDeskOnlyBranches:
             current_spot=24405.0,
         )
         assert verdict.action == "WAIT"
+
+
+class TestConvictionFloorIsAVeto:
+    """Conviction used to be computed AFTER the action and used only to prefix the
+    label, so a LOW-conviction setup still emitted a full ticket with entry, stops and
+    lot count — the system grading its own trade poorly and taking it anyway."""
+
+    def test_thin_evidence_is_refused(self):
+        # Desk-only fade backed by positioning alone: structure, flow and macro have no
+        # data at all. One family out of four is not a trade.
+        verdict = build_desk_verdict(
+            signal=make_wait_signal(),
+            ticket={"status": "WAIT"},
+            desk_state=make_desk_state(d_vector=0.35, trend_bias="BULLISH"),
+            current_spot=24405.0,
+        )
+        assert verdict.action == "WAIT"
+        assert any("CONVICTION_FLOOR" in c for c in verdict.conflicts)
+        assert verdict.option_pick is None
+
+    def test_corroborated_setup_survives(self):
+        verdict = build_desk_verdict(
+            signal=make_wait_signal(),
+            ticket={"status": "WAIT"},
+            desk_state=make_desk_state(d_vector=0.35, trend_bias="BULLISH"),
+            current_spot=24405.0,
+            htf_data={"htf_aligned_long": True},
+            options_context={
+                "flow_score": 68.0,
+                "futures_basis": {"data_quality": "VERIFIED", "bias_score": 0.5,
+                                  "basis_pts": 60.0, "annualised_basis_pct": 11.0},
+            },
+        )
+        assert verdict.action == "BUY_CE"
+        assert not any("CONVICTION_FLOOR" in c for c in verdict.conflicts)
+
+
+class TestEvidenceOpposesTrade:
+    """The four families were synthesised into a net directional score that the action
+    table then ignored entirely."""
+
+    def test_net_bearish_evidence_blocks_a_desk_long(self):
+        verdict = build_desk_verdict(
+            signal=make_wait_signal(),
+            ticket={"status": "WAIT"},
+            desk_state=make_desk_state(d_vector=0.35, trend_bias="BULLISH"),
+            current_spot=24405.0,
+            htf_data={"htf_aligned_short": True},
+            options_context={
+                "flow_score": 12.0,
+                "futures_basis": {"data_quality": "VERIFIED", "bias_score": -0.9,
+                                  "basis_pts": -50.0, "annualised_basis_pct": -4.0},
+                "macro_report": {"macro_sentiment_score": -0.9},
+            },
+        )
+        assert verdict.action == "WAIT"
+        assert any("EVIDENCE_OPPOSES_TRADE" in c for c in verdict.conflicts)
