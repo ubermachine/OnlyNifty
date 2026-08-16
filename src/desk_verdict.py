@@ -141,10 +141,13 @@ def compute_evidence_families(
             pos_sum += 0.3 * float(desk_state.pcr_momentum_score)
             pos_bits.append(f"PCR mom {desk_state.pcr_momentum_score:+.2f}")
 
-        if desk_state.dealer_drift_score != 0.0:
-            # Mechanical vanna/charm hedging drift
-            pos_sum += 0.3 * float(desk_state.dealer_drift_score)
-            pos_bits.append(f"vanna/charm {desk_state.dealer_drift_score:+.2f}")
+        # dealer_drift_score is NOT used for direction. It comes from
+        # compute_vanna_charm_drift_vector(spot, round(spot/50)*50), which measures as a
+        # deterministic (spot mod 50) sawtooth — identical at spot 20000 and 26000 — with
+        # a constant negative tilt and no OI weighting or dealer-inventory sign. Feeding
+        # it at 0.3 injected a permanent bearish bias and rendered it as live "Vanna/Charm"
+        # evidence. Real charm exposure needs sum_k charm_k * OI_k * dealer_sign; until
+        # that exists it stays diagnostic only.
 
     if pos_sum > 0.15:
         votes["positioning"] = 1

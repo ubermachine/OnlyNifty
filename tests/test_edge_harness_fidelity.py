@@ -70,10 +70,12 @@ class TestOutcomeModelMatchesLiveLifecycle:
         out = runner.simulate_trade_outcome(long_signal(), future)
         assert out == pytest.approx(0.5)
 
-    def test_flat_window_is_zero(self):
+    def test_unresolved_trade_is_censored_not_scored_zero(self):
+        # An unresolved trade is missing data, not a scratch. Scoring it 0.0 put it in n,
+        # deflated the sample SD and dragged EV toward zero.
         runner = WalkForwardRunner()
         out = runner.simulate_trade_outcome(long_signal(), make_future([(24510, 24495)]))
-        assert out == 0.0
+        assert out is None
 
     def test_zero_risk_stop_is_excluded_from_stats(self):
         runner = WalkForwardRunner()
@@ -86,8 +88,10 @@ class TestOutcomeModelMatchesLiveLifecycle:
         )
         # __post_init__ nudges SL off entry, so this now has definable risk.
         assert sig.sl_price != sig.entry_price
-        out = runner.simulate_trade_outcome(sig, make_future([(24510, 24495)]))
+        # Resolve it (tag T1) so we are testing risk-definability, not censoring.
+        out = runner.simulate_trade_outcome(sig, make_future([(24560, 24520)]))
         assert out is not None
+        assert out > 0
 
     def test_short_side_is_symmetric(self):
         runner = WalkForwardRunner()

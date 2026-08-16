@@ -216,7 +216,11 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2) if t1_booked else -1.0
                 break
             elif hit_t3:
-                outcome_r = 4.0
+                # Derive R from the actual T3 distance rather than asserting a constant.
+                # A hardcoded 4.0 inflated the winners' tail independently of where T3
+                # actually sat, which is precisely what props up a setup's measured EV.
+                r_t3 = abs(t3_px - entry_px) / sl_pts if t3_px > 0 else max(r_t2, 1.0)
+                outcome_r = round(r_t3, 2)
                 break
             elif hit_t2:
                 outcome_r = round(0.5 * r_t1 + 0.5 * r_t2, 2)
@@ -226,7 +230,12 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2)
                 live_sl = entry_px  # trail to breakeven on the remaining 50%
 
-        # Window expired with the trade still open: keep whatever was banked at T1.
+        # Window expired with the trade still open and nothing banked. Returning 0.0 here
+        # counted an unresolved trade as a real scratch: it entered n, deflated the sample
+        # SD, dragged EV toward zero and corrupted win_rate. Censor it instead (None is
+        # dropped by the caller) unless T1 had already booked a partial.
+        if not t1_booked and outcome_r == 0.0:
+            return None
         return outcome_r
 
     def run(
