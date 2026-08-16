@@ -178,3 +178,36 @@ TERM_STRUCTURE_BACKWARDATION_THRESHOLD: float = -0.02  # IV spread threshold for
 TERM_STRUCTURE_CRISIS_SIZE_MULT: float = 0.25          # Sizing multiplier during term structure inversion
 GAMMA_SQUEEZE_TARGET_MULT: float = 2.0       # Target multiplier for gamma squeeze breakout trades
 EXPIRY_PIN_MIN_DISTANCE_PTS: float = 50.0    # Minimum Max Pain distance to trigger expiry pin trade
+
+# ----------------- REGIME-CONDITIONAL EVIDENCE WEIGHTS (v5.3) -----------------
+# Dynamically adapts the 4 independent evidence family weights to the Markov / Volatility regime:
+# 1. LOW_VOL_TRENDING: Structure and Directional Flow dominate
+# 2. MEAN_REVERTING_CHOP: Options Desk Positioning (GEX Walls, Max Pain, Mean Reversion) dominates
+# 3. HIGH_VOL_EXPANSION / Crisis: Macro shocks and Order Flow Toxicity dominate
+REGIME_EVIDENCE_WEIGHTS = {
+    "LOW_VOL_TRENDING": {
+        "structure": 0.40,
+        "flow": 0.30,
+        "positioning": 0.20,
+        "macro": 0.10
+    },
+    "MEAN_REVERTING_CHOP": {
+        "structure": 0.15,
+        "flow": 0.20,
+        "positioning": 0.45,
+        "macro": 0.20
+    },
+    "HIGH_VOL_EXPANSION": {
+        "structure": 0.15,
+        "flow": 0.35,
+        "positioning": 0.15,
+        "macro": 0.35
+    },
+    "DEFAULT": {
+        "structure": 0.30,
+        "flow": 0.25,
+        "positioning": 0.30,
+        "macro": 0.15
+    }
+}
+

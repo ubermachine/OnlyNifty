@@ -19,7 +19,8 @@ from src.config import (
     POSITIONING_UNVERIFIED_SIZE_CAP,
     MIN_CONVICTION_TO_TRADE,
     EVIDENCE_OPPOSITION_THRESHOLD,
-    LOT_SIZE
+    LOT_SIZE,
+    REGIME_EVIDENCE_WEIGHTS
 )
 
 
@@ -256,7 +257,19 @@ def compute_evidence_families(
         votes["macro"] = -1
     why["macro"] = " | ".join(macro_bits) if macro_bits else "no macro data"
 
-    weights = {"structure": 0.30, "flow": 0.25, "positioning": 0.30, "macro": 0.15}
+    # --- 5. REGIME-CONDITIONAL EVIDENCE WEIGHTS (v5.3) -------------------------
+    # Dynamically select weights based on active regime (trending vs chop vs high-vol expansion)
+    active_regime = "DEFAULT"
+    if regime_state and isinstance(regime_state, dict):
+        reg_cand = regime_state.get("active_regime")
+        if reg_cand in REGIME_EVIDENCE_WEIGHTS:
+            active_regime = reg_cand
+    elif vol_report and isinstance(vol_report, dict):
+        ts = vol_report.get("term_structure_regime")
+        if isinstance(ts, dict) and ts.get("is_crisis"):
+            active_regime = "HIGH_VOL_EXPANSION"
+
+    weights = REGIME_EVIDENCE_WEIGHTS.get(active_regime, REGIME_EVIDENCE_WEIGHTS["DEFAULT"])
     directional = sum(votes[k] * weights[k] for k in votes)
     return votes, why, round(float(np.clip(directional, -1.0, 1.0)), 3)
 
