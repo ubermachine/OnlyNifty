@@ -273,6 +273,15 @@ def load_live_option_chain_data(mode_key: str = "Live") -> dict:
     except Exception as e:
         return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE", "error": str(e)}
 
+@st.cache_data(ttl=60, max_entries=3, show_spinner=False)
+def load_multi_expiry_chain() -> dict:
+    """Near/next/monthly chains — used for the IV term structure (crash veto input)."""
+    engine = get_data_engine()
+    try:
+        return engine.fetch_multi_expiry_option_chain(symbol="NIFTY")
+    except Exception:
+        return {}
+
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_heavyweight_flow_index() -> dict:
     engine = get_data_engine()
@@ -478,10 +487,28 @@ delta_div = detect_footprint_delta_divergences(df)
 ofi_data = compute_order_flow_imbalance(df)
 
 vol_engine = VolatilityIntelligence()
+
+# Term-structure inputs. compute_term_structure_regime is what powers the IV
+# backwardation crash veto, but without a near/far expiry pair it can only report
+# UNKNOWN — i.e. the gate is callable but permanently uninformed. Pull the ATM IV
+# from the near-week and monthly chains so it has something real to judge.
+_near_iv = _far_iv = 0.0
+try:
+    _multi = load_multi_expiry_chain()
+    _ms = float(_multi.get("underlying_value") or current_spot)
+    _near_iv = VolatilityIntelligence.atm_iv_from_chain(_multi.get("near_chain"), _ms)
+    _far_iv = VolatilityIntelligence.atm_iv_from_chain(_multi.get("monthly_chain"), _ms)
+    if _far_iv <= 0.0:
+        _far_iv = VolatilityIntelligence.atm_iv_from_chain(_multi.get("next_chain"), _ms)
+except Exception:
+    _near_iv = _far_iv = 0.0
+
 vol_report = vol_engine.generate_vol_intelligence_report(
     close_prices=df['close'],
     current_iv=iv_input,
-    bar_time=df.index[-1].strftime('%H:%M') if hasattr(df.index[-1], 'strftime') else '12:00'
+    bar_time=df.index[-1].strftime('%H:%M') if hasattr(df.index[-1], 'strftime') else '12:00',
+    near_expiry_iv=_near_iv,
+    far_expiry_iv=_far_iv
 )
 
 # Academic Alpha: Yang-Zhang Volatility & Variance Risk Premium (VRP)
