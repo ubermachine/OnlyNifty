@@ -449,7 +449,7 @@ def compute_dynamic_trailing_option_sl(
 ) -> float:
     """Translates spot dynamic trailing SL (21 EMA / AVWAP 1σ) into exact option premium floor."""
     spot_diff = (current_trailing_spot_sl - spot_entry) if is_call else (spot_entry - current_trailing_spot_sl)
-    convexity = 0.5 * gamma * (spot_diff ** 2) if spot_diff >= 0 else -0.5 * gamma * (spot_diff ** 2)
+    convexity = 0.5 * gamma * (spot_diff ** 2)
     time_decay = abs(theta_daily / 75.0) * elapsed_bars_5m
     
     option_sl_prem = entry_prem + (spot_diff * delta) + convexity - time_decay
@@ -478,11 +478,12 @@ def calculate_adaptive_tca_friction(
             "slippage": 0.0, "effective_slippage_pts": 0.0
         }
         
-    orders_count = 3.0 if part_booked else 2.0
+    actual_part_booked = part_booked and lots > 1
+    orders_count = 3.0 if actual_part_booked else 2.0
     brokerage = BROKERAGE_PER_ORDER * orders_count
     
     turnover_buy = entry_prem * total_qty
-    if part_booked:
+    if actual_part_booked:
         qty_50 = (lots // 2) * LOT_SIZE
         qty_rem = total_qty - qty_50
         turnover_sell = (qty_50 * t1_prem) + (qty_rem * final_exit_prem)

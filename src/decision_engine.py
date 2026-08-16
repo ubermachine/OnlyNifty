@@ -16,7 +16,8 @@ from src.risk_state import SessionRiskState
 from src.config import (
     SIGNAL_MIN_CONFLUENCE, VPIN_TOXICITY_THRESHOLD, SKEW_ZSCORE_THRESHOLD,
     GEX_WALL_BUFFER_PTS, STOP_MIN_ATR_FRACTION, STOP_MAX_POINTS,
-    LUNCH_LULL_SIZE_FACTOR, GATE_FAIL_TO_WAIT, POSITIONING_VETO_STRENGTH
+    LUNCH_LULL_SIZE_FACTOR, GATE_FAIL_TO_WAIT, GATE_MIN_MISSING_TO_BLOCK,
+    POSITIONING_VETO_STRENGTH
 )
 
 
@@ -89,6 +90,25 @@ class DecisionEngine:
             "passed": True,
             "veto_gate": None
         }
+
+        # 0. DATA SUFFICIENCY (GATE_FAIL_TO_WAIT)
+        missing_inputs: List[str] = []
+        if ctx.skew_z == 0.0 and not ctx.is_crash_hedging:
+            if not ctx.options_context or not ctx.options_context.get("chain_df") is not None:
+                missing_inputs.append("25d_skew")
+        if not ctx.gex_walls or not ctx.gex_walls.get("walls_verified", False):
+            missing_inputs.append("dealer_walls")
+        if not (ctx.options_context and ctx.options_context.get("dir_flow")):
+            missing_inputs.append("positioning_flow")
+        audit["missing_inputs"] = missing_inputs
+
+        if GATE_FAIL_TO_WAIT and len(missing_inputs) >= GATE_MIN_MISSING_TO_BLOCK:
+            audit["passed"] = False
+            audit["veto_gate"] = "INSUFFICIENT_GATE_DATA"
+            return False, (
+                f"Data Sufficiency Gate: {len(missing_inputs)} core inputs unavailable "
+                f"({', '.join(missing_inputs)}). Gates cannot be evaluated — standing aside."
+            ), audit
 
         # 1. VPIN Flow Toxicity Veto
         if ctx.vpin > VPIN_TOXICITY_THRESHOLD:
@@ -284,14 +304,21 @@ class DecisionEngine:
             clean_t2 = cand.target_2
             clean_t3 = cand.target_3_moonshot
 
+            min_spacing = max(0.8 * atr_14, 15.0)
             if cand.direction == "LONG":
-                if clean_t1 <= cand.entry_price: clean_t1 = round(cand.entry_price + 1.2 * atr_14, 2)
-                if clean_t2 <= clean_t1: clean_t2 = round(clean_t1 + 1.3 * atr_14, 2)
-                if clean_t3 <= clean_t2: clean_t3 = round(clean_t2 + 1.5 * atr_14, 2)
+                if clean_t1 <= cand.entry_price or (clean_t1 - cand.entry_price) < min_spacing:
+                    clean_t1 = round(cand.entry_price + 1.2 * atr_14, 2)
+                if clean_t2 <= clean_t1 or (clean_t2 - clean_t1) < min_spacing:
+                    clean_t2 = round(clean_t1 + 1.3 * atr_14, 2)
+                if clean_t3 <= clean_t2 or (clean_t3 - clean_t2) < min_spacing:
+                    clean_t3 = round(clean_t2 + 1.5 * atr_14, 2)
             else:
-                if clean_t1 >= cand.entry_price: clean_t1 = round(cand.entry_price - 1.2 * atr_14, 2)
-                if clean_t2 >= clean_t1: clean_t2 = round(clean_t1 - 1.3 * atr_14, 2)
-                if clean_t3 >= clean_t2: clean_t3 = round(clean_t2 - 1.5 * atr_14, 2)
+                if clean_t1 >= cand.entry_price or (cand.entry_price - clean_t1) < min_spacing:
+                    clean_t1 = round(cand.entry_price - 1.2 * atr_14, 2)
+                if clean_t2 >= clean_t1 or (clean_t1 - clean_t2) < min_spacing:
+                    clean_t2 = round(clean_t1 - 1.3 * atr_14, 2)
+                if clean_t3 >= clean_t2 or (clean_t2 - clean_t3) < min_spacing:
+                    clean_t3 = round(clean_t2 - 1.5 * atr_14, 2)
 
             cand_details = {**cand.details, "setup_id": cand.setup_id, "evidence": cand.evidence}
             if option_chain_df is not None and not option_chain_df.empty:

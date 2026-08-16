@@ -763,7 +763,8 @@ if pre_open_data and (pre_open_data.get("pChange", 0.0) != 0.0 or (now_ist.hour 
 hfi_adv = hfi_res.get("advances", 0)
 hfi_dec = hfi_res.get("declines", 0)
 day_range_pts = float(df['high'].max() - df['low'].min())
-vol_ratio = float(df['volume'].iloc[-1] / max(float(df['volume'].mean()), 1.0)) * 100.0
+ref_vol = float(df['volume'].iloc[-2]) if len(df) > 1 else float(df['volume'].iloc[-1])
+vol_ratio = float(ref_vol / max(float(df['volume'].mean()), 1.0)) * 100.0
 st.markdown(f'''
 <div style="background-color: #0b101b; border: 1px solid #162032; border-radius: 6px; padding: 4px 12px; margin-bottom: 8px; font-size: 11px; color: #8e9fb5; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace;">
     <div><strong>🏛️ BREADTH:</strong> <span style="color:#05df72;">{hfi_adv}↑</span> / <span style="color:#ff3355;">{hfi_dec}↓</span> (Top 5: 41.2% Wt) | <strong>DAY RANGE:</strong> {day_range_pts:.1f} pts ({day_range_pts/current_spot*100:.2f}%)</div>

@@ -199,11 +199,18 @@ class SessionRiskState:
         )
 
         # Trailing consecutive losses, newest first.
+        # Scratches / breakeven trades (R >= -0.05 and PnL >= -50) do not count as losses.
         streak = 0
         for e in reversed(closed):
-            if float(getattr(e, "realized_r_multiple", 0.0) or 0.0) > 0:
+            r_mult = float(getattr(e, "realized_r_multiple", 0.0) or 0.0)
+            pnl_val = float(getattr(e, "realized_pnl_rupees", 0.0) or 0.0)
+            if r_mult > 0 or pnl_val > 0:
                 break
-            streak += 1
+            elif r_mult >= -0.05 and pnl_val >= -50.0:
+                # Breakeven scratch: ignores and continues checking earlier trades
+                continue
+            else:
+                streak += 1
         self.consecutive_losses = streak
 
         if callable(bar_index_of) and live:

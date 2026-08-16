@@ -761,9 +761,14 @@ class VolatilityIntelligence:
 
         put_rows = df_sorted.iloc[(df_sorted["strike"] - target_put_strike).abs().argsort()[:1]]
         call_rows = df_sorted.iloc[(df_sorted["strike"] - target_call_strike).abs().argsort()[:1]]
-
         put_iv = float(put_rows["pe_iv"].iloc[0]) if "pe_iv" in put_rows.columns and not pd.isna(put_rows["pe_iv"].iloc[0]) else iv_baseline * 1.15
         call_iv = float(call_rows["ce_iv"].iloc[0]) if "ce_iv" in call_rows.columns and not pd.isna(call_rows["ce_iv"].iloc[0]) else iv_baseline * 0.95
+
+        # Normalize IV percentages (e.g. 15.0%) to decimal fractions (0.15)
+        if put_iv > 1.0:
+            put_iv /= 100.0
+        if call_iv > 1.0:
+            call_iv /= 100.0
 
         skew_val = put_iv - call_iv
         # Baseline mean skew ~ 0.025 (250 bps), std ~ 0.012

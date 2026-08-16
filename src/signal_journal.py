@@ -528,7 +528,7 @@ class LiveSignalJournal:
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
                         entry.exit_premium = entry.entry_premium
-                        entry.notes += f" | Breakeven SL hit on remaining 50% after T1 profit."
+                        entry.notes += f" | Breakeven SL hit on remaining 50%."
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
@@ -542,10 +542,6 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_high >= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    # R and rupees must agree. This booked 4.0R while paying 3.5x risk,
-                    # so every T3 inflated the R series (and therefore Kelly's payoff
-                    # input) by ~14% relative to the cash actually earned. Derive R from
-                    # the real T3 distance instead of asserting a constant.
                     _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                     _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
                     entry.realized_r_multiple = _t3_r
@@ -561,10 +557,10 @@ class LiveSignalJournal:
                     entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
                     entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
-                    entry.exit_timestamp_ist = now_ist
+                    entry.sl_spot = entry.target_1_spot if entry.target_1_spot > 0 else entry.spot_price  # Trail SL to T1
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
-                    entry.notes += f" | T2 Hit @ ₹{current_high:.1f}"
+                    entry.notes += f" | T2 Hit @ ₹{current_high:.1f}. Trailed SL to T1."
                     updates_count += 1
                 elif current_high >= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
@@ -582,7 +578,7 @@ class LiveSignalJournal:
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
                         entry.exit_premium = entry.entry_premium
-                        entry.notes += f" | Breakeven SL hit on remaining 50% after T1 profit."
+                        entry.notes += f" | Breakeven SL hit on remaining 50%."
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
@@ -596,10 +592,6 @@ class LiveSignalJournal:
                     updates_count += 1
                 elif current_low <= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    # R and rupees must agree. This booked 4.0R while paying 3.5x risk,
-                    # so every T3 inflated the R series (and therefore Kelly's payoff
-                    # input) by ~14% relative to the cash actually earned. Derive R from
-                    # the real T3 distance instead of asserting a constant.
                     _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                     _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
                     entry.realized_r_multiple = _t3_r
@@ -615,10 +607,10 @@ class LiveSignalJournal:
                     entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
                     entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
-                    entry.exit_timestamp_ist = now_ist
+                    entry.sl_spot = entry.target_1_spot if entry.target_1_spot > 0 else entry.spot_price  # Trail SL to T1
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
-                    entry.notes += f" | T2 Hit @ ₹{current_low:.1f}"
+                    entry.notes += f" | T2 Hit @ ₹{current_low:.1f}. Trailed SL to T1."
                     updates_count += 1
                 elif current_low <= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value

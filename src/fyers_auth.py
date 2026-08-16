@@ -11,7 +11,7 @@ import base64
 import hashlib
 import json
 import os
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qs
 
 import pyotp
@@ -22,6 +22,12 @@ LOGIN_API_BASE = "https://api-t2.fyers.in/vagator/v2"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT, ".secrets", "fyers_config.json")
 TOKEN_PATH = os.path.join(ROOT, ".cache", "fyers_tokens.json")
+
+
+def _today_ist_str() -> str:
+    """Returns today's date in Indian Standard Time (IST, UTC+05:30)."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).date().isoformat()
 
 
 def _st_secrets() -> dict:
@@ -162,7 +168,7 @@ def login_with_auth_code(raw_code_or_url: str) -> dict:
     tokens = {
         "access_token": data["access_token"],
         "refresh_token": data["refresh_token"],
-        "obtained_date": date.today().isoformat(),
+        "obtained_date": _today_ist_str(),
     }
     _save_tokens(tokens)
     return tokens
@@ -265,7 +271,7 @@ def refresh_access_token() -> str:
     if data.get("s") != "ok":
         raise RuntimeError(f"Fyers refresh-token exchange failed: {data}")
     tokens["access_token"] = data["access_token"]
-    tokens["obtained_date"] = date.today().isoformat()
+    tokens["obtained_date"] = _today_ist_str()
     _save_tokens(tokens)
     return tokens["access_token"]
 
@@ -273,7 +279,7 @@ def refresh_access_token() -> str:
 def get_access_token() -> str:
     """Returns today's valid access_token, auto-logging in (TOTP flow) if not minted yet today."""
     tokens = _load_tokens()
-    if tokens.get("access_token") and tokens.get("obtained_date") == date.today().isoformat():
+    if tokens.get("access_token") and tokens.get("obtained_date") == _today_ist_str():
         return tokens["access_token"]
     auto_login()
     return _load_tokens()["access_token"]

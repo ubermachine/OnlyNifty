@@ -57,12 +57,12 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
         if np.any(valid):
             raw_rs = float(np.mean(r[valid] / s[valid]))
             expected_rs = np.sqrt((lag - 0.5) / (np.pi * 0.5)) if lag > 2 else 1.0
-            rs_values.append(raw_rs / max(expected_rs * 0.85, 0.1))
-            valid_lags.append(lag)
-            
     if len(rs_values) >= 3:
-        poly = np.polyfit(np.log(valid_lags), np.log(rs_values), 1)
+        safe_rs = np.maximum(np.array(rs_values, dtype=float), 1e-6)
+        poly = np.polyfit(np.log(valid_lags), np.log(safe_rs), 1)
         h = float(np.clip(poly[0] + 0.50, 0.10, 0.90))
+        if np.isnan(h) or np.isinf(h):
+            h = 0.50
     else:
         h = 0.50
         
@@ -279,8 +279,8 @@ def detect_footprint_delta_divergences(
         return {"divergence_detected": False, "type": "NONE", "bias": "NEUTRAL", "thesis": ""}
 
     sub = df.tail(lookback + 5)
-    vol = sub["volume"].copy().astype(float).replace(0, 1.0)
-    c_range = (sub["high"] - sub["low"]).replace(0, 1.0)
+    vol = sub["volume"].copy().astype(float).clip(lower=1.0)
+    c_range = (sub["high"] - sub["low"]).clip(lower=1e-4)
     body_weight = (sub["close"] - sub["open"]) / c_range
     close_loc_weight = (2.0 * sub["close"] - sub["high"] - sub["low"]) / c_range
     bar_deltas = vol * ((0.60 * body_weight) + (0.40 * close_loc_weight))
@@ -336,7 +336,7 @@ def compute_order_flow_imbalance(df: pd.DataFrame, decay_lambda: float = 0.15) -
     if vol.sum() == 0 or (vol == 0).all():
         vol = (df["high"] - df["low"]).clip(lower=1.0)
         
-    c_range = (df["high"] - df["low"]).replace(0, 1.0)
+    c_range = (df["high"] - df["low"]).clip(lower=1e-4)
     # 3-Tier Composite Microstructure Delta:
     # 1. 50% Body Directional Displacement
     # 2. 30% Close Location relative to mid-point
@@ -355,7 +355,7 @@ def compute_order_flow_imbalance(df: pd.DataFrame, decay_lambda: float = 0.15) -
     
     # Rolling 20-Bar OFI Z-Score
     rolling_mean = bar_delta.rolling(window=20, min_periods=3).mean()
-    rolling_std = bar_delta.rolling(window=20, min_periods=3).std().replace(0, 1.0)
+    rolling_std = bar_delta.rolling(window=20, min_periods=3).std().clip(lower=1e-4)
     ofi_zscore_series = ((bar_delta - rolling_mean) / rolling_std).fillna(0.0)
     
     recent_z = float(ofi_zscore_series.iloc[-1])
@@ -388,11 +388,21 @@ def compute_cpr(daily_df: pd.DataFrame) -> Dict[str, Any]:
             "regime": "UNKNOWN"
         }
     
-    if len(daily_df) > 10 and hasattr(daily_df.index, "date"):
-        daily_resampled = daily_df.resample("D").agg({
-            "open": "first", "high": "max", "low": "min", "close": "last"
-        }).dropna()
-        last = daily_resampled.iloc[-1] if not daily_resampled.empty else daily_df.iloc[-1]
+    if len(daily_df) > 1 and hasattr(daily_df.index, "date"):
+        try:
+            daily_resampled = daily_df.resample("D").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last"
+            }).dropna()
+            if len(daily_resampled) >= 2:
+                last = daily_resampled.iloc[-2]  # Prior completed session
+            elif not daily_resampled.empty:
+                last = daily_resampled.iloc[-1]
+            else:
+                last = daily_df.iloc[-1]
+        except Exception:
+            last = daily_df.iloc[-2] if len(daily_df) >= 2 else daily_df.iloc[-1]
+    elif len(daily_df) >= 2:
+        last = daily_df.iloc[-2]
     else:
         last = daily_df.iloc[-1]
 

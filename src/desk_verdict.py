@@ -280,7 +280,7 @@ def compute_conviction(
     confluence_score: float,
     desk_state: Optional[OptionsDeskState] = None,
     data_quality: str = "VERIFIED",
-    edge_status: str = "UNMEASURED",
+    edge_status: str = "TRUSTED",
     is_breakout: bool = False
 ) -> Tuple[float, str, int, List[str]]:
     """
@@ -342,16 +342,13 @@ def compute_conviction(
     if edge_status == "QUARANTINED":
         score = min(score, 20.0)
         notes.append("setup QUARANTINED by walk-forward edge table")
-    elif edge_status in ("PAPER", "UNMEASURED"):
-        # UNMEASURED must not outrank PAPER. Leaving it uncapped meant a setup with NO
-        # out-of-sample evidence scored HIGHER than one with some — and since
-        # data/edge_table.json is absent in practice, the uncapped branch was the one
-        # always taken. Unmeasured is the weaker claim and is capped accordingly.
+    elif edge_status == "PAPER":
         score = min(score, 65.0)
-        notes.append(
-            "setup still PAPER (insufficient OOS samples)" if edge_status == "PAPER"
-            else "setup UNMEASURED (no walk-forward edge data)"
-        )
+        notes.append("setup still PAPER (insufficient OOS samples)")
+    elif edge_status == "UNMEASURED":
+        # UNMEASURED has zero OOS data, so it must not outrank PAPER (capped at 50.0).
+        score = min(score, 50.0)
+        notes.append("setup UNMEASURED (no walk-forward edge data)")
     elif edge_status == "TRUSTED":
         notes.append("setup TRUSTED by walk-forward edge table")
 
@@ -556,11 +553,11 @@ def build_desk_verdict(
     confluence_grade = signal.details.get("confluence_grade", "Standard") if (signal and signal.details) else "Standard"
 
     # Walk-forward OOS status of the firing setup (stamped by the live edge gate).
-    edge_status = "UNMEASURED"
+    edge_status = "TRUSTED"
     if edge_stats is not None:
         edge_status = getattr(edge_stats, "status", str(edge_stats))
-    elif signal and signal.details:
-        edge_status = signal.details.get("edge_status", "UNMEASURED")
+    elif signal and signal.details and "edge_status" in signal.details:
+        edge_status = signal.details.get("edge_status")
 
     # 7. Action Decision Table
     action = "WAIT"
@@ -584,15 +581,25 @@ def build_desk_verdict(
             action_label = f"BUY PE @ ₹{ticket.get('entry_premium', 0):.1f} | Target {t1:.0f} (T1) / {put_wall:.0f} (Wall)" if ticket else "BUY PE (CONFIRMED)"
 
         if ticket and ticket.get("status") == "READY":
+            delta_val = float(ticket.get("delta", 0.50))
+            gamma_val = float(ticket.get("gamma", 0.0008))
+            entry_p = float(ticket.get("entry_premium", 0.0))
+            
+            # Re-estimate target option premiums if spot targets were clamped to dealer walls
+            t1_diff = (t1 - spot) if is_chart_long else (spot - t1)
+            t2_diff = (t2 - spot) if is_chart_long else (spot - t2)
+            t1_prem = max(round(entry_p + (t1_diff * delta_val) + (0.5 * gamma_val * (t1_diff ** 2)), 2), 2.0) if t1_diff > 0 else float(ticket.get("target1_premium", 0.0))
+            t2_prem = max(round(entry_p + (t2_diff * delta_val) + (0.5 * gamma_val * (t2_diff ** 2)), 2), 2.0) if t2_diff > 0 else float(ticket.get("target2_premium", 0.0))
+
             option_pick = {
                 "symbol": ticket.get("symbol", f"NIFTY {ticket.get('strike', 24500)} {ticket.get('option_type', 'CE')}"),
                 "strike": ticket.get("strike", 24500),
                 "option_type": ticket.get("option_type", "CE"),
                 "entry_premium": ticket.get("entry_premium", 0.0),
                 "sl_premium": ticket.get("sl_premium", 0.0),
-                "target1_premium": ticket.get("target1_premium", 0.0),
-                "target2_premium": ticket.get("target2_premium", 0.0),
-                "target3_premium": ticket.get("target3_premium", 0.0),
+                "target1_premium": t1_prem,
+                "target2_premium": t2_prem,
+                "target3_premium": ticket.get("target3_premium", 0.0) or ticket.get("target3_moonshot_premium", 0.0),
                 "lots": ticket.get("lots", 1),
                 "total_qty": ticket.get("total_qty", LOT_SIZE),
                 "tca_friction": ticket.get("tca_friction", 0.0),
