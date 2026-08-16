@@ -271,6 +271,7 @@ class DataEngine:
 
     def generate_synthetic_option_chain(self, spot: float = 24395.85) -> Dict[str, Any]:
         """Generates realistic synthetic NSE Option Chain with OI and Greeks for offline resilience."""
+        rng = np.random.RandomState(42)
         atm_center = int(round(spot / 50.0) * 50)
         strikes = [atm_center + (i * 50) for i in range(-12, 13)]
         
@@ -290,8 +291,8 @@ class DataEngine:
             ce_oi = int(max(int(1200000 * base_dist * round_boost * (1.0 + 0.5 * moneyness)), 45000))
             pe_oi = int(max(int(1350000 * base_dist * round_boost * (1.0 - 0.5 * moneyness)), 42000))
             
-            ce_chg = int(ce_oi * np.random.uniform(-0.15, 0.25))
-            pe_chg = int(pe_oi * np.random.uniform(-0.10, 0.30))
+            ce_chg = int(ce_oi * rng.uniform(-0.15, 0.25))
+            pe_chg = int(pe_oi * rng.uniform(-0.10, 0.30))
             
             ce_price = max(round(spot - k + 45.0, 2) if spot > k else round(max(150.0 - abs(k - spot) * 0.45, 8.0), 2), 2.0)
             pe_price = max(round(k - spot + 45.0, 2) if k > spot else round(max(150.0 - abs(spot - k) * 0.45, 8.0), 2), 2.0)
