@@ -1,0 +1,8 @@
+{
+  "client_id": "YOUR_APP_ID-100",
+  "secret_key": "YOUR_SECRET_KEY",
+  "redirect_uri": "https://your-registered-redirect-uri",
+  "pin": "YOUR_4_DIGIT_PIN",
+  "fy_id": "YOUR_FYERS_LOGIN_ID",
+  "totp_secret": "YOUR_TOTP_SECRET_KEY"
+}

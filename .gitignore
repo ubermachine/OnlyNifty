@@ -16,6 +16,11 @@ env/
 .coverage
 data/test_*.json
 
+# Secrets
+.secrets/*
+!.secrets/*.example.json
+.env
+
 # OS generated
 .DS_Store
 Thumbs.db

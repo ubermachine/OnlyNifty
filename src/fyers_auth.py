@@ -7,15 +7,18 @@ on a daily schedule (e.g. Windows Task Scheduler); `login` is a one-time (or ~15
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 from datetime import date
 from urllib.parse import urlparse, parse_qs
 
+import pyotp
 import requests
 
 BASE_URL = "https://api-t1.fyers.in/api/v3"
+LOGIN_API_BASE = "https://api-t2.fyers.in/vagator/v2"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT, ".secrets", "fyers_config.json")
 TOKEN_PATH = os.path.join(ROOT, ".cache", "fyers_tokens.json")
@@ -31,8 +34,10 @@ def _load_config() -> dict:
         "secret_key": cfg.get("secret_key") or os.environ.get("FYERS_SECRET_KEY"),
         "redirect_uri": cfg.get("redirect_uri") or os.environ.get("FYERS_REDIRECT_URI"),
         "pin": cfg.get("pin") or os.environ.get("FYERS_PIN"),
+        "fy_id": cfg.get("fy_id") or os.environ.get("FYERS_FY_ID"),
+        "totp_secret": cfg.get("totp_secret") or os.environ.get("FYERS_TOTP_SECRET"),
     }
-    missing = [k for k, v in resolved.items() if not v and k != "pin"]
+    missing = [k for k, v in resolved.items() if not v and k not in ("pin", "fy_id", "totp_secret")]
     if missing:
         raise RuntimeError(
             f"Missing Fyers config: {missing}. Set them in {CONFIG_PATH} "
@@ -103,6 +108,79 @@ def login_with_auth_code(raw_code_or_url: str) -> dict:
     return tokens
 
 
+def auto_login() -> dict:
+    """
+    Fully non-interactive login using Fyers' internal TOTP-based login endpoints
+    (used because the public refresh-token API is disabled per SEBI regulation).
+    Requires fy_id, totp_secret, and pin in config. Not part of Fyers' documented
+    public API, so it may need adjustment if Fyers changes these endpoints.
+    """
+    cfg = _load_config()
+    for key in ("fy_id", "totp_secret", "pin"):
+        if not cfg[key]:
+            raise RuntimeError(f"auto_login requires '{key}' in config.")
+
+    # Step 1: request login OTP (issues a TOTP-flow request_key)
+    resp = requests.post(
+        f"{LOGIN_API_BASE}/send_login_otp",
+        json={"fy_id": cfg["fy_id"], "app_id": "2"},
+        timeout=10,
+    )
+    data = resp.json()
+    if data.get("s") != "ok":
+        raise RuntimeError(f"send_login_otp failed: {data}")
+    request_key = data["request_key"]
+
+    # Step 2: verify a freshly generated TOTP code against that request_key
+    totp_code = pyotp.TOTP(cfg["totp_secret"]).now()
+    resp = requests.post(
+        f"{LOGIN_API_BASE}/verify_otp",
+        json={"request_key": request_key, "otp": totp_code},
+        timeout=10,
+    )
+    data = resp.json()
+    if data.get("s") != "ok":
+        raise RuntimeError(f"verify_otp failed: {data}")
+    request_key = data["request_key"]
+
+    # Step 3: verify PIN, returns a short-lived session bearer token
+    resp = requests.post(
+        f"{LOGIN_API_BASE}/verify_pin",
+        json={"request_key": request_key, "identity_type": "pin", "identifier": cfg["pin"]},
+        timeout=10,
+    )
+    data = resp.json()
+    if data.get("s") != "ok":
+        raise RuntimeError(f"verify_pin failed: {data}")
+    session_token = data["data"]["access_token"]
+
+    # Step 4: exchange the session token for an auth_code via the app's OAuth endpoint
+    app_id = cfg["client_id"].split("-")[0]
+    resp = requests.post(
+        f"{BASE_URL}/token",
+        json={
+            "fyers_id": cfg["fy_id"],
+            "app_id": app_id,
+            "redirect_uri": cfg["redirect_uri"],
+            "appType": "100",
+            "code_challenge": "",
+            "state": "fyers_auth",
+            "scope": "",
+            "nonce": "",
+            "response_type": "code",
+            "create_cookie": True,
+        },
+        headers={"Authorization": f"Bearer {session_token}"},
+        timeout=10,
+    )
+    data = resp.json()
+    if data.get("s") != "ok":
+        raise RuntimeError(f"token exchange failed: {data}")
+    auth_code = _extract_auth_code(data["Url"])
+
+    return login_with_auth_code(auth_code)
+
+
 def refresh_access_token() -> str:
     cfg = _load_config()
     tokens = _load_tokens()
@@ -130,11 +208,12 @@ def refresh_access_token() -> str:
 
 
 def get_access_token() -> str:
-    """Returns today's valid access_token, refreshing automatically if not minted yet today."""
+    """Returns today's valid access_token, auto-logging in (TOTP flow) if not minted yet today."""
     tokens = _load_tokens()
     if tokens.get("access_token") and tokens.get("obtained_date") == date.today().isoformat():
         return tokens["access_token"]
-    return refresh_access_token()
+    auto_login()
+    return _load_tokens()["access_token"]
 
 
 def main():
@@ -146,9 +225,9 @@ def main():
     p_login = sub.add_parser("login", help="Exchange an auth_code (or full redirect URL) for tokens")
     p_login.add_argument("auth_code")
 
-    sub.add_parser("refresh", help="Mint a new access_token from the stored refresh_token (run daily)")
+    sub.add_parser("auto-login", help="Fully non-interactive TOTP-based login (run daily, e.g. via Task Scheduler)")
 
-    sub.add_parser("token", help="Print a valid access_token, refreshing first if needed")
+    sub.add_parser("token", help="Print a valid access_token, auto-logging in first if needed")
 
     args = parser.parse_args()
 
@@ -157,9 +236,9 @@ def main():
     elif args.command == "login":
         login_with_auth_code(args.auth_code)
         print(f"Logged in. Tokens saved to {TOKEN_PATH}")
-    elif args.command == "refresh":
-        refresh_access_token()
-        print(f"Refreshed. New access_token obtained ({date.today().isoformat()}).")
+    elif args.command == "auto-login":
+        auto_login()
+        print(f"Auto-login succeeded. New access_token obtained ({date.today().isoformat()}).")
     elif args.command == "token":
         print(get_access_token())
 
