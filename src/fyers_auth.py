@@ -28,7 +28,22 @@ def _st_secrets() -> dict:
     """Streamlit Community Cloud delivers secrets via st.secrets, not env vars or files."""
     try:
         import streamlit as st
-        return dict(st.secrets.get("fyers", {}))
+        if not hasattr(st, "secrets") or not st.secrets:
+            return {}
+        # 1. Try [fyers] table
+        if "fyers" in st.secrets:
+            return dict(st.secrets["fyers"])
+        # 2. Try [FYERS] table
+        if "FYERS" in st.secrets:
+            return dict(st.secrets["FYERS"])
+        # 3. Check flat top-level keys
+        flat = {}
+        for k in ("client_id", "secret_key", "redirect_uri", "pin", "fy_id", "totp_secret"):
+            if k in st.secrets:
+                flat[k] = str(st.secrets[k])
+            elif k.upper() in st.secrets:
+                flat[k] = str(st.secrets[k.upper()])
+        return flat
     except Exception:
         return {}
 
@@ -36,8 +51,11 @@ def _st_secrets() -> dict:
 def _load_config() -> dict:
     cfg = {}
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
-            cfg = json.load(f)
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
     st_cfg = _st_secrets()
     resolved = {
         "client_id": cfg.get("client_id") or st_cfg.get("client_id") or os.environ.get("FYERS_CLIENT_ID"),
@@ -51,7 +69,7 @@ def _load_config() -> dict:
     if missing:
         raise RuntimeError(
             f"Missing Fyers config: {missing}. Set them in {CONFIG_PATH} "
-            f"(see .secrets/fyers_config.example.json) or as env vars."
+            f"(see .secrets/fyers_config.example.json), via st.secrets, or as env vars."
         )
     return resolved
 
@@ -60,16 +78,34 @@ def _app_id_hash(client_id: str, secret_key: str) -> str:
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
 
+def _get_token_path() -> str:
+    try:
+        os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+        test_file = os.path.join(os.path.dirname(TOKEN_PATH), ".write_test")
+        with open(test_file, "w") as f:
+            f.write("1")
+        os.remove(test_file)
+        return TOKEN_PATH
+    except Exception:
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), "fyers_tokens.json")
+
+
 def _load_tokens() -> dict:
-    if os.path.exists(TOKEN_PATH):
-        with open(TOKEN_PATH, "r") as f:
-            return json.load(f)
+    t_path = _get_token_path()
+    if os.path.exists(t_path):
+        try:
+            with open(t_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
 
 def _save_tokens(tokens: dict) -> None:
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    with open(TOKEN_PATH, "w") as f:
+    t_path = _get_token_path()
+    os.makedirs(os.path.dirname(t_path), exist_ok=True)
+    with open(t_path, "w") as f:
         json.dump(tokens, f, indent=2)
 
 
