@@ -148,15 +148,25 @@ def get_multi_expiry_chain(symbol: str = "NSE:NIFTY50-INDEX", strikecount: int =
         raw = base if exp is near else get_option_chain_raw(symbol, strikecount=strikecount, timestamp=exp["expiry"])
         return _rows_from_chain(raw, spot, exp["date"], int(exp["expiry"]))
 
-    near_chain, next_chain, monthly_chain = fetch(near), fetch(next_), fetch(monthly)
-    combined = pd.concat([near_chain, next_chain, monthly_chain], ignore_index=True)
+    near_chain = fetch(near)
+    try:
+        next_chain = fetch(next_) if next_ is not near else pd.DataFrame()
+    except Exception:
+        next_chain = pd.DataFrame()
+    try:
+        monthly_chain = fetch(monthly) if monthly is not near else pd.DataFrame()
+    except Exception:
+        monthly_chain = pd.DataFrame()
+
+    chains_to_concat = [c for c in [near_chain, next_chain, monthly_chain] if not c.empty]
+    combined = pd.concat(chains_to_concat, ignore_index=True) if chains_to_concat else near_chain
 
     return {
         "underlying_value": spot,
-        "expiry_dates": [near["date"], next_["date"], monthly["date"]],
+        "expiry_dates": [near["date"]] + ([next_["date"]] if not next_chain.empty else []) + ([monthly["date"]] if not monthly_chain.empty else []),
         "near_expiry": near["date"],
-        "next_expiry": next_["date"],
-        "monthly_expiry": monthly["date"],
+        "next_expiry": next_["date"] if len(expiries) > 1 else near["date"],
+        "monthly_expiry": monthly["date"] if expiries else near["date"],
         "near_chain": near_chain,
         "next_chain": next_chain,
         "monthly_chain": monthly_chain,
