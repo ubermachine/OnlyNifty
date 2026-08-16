@@ -273,6 +273,33 @@ def load_live_option_chain_data(mode_key: str = "Live") -> dict:
     except Exception as e:
         return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE", "error": str(e)}
 
+@st.cache_data(ttl=30, max_entries=3, show_spinner=False)
+def load_live_vix() -> float:
+    """Live India VIX from the broker feed. 0.0 means unavailable — never a guess."""
+    engine = get_data_engine()
+    try:
+        return float(engine.fetch_live_vix() or 0.0)
+    except Exception:
+        return 0.0
+
+@st.cache_data(ttl=30, max_entries=3, show_spinner=False)
+def load_futures_basis(spot: float) -> dict:
+    """Cash-futures basis + calendar spread — orthogonal to the option chain."""
+    engine = get_data_engine()
+    try:
+        return engine.fetch_futures_basis(spot=spot)
+    except Exception:
+        return {"data_quality": "UNVERIFIED", "bias_score": 0.0}
+
+@st.cache_data(ttl=120, max_entries=3, show_spinner=False)
+def load_global_macro(spot: float) -> dict:
+    """GIFT Nifty, USDINR, US10Y, Brent, S&P — the overnight/cross-asset read."""
+    try:
+        from src.macro_engine import GlobalMacroEngine
+        return GlobalMacroEngine().fetch_global_macro_snapshot(current_spot=spot)
+    except Exception:
+        return {}
+
 @st.cache_data(ttl=60, max_entries=3, show_spinner=False)
 def load_multi_expiry_chain() -> dict:
     """Near/next/monthly chains — used for the IV term structure (crash veto input)."""
@@ -311,7 +338,26 @@ st.sidebar.header("⚙️ Risk & Data Stream")
 account_capital = st.sidebar.number_input("Account Capital (₹)", min_value=50000.0, max_value=50000000.0, value=DEFAULT_CAPITAL, step=50000.0)
 risk_pct = st.sidebar.slider("Max Capital Risk per Trade (%)", min_value=0.25, max_value=2.0, value=1.0, step=0.05) / 100.0
 contract_lot_size = st.sidebar.number_input("Nifty Lot Size", min_value=25, max_value=75, value=LOT_SIZE, step=25)
-iv_input = st.sidebar.slider("Expected IV / India VIX (%)", min_value=8.0, max_value=30.0, value=DEFAULT_IV * 100.0, step=0.5) / 100.0
+# India VIX is the canonical volatility input for this index and drives EVERY
+# vol-derived quantity downstream: VRP, expected move, all Greeks, the skew baseline
+# and GEX weighting. It was a manually-set slider, which meant "variance risk premium"
+# was partly a measurement of where the slider had been left. Default to the live
+# broker feed; the slider now only overrides it when the feed is unavailable or the
+# user deliberately wants a what-if.
+_live_vix = load_live_vix()
+_vix_ok = _live_vix > 0.0
+_iv_default = _live_vix if _vix_ok else DEFAULT_IV * 100.0
+use_live_vix = st.sidebar.checkbox(
+    f"Use live India VIX ({_live_vix:.2f}%)" if _vix_ok else "Use live India VIX (unavailable)",
+    value=_vix_ok, disabled=not _vix_ok,
+    help="Live India VIX from the broker feed. Uncheck to override manually."
+)
+_iv_manual = st.sidebar.slider(
+    "IV override (%)", min_value=8.0, max_value=60.0,
+    value=float(round(_iv_default, 1)), step=0.5,
+    disabled=use_live_vix and _vix_ok
+)
+iv_input = (_live_vix if (use_live_vix and _vix_ok) else _iv_manual) / 100.0
 drawdown_input = st.sidebar.slider("Current Portfolio Drawdown (%)", min_value=0.0, max_value=15.0, value=0.0, step=0.5) / 100.0
 is_0dte_mode = st.sidebar.checkbox("⚡ 0DTE Expiry Thursday Mode (Post-13:00 IST)", value=False, help="Activates sub-minute singularity shield, tightened 18pt stops, and gamma explosion scalper.")
 
@@ -530,11 +576,19 @@ inst_flow_res = compute_institutional_flow_score(
     hfi_score=hfi_res.get("hfi_score", 0.0)
 )
 
+# Cross-market inputs for the MACRO evidence family. These are the only reads the desk
+# has that are not derived from price or from options written on that price, so they are
+# what actually raises the effective independence of the family vote.
+futures_basis_res = load_futures_basis(current_spot)
+macro_report_res = load_global_macro(current_spot)
+
 options_context = {
     "chain_df": oc_df,
     "pcr": pcr_analytics,
     "range_fc": range_fc_res,
     "dir_flow": dir_flow_res,
+    "futures_basis": futures_basis_res,
+    "macro_report": macro_report_res,
     "gex_chart": gex_chart_res,
     "pcr_zscore": options_desk_state.pcr_zscore,
     "options_desk_state": options_desk_state,

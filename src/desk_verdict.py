@@ -155,9 +155,31 @@ def compute_evidence_families(
         votes["positioning"] = -1
     why["positioning"] = " | ".join(pos_bits) if pos_bits else "no positioning data"
 
-    # --- 4. MACRO / VOL: regime, VRP, term structure -------------------------
+    # --- 4. MACRO: cross-market reads that are NOT derived from the option chain ---
+    # This family previously voted only on VRP and term structure — i.e. it was a second
+    # volatility family wearing a macro label, which is part of why the four families
+    # measured as only ~1.8 independent signals. Futures basis, global cues and the VIX
+    # regime come from different instruments and different participants, so they carry
+    # information the price/option complex does not.
     macro_bits: List[str] = []
     macro_sum = 0.0
+
+    basis = (options_context or {}).get("futures_basis")
+    if isinstance(basis, dict) and basis.get("data_quality") == "VERIFIED":
+        # Deviation from fair-value carry: premium above carry = long demand.
+        macro_sum += float(basis.get("bias_score", 0.0))
+        macro_bits.append(
+            f"Basis {basis.get('basis_pts', 0.0):+.0f}pts ({basis.get('annualised_basis_pct', 0.0):+.1f}% ann)"
+        )
+
+    macro_ctx = (options_context or {}).get("macro_report")
+    if isinstance(macro_ctx, dict):
+        ms = macro_ctx.get("macro_sentiment_score", macro_ctx.get("sentiment_score"))
+        if ms is not None:
+            # Global cues (USDINR, Brent, US10Y) — normalised to [-1, +1] by the engine.
+            macro_sum += float(np.clip(float(ms), -1.0, 1.0)) * 0.7
+            macro_bits.append(f"Global {float(ms):+.2f}")
+
     if vol_report:
         ts = vol_report.get("term_structure_regime")
         if isinstance(ts, dict) and ts.get("is_crisis"):
