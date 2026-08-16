@@ -356,11 +356,23 @@ def compute_short_term_directional_vector(
     except Exception:
         is_expiry_day = False
 
-    # IMP-2: Equal-weight D-vector (Timmermann 2006 academic evidence)
-    # Simple equal-weighted combinations often outperform optimized weights
-    # due to parameter instability and estimation errors.
-    # Previous: 0.30*doi + 0.25*vc + 0.20*pcr + 0.15*straddle + 0.10*hfi
-    d_intraday = 0.20 * s_doi + 0.20 * s_vc + 0.20 * s_pcr + 0.20 * s_straddle + 0.20 * s_hfi
+    # D-vector: equal weight across the pillars that actually carry directional
+    # information (Timmermann 2006 — equal weighting resists parameter instability,
+    # but ONLY among candidates of comparable signal-to-noise).
+    #
+    # s_vc and s_straddle are deliberately EXCLUDED. Both were measured to be
+    # deterministic functions of (spot mod 50) with no directional content:
+    #   - compute_vanna_charm_drift_vector is called with strike = round(spot/50)*50,
+    #     and spot cancels inside vanna = vega/spot*(...), so drift_score is identical
+    #     at spot 20000 / 24500 / 24550 / 26000 (all -0.0880). It is level-invariant
+    #     across 6000 index points and carries a constant ~-0.045 bearish tilt.
+    #   - s_straddle keys off vol_state, but that compares straddle >= straddle*1.02,
+    #     which is never true, so VOL_EXPANSION is unreachable and the pillar reduces
+    #     to +/-0.25 on sign(spot - nearest 50-strike).
+    # Carrying them at 0.20 each meant 40% of the "directional" vector was a sawtooth.
+    # They remain in component_scores for display/diagnostics but no longer steer D.
+    _informative = [s_doi, s_pcr, s_hfi]
+    d_intraday = sum(_informative) / float(len(_informative))
     d_intraday = max(min(round(d_intraday, 3), 1.0), -1.0)
     conviction_pct = round(abs(d_intraday) * 100.0, 1)
     
@@ -434,7 +446,8 @@ def compute_short_term_directional_vector(
         "suggested_action": action,
         "target_price": target_price,
         "stop_price": stop_price,
-        "weighting_method": "equal_weight_timmermann_2006",
+        "weighting_method": "equal_weight_3pillar_doi_pcr_hfi",
+        "excluded_pillars": ["vanna_charm", "straddle_state"],  # spot-mod-50 sawtooths, no directional content
         "is_expiry_day": is_expiry_day,
         "data_quality": "VERIFIED" if (option_chain_df is not None and not option_chain_df.empty) else "SYNTHETIC",
         "straddle_metrics": straddle_res,

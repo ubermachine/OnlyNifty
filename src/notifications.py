@@ -22,7 +22,7 @@ from collections import deque
 
 from src.config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PARSE_MODE,
-    TELEGRAM_TIMEOUT_SECONDS, TELEGRAM_MIN_CONFLUENCE_SCORE
+    TELEGRAM_TIMEOUT_SECONDS, TELEGRAM_MIN_CONFLUENCE_SCORE, LOT_SIZE
 )
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ class TelegramNotifier:
         t3_prem = getattr(entry, "target_3_premium", 0.0)
         
         lots = getattr(entry, "lots_suggested", 2)
-        qty = getattr(entry, "total_qty", lots * 25)
+        qty = getattr(entry, "total_qty", lots * LOT_SIZE)
         risk_rs = getattr(entry, "capital_risk_rupees", 0.0)
         tca_rs = getattr(entry, "tca_friction_est", 45.0)
         ts_ist = getattr(entry, "timestamp_ist", "")

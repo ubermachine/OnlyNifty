@@ -201,8 +201,21 @@ data_quality: str                   # "VERIFIED" vs "UNVERIFIED"
 
 1. **2nd-Order Taylor Series Convexity Pricing:**
    $$dP \approx \Delta \cdot dS + \frac{1}{2} \Gamma \cdot (dS)^2 + \Theta \cdot dt$$
-2. **5-Pillar Directional Vector ($D_{\text{intraday}} \in [-1.0, +1.0]$), equal-weighted (IMP-2, Timmermann 2006 — simple-average combinations resist parameter instability better than optimized weights):**
-   $$D = 0.20 \cdot S_{\Delta\text{OI}} + 0.20 \cdot S_{\text{VC}} + 0.20 \cdot S_{\text{PCR}} + 0.20 \cdot S_{\text{Straddle}} + 0.20 \cdot S_{\text{HFI}}$$
+2. **Directional Vector ($D_{\text{intraday}} \in [-1.0, +1.0]$) — equal weight across the 3 *informative* pillars:**
+   $$D = \tfrac{1}{3}\left( S_{\Delta\text{OI}} + S_{\text{PCR}} + S_{\text{HFI}} \right)$$
+   Equal weighting follows Timmermann (2006), which holds only among candidates of
+   comparable signal-to-noise — hence the exclusions below.
+
+   > **$S_{\text{VC}}$ (vanna/charm) and $S_{\text{Straddle}}$ are EXCLUDED from $D$.** Both were
+   > measured to be deterministic functions of $(\text{spot} \bmod 50)$ with no directional content:
+   > `compute_vanna_charm_drift_vector` is called with $K = \text{round}(S/50)\cdot 50$ and spot cancels
+   > inside $\text{vanna} = \frac{\text{vega}}{S}(\cdot)$, so `drift_score` is identical ($-0.0880$) at
+   > spot 20000 / 24500 / 24550 / 26000 — level-invariant across 6000 index points, with a constant
+   > $\approx -0.045$ bearish tilt. $S_{\text{Straddle}}$ keys off `vol_state`, which compares
+   > `straddle >= straddle * 1.02` and is therefore never `VOL_EXPANSION`, reducing the pillar to
+   > $\pm 0.25$ on $\text{sign}(S - K_{\text{ATM}})$. Carried at 0.20 each, they made 40% of the
+   > "directional" vector a sawtooth. Both remain in `component_scores` for diagnostics only.
+   > `dealer_drift_score` is excluded from the desk-verdict positioning family for the same reason.
 3. **Black-Scholes Intraday Expected Move Approximation:**
    $$\text{ExpMove}_{\text{pts}} \approx S_0 \cdot \sigma_{\text{IV}} \cdot \sqrt{\frac{1}{365}} \cdot 0.80$$
 4. **Realized Volatility (RV) Annualized:**

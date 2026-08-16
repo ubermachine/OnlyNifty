@@ -173,3 +173,53 @@ class TestMoveRatioScaling:
             live_iv=iv, persist_history=False,
         )
         assert st.move_ratio == pytest.approx(1.0, abs=0.15)
+
+
+class TestDVectorExcludesSawtoothPillars:
+    """The D-vector must not be steered by (spot mod 50) artefacts.
+
+    compute_vanna_charm_drift_vector is called with strike = round(spot/50)*50 and spot
+    cancels inside vanna = vega/spot*(...), so drift_score repeats exactly every 50
+    points and is identical across thousands of index points. s_straddle keys off a
+    vol_state that can never be VOL_EXPANSION. Carried at 0.20 each they made 40% of D
+    a sawtooth with a constant bearish tilt.
+    """
+
+    def _d(self, spot, hfi=0.0):
+        return compute_short_term_directional_vector(
+            spot=spot, df=trending_df(), live_iv=0.13, hfi_score=hfi
+        )
+
+    def test_vanna_charm_is_confirmed_level_invariant(self):
+        # Documents WHY the pillar is excluded — identical at 50-point multiples
+        # thousands of points apart.
+        from src.options_flow import compute_vanna_charm_drift_vector
+        scores = {
+            s: compute_vanna_charm_drift_vector(s, round(s / 50.0) * 50, iv=0.13, t_days=1.0)["drift_score"]
+            for s in (20000.0, 24500.0, 24550.0, 26000.0)
+        }
+        assert len(set(scores.values())) == 1, f"expected identical sawtooth values, got {scores}"
+
+    def test_d_vector_is_stable_across_the_strike_grid(self):
+        # Same market state, spot walked across one 50-point strike interval. If the
+        # sawtooth pillars still fed D, this would swing materially.
+        ds = [self._d(24500.0 + off)["directional_vector"] for off in (0, 10, 20, 30, 40)]
+        assert max(ds) - min(ds) < 1e-9, f"D varies with spot mod 50: {ds}"
+
+    def test_excluded_pillars_are_declared_but_still_reported(self):
+        res = self._d(24500.0)
+        assert set(res["excluded_pillars"]) == {"vanna_charm", "straddle_state"}
+        # Still available for diagnostics, just not steering direction.
+        assert "s_vc" in res["component_scores"]
+        assert "s_straddle" in res["component_scores"]
+
+    def test_d_is_the_mean_of_the_three_informative_pillars(self):
+        res = self._d(24500.0, hfi=0.6)
+        cs = res["component_scores"]
+        expected = round((cs["s_doi"] + cs["s_pcr"] + cs["s_hfi"]) / 3.0, 3)
+        assert res["directional_vector"] == pytest.approx(expected, abs=0.002)
+
+    def test_no_constant_bearish_tilt_at_neutral_input(self):
+        # The charm pillar previously injected a permanent negative bias.
+        d = self._d(24500.0, hfi=0.0)["directional_vector"]
+        assert abs(d) < 0.20

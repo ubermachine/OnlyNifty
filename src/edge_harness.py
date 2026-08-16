@@ -15,7 +15,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from src.config import QUARANTINE_MIN_SAMPLES
+from src.config import QUARANTINE_MIN_SAMPLES, EDGE_OVERLAP_VIF
 
 
 @dataclass
@@ -130,7 +130,15 @@ class WalkForwardRunner:
         # Expected value per trade
         ev = float(np.mean(arr))
 
-        # Bootstrap 95% Confidence Interval
+        # Bootstrap 95% Confidence Interval.
+        #
+        # OVERLAP CORRECTION: signals can fire on consecutive bars while each outcome
+        # spans a 12-bar horizon, so these observations are NOT independent. A plain iid
+        # bootstrap resamples them as if they were and produces an interval that is too
+        # narrow — which is how a marginal setup earns a confident "TRUSTED".
+        # Inflate the interval half-width by sqrt(VIF) about the mean. EDGE_OVERLAP_VIF
+        # is a conservative floor, not a fitted value; a proper stationary block bootstrap
+        # (mean block ~2x the outcome horizon) is the right long-term replacement.
         if n >= 10:
             bootstraps = []
             rng = np.random.RandomState(42)
@@ -144,11 +152,23 @@ class WalkForwardRunner:
             ci_low = ev - 1.96 * std_err
             ci_high = ev + 1.96 * std_err
 
-        # Quarantine Policy
+        inflation = float(np.sqrt(max(EDGE_OVERLAP_VIF, 1.0)))
+        ci_low = ev - (ev - ci_low) * inflation
+        ci_high = ev + (ci_high - ev) * inflation
+
+        # Quarantine Policy.
+        #
+        # QUARANTINED must mean "demonstrated loser", not merely "unproven". Collapsing
+        # `ci_low < 0` into QUARANTINE blocked setups whose EV is positive but whose
+        # interval simply still straddles zero — that is missing evidence, not evidence
+        # of harm, and the right response is to keep sampling at reduced size.
+        # The table is a kill-switch for losers, never a licence to size up.
         if n < QUARANTINE_MIN_SAMPLES:
             status = "PAPER"
-        elif ci_low < 0.0 or ev <= 0.0:
-            status = "QUARANTINED"
+        elif ev <= 0.0:
+            status = "QUARANTINED"      # negative expectancy on an adequate sample
+        elif ci_low < 0.0:
+            status = "PAPER"            # positive EV, not yet statistically established
         else:
             status = "TRUSTED"
 
@@ -216,7 +236,11 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2) if t1_booked else -1.0
                 break
             elif hit_t3:
-                outcome_r = 4.0
+                # Derive R from the actual T3 distance rather than asserting a constant.
+                # A hardcoded 4.0 inflated the winners' tail independently of where T3
+                # actually sat, which is precisely what props up a setup's measured EV.
+                r_t3 = abs(t3_px - entry_px) / sl_pts if t3_px > 0 else max(r_t2, 1.0)
+                outcome_r = round(r_t3, 2)
                 break
             elif hit_t2:
                 outcome_r = round(0.5 * r_t1 + 0.5 * r_t2, 2)
@@ -226,7 +250,12 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2)
                 live_sl = entry_px  # trail to breakeven on the remaining 50%
 
-        # Window expired with the trade still open: keep whatever was banked at T1.
+        # Window expired with the trade still open and nothing banked. Returning 0.0 here
+        # counted an unresolved trade as a real scratch: it entered n, deflated the sample
+        # SD, dragged EV toward zero and corrupted win_rate. Censor it instead (None is
+        # dropped by the caller) unless T1 had already booked a partial.
+        if not t1_booked and outcome_r == 0.0:
+            return None
         return outcome_r
 
     def run(

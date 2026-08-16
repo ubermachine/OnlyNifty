@@ -6,7 +6,13 @@ IST = pytz.timezone("Asia/Kolkata")
 # ----------------- CAPITAL & FRACTIONAL KELLY SIZING -----------------
 DEFAULT_CAPITAL: float = 500000.0       # ₹5,00,000 baseline reference institutional capital
 MAX_RISK_PCT: float = 0.01               # Strict 1.0% max risk per trade baseline
-LOT_SIZE: int = 25                      # Nifty 50 derivative contract lot size
+# !! VERIFY AGAINST YOUR BROKER'S CONTRACT MASTER BEFORE TRADING !!
+# NSE revised the Nifty lot size 25 -> 75 (SEBI Oct-2024 circular raising the minimum
+# F&O contract value to ~Rs.15 lakh). This value scales EVERY position-size, R-multiple
+# and margin figure in the system: if it reads 25 while the real contract is 75, each
+# ticket recommends 3x the intended lots and silently risks 3x the capital budget.
+# Erring high under-trades; erring low over-risks — hence the conservative default.
+LOT_SIZE: int = 75                      # Nifty 50 derivative contract lot size
 KELLY_FRACTION: float = 0.25            # Quarter-Kelly allocation for fat-tail safety
 MAX_TOLERABLE_MDD: float = 0.10         # 10.0% Maximum tolerable portfolio drawdown
 DAILY_LOSS_LIMIT_PCT: float = 0.015     # 1.5% Hard Daily Loss Limit (DLL) circuit breaker
@@ -120,6 +126,15 @@ VPIN_TOXICITY_THRESHOLD: float = 0.75       # Toxic order flow veto boundary (0.
 MAX_CONSECUTIVE_LOSSES_DAY: int = 2         # 2-strike daily circuit breaker
 DAILY_LOSS_LIMIT_PCT: float = 0.015         # 1.5% max daily account loss limit
 QUARANTINE_MIN_SAMPLES: int = 30            # Minimum sample size before setup can be TRUSTED
+
+# Walk-forward observations overlap: signals may fire on consecutive bars while each
+# outcome spans a 12-bar horizon, so trades are serially dependent. An iid bootstrap
+# understates the CI and lets a marginal setup earn a confident TRUSTED. This variance
+# inflation factor widens the interval. 2.0 is a conservative floor derived from the
+# observed firing rate; it is NOT fitted. Replace with a stationary block bootstrap
+# (mean block ~2x the outcome horizon) when the sample supports it.
+EDGE_OVERLAP_VIF: float = 2.0
+
 
 # ----------------- OPTIONS DESK & POSITIONING FUSION (v5.2) -----------------
 POSITIONING_VETO_STRENGTH: float = 0.5      # D-vector threshold opposing chart setup to trigger WAIT

@@ -1365,7 +1365,8 @@ def generate_option_trade_ticket(
     is_0dte_afternoon: bool = False,
     current_intraday_pnl: float = 0.0,
     peak_intraday_pnl: float = 0.0,
-    risk_pct_override: Optional[float] = None
+    risk_pct_override: Optional[float] = None,
+    lot_size: int = LOT_SIZE
 ) -> Dict[str, Any]:
     """Translates 3-Tier spot setups into convex institutional Option Trade Ticket with Free Spread details."""
     if signal.signal_type == SignalType.WAIT or getattr(signal, "entry_price", 0.0) <= 0.0:
@@ -1426,7 +1427,7 @@ def generate_option_trade_ticket(
         risk_pct_to_use,
         entry_prem,
         sl_prem,
-        LOT_SIZE,
+        lot_size,
         current_drawdown_pct,
         current_intraday_pnl=current_intraday_pnl,
         peak_intraday_pnl=peak_intraday_pnl

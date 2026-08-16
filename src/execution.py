@@ -11,6 +11,8 @@ from typing import Dict, List, Any, Optional
 import time
 import numpy as np
 
+from src.config import LOT_SIZE
+
 class OrderState(Enum):
     PENDING = "PENDING"
     PASSIVE = "PASSIVE"             # State 1: Limit at Best Ask
@@ -110,7 +112,7 @@ class OrderManager:
 
 def slice_institutional_order(
     total_lots: int,
-    lot_size: int = 65,
+    lot_size: int = LOT_SIZE,   # was hardcoded 65 — never a Nifty lot size (that was FinNifty's)
     slice_count: int = 4,
     interval_seconds: int = 30,
     algo: str = "VWAP"
