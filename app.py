@@ -378,6 +378,7 @@ range_fc_res = compute_oi_based_range_forecast(oc_df, current_spot, pcr_analytic
 dir_flow_res = compute_short_term_directional_vector(
     spot=current_spot,
     df=df,
+    option_chain_df=oc_df,
     live_iv=iv_input,
     hfi_score=hfi_res.get("hfi_score", 0.0)
 )

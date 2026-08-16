@@ -22,12 +22,20 @@ def test_put_call_parity():
     
     call = black_scholes_greeks(spot, strike, t_days=t_days, r=r, sigma=sigma, is_call=True)
     t_years = t_days / 365.0
-    put_manual_sigma = black_scholes_greeks(spot, strike, t_days=t_days, r=r, sigma=sigma - 0.025, is_call=False)
-    
+    # Both legs must be priced off the SAME sigma at the same strike. This test used to
+    # pass `sigma - 0.025` to the put to pre-compensate for a PUT_SKEW_PREMIUM the pricer
+    # added back only to puts — i.e. the test encoded the parity bug as a workaround.
+    # Skew is now applied by moneyness (same for C and P at a strike), so parity holds
+    # directly and the tolerance can be tight.
+    put = black_scholes_greeks(spot, strike, t_days=t_days, r=r, sigma=sigma, is_call=False)
+
     c_price = call["price"]
-    p_price = put_manual_sigma["price"]
+    p_price = put["price"]
     theoretical_diff = spot - strike * math.exp(-r * t_years)
-    assert abs((c_price - p_price) - theoretical_diff) < 0.50
+    assert abs((c_price - p_price) - theoretical_diff) < 0.05
+    # Second-order greeks are type-independent under parity.
+    assert call["gamma"] == pytest.approx(put["gamma"], rel=1e-9)
+    assert call["vega"] == pytest.approx(put["vega"], rel=1e-9)
 
 def test_zero_dte_expiry_limits():
     """Verify stability under extreme 0DTE final minutes (T -> 0)."""
