@@ -48,6 +48,12 @@ def _st_secrets() -> dict:
         return {}
 
 
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
 def _load_config() -> dict:
     cfg = {}
     if os.path.exists(CONFIG_PATH):
@@ -58,12 +64,12 @@ def _load_config() -> dict:
             cfg = {}
     st_cfg = _st_secrets()
     resolved = {
-        "client_id": cfg.get("client_id") or st_cfg.get("client_id") or os.environ.get("FYERS_CLIENT_ID"),
-        "secret_key": cfg.get("secret_key") or st_cfg.get("secret_key") or os.environ.get("FYERS_SECRET_KEY"),
-        "redirect_uri": cfg.get("redirect_uri") or st_cfg.get("redirect_uri") or os.environ.get("FYERS_REDIRECT_URI"),
-        "pin": cfg.get("pin") or st_cfg.get("pin") or os.environ.get("FYERS_PIN"),
-        "fy_id": cfg.get("fy_id") or st_cfg.get("fy_id") or os.environ.get("FYERS_FY_ID"),
-        "totp_secret": cfg.get("totp_secret") or st_cfg.get("totp_secret") or os.environ.get("FYERS_TOTP_SECRET"),
+        "client_id": str(cfg.get("client_id") or st_cfg.get("client_id") or os.environ.get("FYERS_CLIENT_ID") or "").strip(),
+        "secret_key": str(cfg.get("secret_key") or st_cfg.get("secret_key") or os.environ.get("FYERS_SECRET_KEY") or "").strip(),
+        "redirect_uri": str(cfg.get("redirect_uri") or st_cfg.get("redirect_uri") or os.environ.get("FYERS_REDIRECT_URI") or "").strip(),
+        "pin": str(cfg.get("pin") or st_cfg.get("pin") or os.environ.get("FYERS_PIN") or "").strip(),
+        "fy_id": str(cfg.get("fy_id") or st_cfg.get("fy_id") or os.environ.get("FYERS_FY_ID") or "").strip(),
+        "totp_secret": str(cfg.get("totp_secret") or st_cfg.get("totp_secret") or os.environ.get("FYERS_TOTP_SECRET") or "").strip().replace(" ", ""),
     }
     missing = [k for k, v in resolved.items() if not v and k not in ("pin", "fy_id", "totp_secret")]
     if missing:
@@ -140,6 +146,7 @@ def login_with_auth_code(raw_code_or_url: str) -> dict:
             "appIdHash": _app_id_hash(cfg["client_id"], cfg["secret_key"]),
             "code": code,
         },
+        headers=DEFAULT_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -170,6 +177,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/send_login_otp",
         json={"fy_id": cfg["fy_id"], "app_id": "2"},
+        headers=DEFAULT_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -182,6 +190,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/verify_otp",
         json={"request_key": request_key, "otp": totp_code},
+        headers=DEFAULT_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -193,6 +202,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/verify_pin",
         json={"request_key": request_key, "identity_type": "pin", "identifier": cfg["pin"]},
+        headers=DEFAULT_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -216,7 +226,7 @@ def auto_login() -> dict:
             "response_type": "code",
             "create_cookie": True,
         },
-        headers={"Authorization": f"Bearer {session_token}"},
+        headers={"Authorization": f"Bearer {session_token}", **DEFAULT_HEADERS},
         timeout=10,
     )
     data = resp.json()

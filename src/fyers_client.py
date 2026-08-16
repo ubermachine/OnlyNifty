@@ -24,7 +24,10 @@ DATA_BASE = "https://api-t1.fyers.in/data"
 
 def _headers() -> Dict[str, str]:
     cfg = _load_config()
-    return {"Authorization": f"{cfg['client_id']}:{get_access_token()}"}
+    return {
+        "Authorization": f"{cfg['client_id']}:{get_access_token()}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
 
 
 def get_quote(symbol: str) -> Dict[str, Any]:
