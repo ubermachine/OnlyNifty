@@ -24,18 +24,28 @@ CONFIG_PATH = os.path.join(ROOT, ".secrets", "fyers_config.json")
 TOKEN_PATH = os.path.join(ROOT, ".cache", "fyers_tokens.json")
 
 
+def _st_secrets() -> dict:
+    """Streamlit Community Cloud delivers secrets via st.secrets, not env vars or files."""
+    try:
+        import streamlit as st
+        return dict(st.secrets.get("fyers", {}))
+    except Exception:
+        return {}
+
+
 def _load_config() -> dict:
     cfg = {}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
             cfg = json.load(f)
+    st_cfg = _st_secrets()
     resolved = {
-        "client_id": cfg.get("client_id") or os.environ.get("FYERS_CLIENT_ID"),
-        "secret_key": cfg.get("secret_key") or os.environ.get("FYERS_SECRET_KEY"),
-        "redirect_uri": cfg.get("redirect_uri") or os.environ.get("FYERS_REDIRECT_URI"),
-        "pin": cfg.get("pin") or os.environ.get("FYERS_PIN"),
-        "fy_id": cfg.get("fy_id") or os.environ.get("FYERS_FY_ID"),
-        "totp_secret": cfg.get("totp_secret") or os.environ.get("FYERS_TOTP_SECRET"),
+        "client_id": cfg.get("client_id") or st_cfg.get("client_id") or os.environ.get("FYERS_CLIENT_ID"),
+        "secret_key": cfg.get("secret_key") or st_cfg.get("secret_key") or os.environ.get("FYERS_SECRET_KEY"),
+        "redirect_uri": cfg.get("redirect_uri") or st_cfg.get("redirect_uri") or os.environ.get("FYERS_REDIRECT_URI"),
+        "pin": cfg.get("pin") or st_cfg.get("pin") or os.environ.get("FYERS_PIN"),
+        "fy_id": cfg.get("fy_id") or st_cfg.get("fy_id") or os.environ.get("FYERS_FY_ID"),
+        "totp_secret": cfg.get("totp_secret") or st_cfg.get("totp_secret") or os.environ.get("FYERS_TOTP_SECRET"),
     }
     missing = [k for k, v in resolved.items() if not v and k not in ("pin", "fy_id", "totp_secret")]
     if missing:
