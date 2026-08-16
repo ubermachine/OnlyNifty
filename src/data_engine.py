@@ -59,16 +59,30 @@ class DataEngine:
 
         return df
 
+    def fetch_fyers_nifty(self, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Fetches Nifty 50 OHLCV from Fyers (real volume, broker-grade feed)."""
+        from src import fyers_client
+        resolution = interval[:-1] if interval.endswith("m") else ("D" if interval in ("1d", "D") else interval)
+        days_back = int(period[:-1]) if period.endswith("d") else 5
+        range_to = datetime.now(IST).date()
+        range_from = range_to - timedelta(days=days_back)
+        df = fyers_client.get_history(
+            "NSE:NIFTY50-INDEX", resolution, range_from.isoformat(), range_to.isoformat()
+        )
+        if df.empty or len(df) < 10:
+            raise RuntimeError("Fyers history returned insufficient candles.")
+        return self.clean_ohlcv(df)
+
     def fetch_yfinance_nifty(
         self,
         interval: str = "5m",
         period: str = "5d",
         max_cache_age_seconds: int = 5
     ) -> pd.DataFrame:
-        """Fetches Nifty 50 (^NSEI) OHLCV from Yahoo Finance with TTL-aware caching."""
+        """Fetches Nifty 50 OHLCV, preferring Fyers (real volume/live feed) over Yahoo Finance."""
         cache_key = f"nifty_{interval}_{period}.parquet"
         cache_path = os.path.join(self.cache_dir, cache_key)
-        
+
         # 1. Check if fresh cache exists within TTL
         if self.use_cache and os.path.exists(cache_path):
             try:
@@ -77,6 +91,15 @@ class DataEngine:
                     return pd.read_parquet(cache_path)
             except Exception:
                 pass
+
+        # 1b. Prefer Fyers (real volume, no scrape-breakage risk) over Yahoo Finance
+        try:
+            cleaned = self.fetch_fyers_nifty(interval=interval, period=period)
+            if self.use_cache:
+                cleaned.to_parquet(cache_path)
+            return cleaned
+        except Exception:
+            pass
 
         # 2. Attempt live network fetch
         try:
@@ -138,7 +161,24 @@ class DataEngine:
         return self.generate_synthetic_nifty(bars=150, interval_mins=5 if interval == "5m" else 1)
 
     def fetch_jugaad_live_quote(self) -> Dict[str, Any]:
-        """Fetches live NSE quote for NIFTY 50 via jugaad-data if available."""
+        """Fetches live NIFTY 50 quote, preferring Fyers over jugaad-data."""
+        try:
+            from src import fyers_client
+            v = fyers_client.get_quote("NSE:NIFTY50-INDEX")
+            if v and v.get("lp"):
+                return {
+                    "symbol": "NIFTY 50",
+                    "last_price": float(v.get("lp", 0)),
+                    "change": float(v.get("ch", 0)),
+                    "pChange": float(v.get("chp", 0)),
+                    "open": float(v.get("open_price", 0)),
+                    "high": float(v.get("high_price", 0)),
+                    "low": float(v.get("low_price", 0)),
+                    "source": "Fyers (Live)"
+                }
+        except Exception:
+            pass
+
         try:
             from jugaad_data.nse import NSELive
             n = NSELive()
@@ -170,7 +210,20 @@ class DataEngine:
         }
 
     def fetch_live_nse_option_chain(self, symbol: str = "NIFTY") -> Dict[str, Any]:
-        """Fetches live official NSE Option Chain using jugaad-data with fallback."""
+        """Fetches live Option Chain, preferring Fyers over jugaad-data, with synthetic fallback."""
+        try:
+            from src import fyers_client
+            fy_symbol = "NSE:NIFTY50-INDEX" if symbol.upper() == "NIFTY" else f"NSE:{symbol.upper()}-INDEX"
+            multi = fyers_client.get_multi_expiry_chain(fy_symbol)
+            return {
+                "underlying_value": multi["underlying_value"],
+                "expiry_dates": multi["expiry_dates"],
+                "dataframe": multi["near_chain"],
+                "source": multi["source"]
+            }
+        except Exception:
+            pass
+
         try:
             from jugaad_data.nse import NSELive
             n = NSELive()
@@ -291,6 +344,13 @@ class DataEngine:
             - 'dataframe': pd.DataFrame (all expiries concatenated)
             - 'source': str
         """
+        try:
+            from src import fyers_client
+            fy_symbol = "NSE:NIFTY50-INDEX" if symbol.upper() == "NIFTY" else f"NSE:{symbol.upper()}-INDEX"
+            return fyers_client.get_multi_expiry_chain(fy_symbol)
+        except Exception:
+            pass
+
         try:
             from jugaad_data.nse import NSELive
             n = NSELive()
@@ -478,7 +538,15 @@ class DataEngine:
             return {"marketState": [{"market": "Capital Market", "marketStatus": "Closed"}]}
 
     def fetch_live_vix(self) -> float:
-        """Fetches real-time India VIX directly from NSE."""
+        """Fetches real-time India VIX, preferring Fyers over NSE."""
+        try:
+            from src import fyers_client
+            vix = fyers_client.get_vix()
+            if vix and vix > 0:
+                return vix
+        except Exception:
+            pass
+
         try:
             from jugaad_data.nse import NSELive
             n = NSELive()
