@@ -241,7 +241,9 @@ def get_signal_journal() -> LiveSignalJournal:
 def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
     engine = get_data_engine()
     try:
-        if mode_choice == "Live / Latest Market Feed (yfinance + NSE)":
+        if "Fyers" in mode_choice:
+            return engine.fetch_fyers_nifty(interval=tf, period="5d")
+        elif "yfinance" in mode_choice or "Public" in mode_choice:
             return engine.fetch_yfinance_nifty(interval=tf, period="5d", max_cache_age_seconds=5)
         return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
     except Exception:
@@ -292,7 +294,38 @@ is_0dte_mode = st.sidebar.checkbox("⚡ 0DTE Expiry Thursday Mode (Post-13:00 IS
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📡 Live Stream Engine")
-data_mode = st.sidebar.radio("Data Stream Source", ["Live / Latest Market Feed (yfinance + NSE)", "Synthetic Market Simulation"])
+
+# Detect Fyers configuration status
+is_fyers_configured = False
+try:
+    from src import fyers_auth
+    cfg = fyers_auth._load_config()
+    is_fyers_configured = bool(cfg.get("client_id") and cfg.get("secret_key"))
+except Exception:
+    is_fyers_configured = False
+
+data_stream_options = [
+    "🟢 Fyers Direct Broker Feed (Live / Real Volume)",
+    "🟡 Public Market Feed (yfinance + NSE Scraping)",
+    "⚪ Synthetic Market Simulation"
+] if is_fyers_configured else [
+    "🟡 Public Market Feed (yfinance + NSE Scraping)",
+    "🟢 Fyers Direct Broker Feed (Requires .secrets/fyers_config.json)",
+    "⚪ Synthetic Market Simulation"
+]
+
+data_mode = st.sidebar.radio("Data Stream Source", data_stream_options, index=0)
+
+if "Fyers" in data_mode:
+    if is_fyers_configured:
+        st.sidebar.success("⚡ **Fyers API v3: Connected**\n* Real-time tick quotes\n* Real traded candle volume\n* Broker multi-expiry chain")
+    else:
+        st.sidebar.warning("⚠️ `.secrets/fyers_config.json` not found. Please populate credentials to activate direct broker stream.")
+elif "Public" in data_mode or "yfinance" in data_mode:
+    st.sidebar.info("🌐 **Public Market Feed** (Yahoo Finance + NSE Website Scraper)")
+else:
+    st.sidebar.info("🎲 **Synthetic Math Simulator** (Black-Scholes & Geometric Brownian Motion)")
+
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
@@ -648,6 +681,9 @@ if signal.signal_type != SignalType.WAIT:
         opt_val = ticket.get("option_type") or ("CE" if "LONG" in signal.signal_type.value else "PE")
         st.toast(f"🎯 {signal.signal_type.value} @ ₹{current_spot:,.2f} | Strike: {strike_val} {opt_val}", icon="🚨")
 
+active_feed_label = "Fyers API v3 (Live Broker)" if "Fyers" in data_mode else ("Yahoo Finance + NSE Scraper" if ("Public" in data_mode or "yfinance" in data_mode) else "Synthetic Math Engine")
+active_feed_color = "#05df72" if "Fyers" in data_mode else ("#00d2ff" if ("Public" in data_mode or "yfinance" in data_mode) else "#fbb024")
+
 st.markdown(f"""
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
     <div style="display: flex; align-items: center; gap: 10px;">
@@ -655,6 +691,7 @@ st.markdown(f"""
         <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
     </div>
     <div style="display: flex; align-items: center; gap: 14px;">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">FEED: <strong style="color: {active_feed_color};">{active_feed_label}</strong></div>
         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">LATEST BAR: <strong style="color: #f1f5f9;">{last_bar_display}</strong></div>
         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">LATENCY: <strong style="color: #00d2ff;">{t_latency_ms:.1f}ms</strong></div>
         <div class="live-pulse">
@@ -709,9 +746,9 @@ else:
 No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 70.0%).
 </div>'''
 
+qual_clr = "#05df72" if desk_verdict.data_quality == "VERIFIED" else "#fbb024"
 trend_clr = '#05df72' if desk_verdict.trend_bias == 'BULLISH' else ('#ff3355' if desk_verdict.trend_bias == 'BEARISH' else '#fbb024')
 trend_arrow = '▲' if desk_verdict.trend_bias == 'BULLISH' else ('▼' if desk_verdict.trend_bias == 'BEARISH' else '◆')
-qual_clr = '#05df72' if desk_verdict.data_quality == 'VERIFIED' else '#fbb024'
 
 # Conviction strip: how hard to bet, and which evidence families actually agree.
 conv_clr = {
@@ -751,7 +788,7 @@ desk_verdict_html = f'''<div style="background: #080c14; border: 1px solid #1c27
 <span style="font-size: 11px; color: #94a3b8; font-weight: 600;">Authoritative Execution & Positioning Cockpit</span>
 </div>
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">
-QUALITY: <strong style="color: {qual_clr};">{desk_verdict.data_quality}</strong> • CONFLUENCE: <strong style="color: #00d2ff;">{desk_verdict.confluence_score:.1f}% ({desk_verdict.confluence_grade})</strong>
+FEED: <strong style="color: {active_feed_color};">{active_feed_label}</strong> • QUALITY: <strong style="color: {qual_clr};">{desk_verdict.data_quality}</strong> • CONFLUENCE: <strong style="color: #00d2ff;">{desk_verdict.confluence_score:.1f}% ({desk_verdict.confluence_grade})</strong>
 </div>
 </div>
 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #141d2f; padding-bottom: 10px; margin-bottom: 12px;">
