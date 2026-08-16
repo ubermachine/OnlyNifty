@@ -127,6 +127,15 @@ MAX_CONSECUTIVE_LOSSES_DAY: int = 2         # 2-strike daily circuit breaker
 DAILY_LOSS_LIMIT_PCT: float = 0.015         # 1.5% max daily account loss limit
 QUARANTINE_MIN_SAMPLES: int = 30            # Minimum sample size before setup can be TRUSTED
 
+# Walk-forward observations overlap: signals may fire on consecutive bars while each
+# outcome spans a 12-bar horizon, so trades are serially dependent. An iid bootstrap
+# understates the CI and lets a marginal setup earn a confident TRUSTED. This variance
+# inflation factor widens the interval. 2.0 is a conservative floor derived from the
+# observed firing rate; it is NOT fitted. Replace with a stationary block bootstrap
+# (mean block ~2x the outcome horizon) when the sample supports it.
+EDGE_OVERLAP_VIF: float = 2.0
+
+
 # ----------------- OPTIONS DESK & POSITIONING FUSION (v5.2) -----------------
 POSITIONING_VETO_STRENGTH: float = 0.5      # D-vector threshold opposing chart setup to trigger WAIT
 WALL_BUFFER_PTS: float = 25.0               # Buffer around Call/Put walls for range fade and pinning

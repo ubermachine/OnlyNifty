@@ -15,7 +15,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from src.config import QUARANTINE_MIN_SAMPLES
+from src.config import QUARANTINE_MIN_SAMPLES, EDGE_OVERLAP_VIF
 
 
 @dataclass
@@ -130,7 +130,15 @@ class WalkForwardRunner:
         # Expected value per trade
         ev = float(np.mean(arr))
 
-        # Bootstrap 95% Confidence Interval
+        # Bootstrap 95% Confidence Interval.
+        #
+        # OVERLAP CORRECTION: signals can fire on consecutive bars while each outcome
+        # spans a 12-bar horizon, so these observations are NOT independent. A plain iid
+        # bootstrap resamples them as if they were and produces an interval that is too
+        # narrow — which is how a marginal setup earns a confident "TRUSTED".
+        # Inflate the interval half-width by sqrt(VIF) about the mean. EDGE_OVERLAP_VIF
+        # is a conservative floor, not a fitted value; a proper stationary block bootstrap
+        # (mean block ~2x the outcome horizon) is the right long-term replacement.
         if n >= 10:
             bootstraps = []
             rng = np.random.RandomState(42)
@@ -144,11 +152,23 @@ class WalkForwardRunner:
             ci_low = ev - 1.96 * std_err
             ci_high = ev + 1.96 * std_err
 
-        # Quarantine Policy
+        inflation = float(np.sqrt(max(EDGE_OVERLAP_VIF, 1.0)))
+        ci_low = ev - (ev - ci_low) * inflation
+        ci_high = ev + (ci_high - ev) * inflation
+
+        # Quarantine Policy.
+        #
+        # QUARANTINED must mean "demonstrated loser", not merely "unproven". Collapsing
+        # `ci_low < 0` into QUARANTINE blocked setups whose EV is positive but whose
+        # interval simply still straddles zero — that is missing evidence, not evidence
+        # of harm, and the right response is to keep sampling at reduced size.
+        # The table is a kill-switch for losers, never a licence to size up.
         if n < QUARANTINE_MIN_SAMPLES:
             status = "PAPER"
-        elif ci_low < 0.0 or ev <= 0.0:
-            status = "QUARANTINED"
+        elif ev <= 0.0:
+            status = "QUARANTINED"      # negative expectancy on an adequate sample
+        elif ci_low < 0.0:
+            status = "PAPER"            # positive EV, not yet statistically established
         else:
             status = "TRUSTED"
 
