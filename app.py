@@ -318,7 +318,12 @@ data_mode = st.sidebar.radio("Data Stream Source", data_stream_options, index=0)
 
 if "Fyers" in data_mode:
     if is_fyers_configured:
-        st.sidebar.success("⚡ **Fyers API v3: Connected**\n* Real-time tick quotes\n* Real traded candle volume\n* Broker multi-expiry chain")
+        try:
+            from src import fyers_auth
+            tok = fyers_auth.get_access_token()
+            st.sidebar.success("⚡ **Fyers API v3: Connected**\n* Real-time tick quotes\n* Real traded candle volume\n* Broker multi-expiry chain")
+        except Exception as auth_err:
+            st.sidebar.error(f"⚠️ **Fyers Auth Error:** {auth_err}")
     else:
         st.sidebar.warning("⚠️ `.secrets/fyers_config.json` not found. Please populate credentials to activate direct broker stream.")
 elif "Public" in data_mode or "yfinance" in data_mode:

@@ -48,6 +48,13 @@ def _st_secrets() -> dict:
         return {}
 
 
+LOGIN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin": "https://myaccount.fyers.in",
+    "Referer": "https://myaccount.fyers.in/",
+    "Accept": "application/json, text/plain, */*",
+}
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
@@ -177,7 +184,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/send_login_otp",
         json={"fy_id": cfg["fy_id"], "app_id": "2"},
-        headers=DEFAULT_HEADERS,
+        headers=LOGIN_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -190,7 +197,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/verify_otp",
         json={"request_key": request_key, "otp": totp_code},
-        headers=DEFAULT_HEADERS,
+        headers=LOGIN_HEADERS,
         timeout=10,
     )
     data = resp.json()
@@ -202,7 +209,7 @@ def auto_login() -> dict:
     resp = requests.post(
         f"{LOGIN_API_BASE}/verify_pin",
         json={"request_key": request_key, "identity_type": "pin", "identifier": cfg["pin"]},
-        headers=DEFAULT_HEADERS,
+        headers=LOGIN_HEADERS,
         timeout=10,
     )
     data = resp.json()
