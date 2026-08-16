@@ -163,36 +163,39 @@ def compute_evidence_families(
         votes["flow"] = -1
     why["flow"] = " | ".join(flow_bits) if flow_bits else "no flow data"
 
-    # --- 3. POSITIONING: the four options pillars that were being discarded ---
+    # --- 3. POSITIONING: Orthogonalised into PC1 (Directional Flow) + Gamma Regime ---
+    # Collinearity fix (v5.3): d_vector, itm_otm_shift, writing_bias, and pcr_mom
+    # previously shared identical OI numerators (r=0.88-0.96) and were multi-counted.
+    # We collapse them into:
+    # 1. Primary Directional Flow (PC1) via D_intraday (or fallback to OI shift/writing if D=0)
+    # 2. Orthogonal Gamma Regime & Wall Boundary Convexity (Dealer Gamma pin vs breakout)
     pos_bits: List[str] = []
     pos_sum = 0.0
     if desk_state is not None:
-        pos_sum += float(desk_state.d_vector)
-        pos_bits.append(f"D {desk_state.d_vector:+.2f}")
+        # 1. Directional PC1 Flow
+        d_val = float(desk_state.d_vector)
+        if abs(d_val) > 0.05:
+            pos_sum += d_val
+            pos_bits.append(f"D {d_val:+.2f}")
+        else:
+            # Fallback if D-vector is unpopulated/neutral: use primary OI delta proxy
+            if desk_state.itm_otm_shift != 0.0:
+                pos_sum += float(desk_state.itm_otm_shift)
+                pos_bits.append(f"OI shift {desk_state.itm_otm_shift:+.2f}")
+            elif desk_state.writing_bias and desk_state.writing_bias != "BALANCED_RANGE":
+                wb = str(desk_state.writing_bias)
+                if "PUT_WRITING" in wb:
+                    pos_sum += 0.4
+                    pos_bits.append("put-writing support")
+                elif "CALL_WRITING" in wb:
+                    pos_sum -= 0.4
+                    pos_bits.append("call-writing resistance")
 
-        if desk_state.itm_otm_shift != 0.0:
-            pos_sum += 0.5 * float(desk_state.itm_otm_shift)
-            pos_bits.append(f"OI shift {desk_state.itm_otm_shift:+.2f}")
-
-        wb = str(desk_state.writing_bias or "")
-        if "PUT_WRITING" in wb:
-            pos_sum += 0.3
-            pos_bits.append("put-writing support")
-        elif "CALL_WRITING" in wb:
-            pos_sum -= 0.3
-            pos_bits.append("call-writing resistance")
-
-        if desk_state.pcr_momentum_score != 0.0:
-            pos_sum += 0.3 * float(desk_state.pcr_momentum_score)
-            pos_bits.append(f"PCR mom {desk_state.pcr_momentum_score:+.2f}")
-
-        # dealer_drift_score is NOT used for direction. It comes from
-        # compute_vanna_charm_drift_vector(spot, round(spot/50)*50), which measures as a
-        # deterministic (spot mod 50) sawtooth — identical at spot 20000 and 26000 — with
-        # a constant negative tilt and no OI weighting or dealer-inventory sign. Feeding
-        # it at 0.3 injected a permanent bearish bias and rendered it as live "Vanna/Charm"
-        # evidence. Real charm exposure needs sum_k charm_k * OI_k * dealer_sign; until
-        # that exists it stays diagnostic only.
+        # 2. Orthogonal Gamma Regime & Wall Convexity
+        if desk_state.is_positive_gamma:
+            pos_bits.append("Dealer +Γ (Mean Reversion / Pin)")
+        else:
+            pos_bits.append("Dealer -Γ (Breakout Expansion)")
 
     if pos_sum > 0.15:
         votes["positioning"] = 1

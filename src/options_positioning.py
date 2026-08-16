@@ -320,19 +320,23 @@ def compute_options_desk_state(
 
     gamma_flip_distance_pts = round(spot - zero_gex_strike, 1)
 
-    # 7. Multi-Pillar Agreement Count (0..4)
-    # Pillars: D-vector sign, PCR momentum, ITM/OTM shift, Writing bias
+    # 7. Orthogonal Multi-Pillar Agreement Count (0..4)
+    # The 4 independent options desk pillars:
+    # 1. Directional Flow (D-vector sign / PC1)
+    # 2. Distributional PCR (Session Z-Score vs 0.70 baseline or level)
+    # 3. Gamma Structure (Dealer Gamma & Wall Boundary Convexity)
+    # 4. Institutional Flow (Heavyweight Flow HFI or DWV momentum)
     votes = 0
     if trend_bias == "BULLISH":
         if d_vector > 0.1: votes += 1
-        if pcr_mom_score > 0.0: votes += 1
-        if itm_otm_shift > 0.0: votes += 1
-        if "PUT_WRITING" in writing_bias: votes += 1
+        if pcr_zscore > 0.3 or pcr_level >= 1.0 or itm_otm_shift > 0.1: votes += 1
+        if (spot >= zero_gex_strike) or (is_positive_gamma and spot <= put_wall + WALL_BUFFER_PTS) or (not is_positive_gamma and spot >= call_wall): votes += 1
+        if hfi_score > 0.05 or dwv_momentum_score > 0.1 or "PUT_WRITING" in str(writing_bias): votes += 1
     elif trend_bias == "BEARISH":
         if d_vector < -0.1: votes += 1
-        if pcr_mom_score < 0.0: votes += 1
-        if itm_otm_shift < 0.0: votes += 1
-        if "CALL_WRITING" in writing_bias: votes += 1
+        if pcr_zscore < -0.3 or pcr_level <= 0.8 or itm_otm_shift < -0.1: votes += 1
+        if (spot <= zero_gex_strike) or (is_positive_gamma and spot >= call_wall - WALL_BUFFER_PTS) or (not is_positive_gamma and spot <= put_wall): votes += 1
+        if hfi_score < -0.05 or dwv_momentum_score < -0.1 or "CALL_WRITING" in str(writing_bias): votes += 1
     else:
         votes = 2
 
