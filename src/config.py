@@ -118,6 +118,16 @@ SIGNAL_MIN_CONFLUENCE: float = 70.0         # Pre-decision score floor; below ->
 COOLDOWN_BARS: int = 12                     # 60 min of 5m bars between fresh entries
 MAX_OPEN_TRADES: int = 1                    # Single active position concurrency limit
 GATE_FAIL_TO_WAIT: bool = True              # Missing gate data -> safe WAIT, never trade
+# How many core gate inputs (25d skew, dealer walls, positioning flow) must be missing
+# before the desk stands aside entirely.
+#
+# All three derive from the option chain and therefore fail together: the real-world
+# condition this guards is "the chain is gone", which shows up as all three missing at
+# once. Partial degradation (e.g. walls unverified while skew is real) is handled by
+# POSITIONING_UNVERIFIED_SIZE_CAP reducing size rather than by blocking, so the desk
+# stays useful when data is merely thin and stands aside only when it is truly blind.
+GATE_MIN_MISSING_TO_BLOCK: int = 3
+
 LUNCH_LULL_SIZE_FACTOR: float = 0.5         # Halved sizing during 11:30-13:00 IST lunch lull
 STOP_MIN_ATR_FRACTION: float = 0.5          # SL >= 0.5 x ATR14
 STOP_MAX_POINTS: float = 60.0               # Absolute SL cap (index points)

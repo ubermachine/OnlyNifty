@@ -11,7 +11,7 @@ from src.config import (
     HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
     SKEW_ZSCORE_THRESHOLD, GEX_WALL_BUFFER_PTS, VCR_SQUEEZE_THRESHOLD,
     SIGNAL_MIN_CONFLUENCE, VPIN_TOXICITY_THRESHOLD, STOP_MIN_ATR_FRACTION,
-    STOP_MAX_POINTS, STOP_NOISE_BAND_MULT, GATE_FAIL_TO_WAIT
+    STOP_MAX_POINTS, STOP_NOISE_BAND_MULT, GATE_FAIL_TO_WAIT, GATE_MIN_MISSING_TO_BLOCK
 )
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
@@ -238,6 +238,35 @@ class StrategyEngine:
             "passed": True,
             "veto_gate": None
         }
+
+        # 0. DATA SUFFICIENCY (GATE_FAIL_TO_WAIT)
+        #
+        # Almost every gate below fails OPEN when its input is missing: a absent VPIN
+        # reads 0.0 and passes, an absent skew has is_crash_hedging=False and passes, an
+        # absent chain leaves walls unverified and the pin check is skipped. So the exact
+        # moment the desk is blindest — a data outage — is when the fewest vetoes can
+        # fire. GATE_FAIL_TO_WAIT existed in config and was imported here but never read.
+        #
+        # A single missing input degrades to reduced size (handled downstream by
+        # POSITIONING_UNVERIFIED_SIZE_CAP). Losing the option chain takes out skew, walls
+        # and positioning together — at that point this is no longer an options desk and
+        # it should stand aside rather than trade on what remains.
+        missing_inputs: List[str] = []
+        if str(skew_info.get("data_quality", "")).upper() == "SYNTHETIC":
+            missing_inputs.append("25d_skew")
+        if not gex_info.get("walls_verified", False):
+            missing_inputs.append("dealer_walls")
+        if not (options_context and options_context.get("dir_flow")):
+            missing_inputs.append("positioning_flow")
+        audit["missing_inputs"] = missing_inputs
+
+        if GATE_FAIL_TO_WAIT and len(missing_inputs) >= GATE_MIN_MISSING_TO_BLOCK:
+            audit["passed"] = False
+            audit["veto_gate"] = "INSUFFICIENT_GATE_DATA"
+            return False, (
+                f"Data Sufficiency Gate: {len(missing_inputs)} core inputs unavailable "
+                f"({', '.join(missing_inputs)}). Gates cannot be evaluated — standing aside."
+            ), audit
 
         # 1. VPIN Flow Toxicity Veto
         vpin_val = float(vpin_info.get("vpin", 0.0))
