@@ -138,6 +138,12 @@ class Signal:
     def target3(self, value: float):
         self.target_3_moonshot = float(value)
 
+# Vetoes that block EVERY candidate this bar rather than just the one being tested.
+# Everything else (direction-specific skew/HFI/HTF/wall vetoes, edge quarantine, the
+# confluence floor) rejects a single candidate and the ladder keeps looking.
+_ABSOLUTE_VETOES = {"VPIN_TOXICITY", "SESSION_RISK_LIMIT"}
+
+
 class StrategyEngine:
     """Vectorized and streaming bar-by-bar JustNifty v3.5 institutional strategy rules evaluator."""
     def __init__(self, edge_table: Optional[Any] = None):
@@ -641,6 +647,12 @@ class StrategyEngine:
         realized_vol = float(np.std(log_rets, ddof=1) * np.sqrt(252 * 75)) if len(log_rets) > 5 else live_iv
         vol_ratio = round(realized_vol / max(live_iv, 0.05), 2)
 
+        # Candidate rejections are collected so the ladder can keep evaluating instead of
+        # ending the bar on the first setup that fails. Only an ABSOLUTE veto (toxic
+        # flow, session lock) stops everything.
+        _rejections: List[str] = []
+        _absolute_veto: List[str] = []
+
         # Define internal candidate gate check and pre-decision finalizer
         def _check_and_return(direction: str, candidate_sig: Signal) -> Signal:
             gate_ok, gate_msg, audit = self._apply_universal_gates(
@@ -649,24 +661,31 @@ class StrategyEngine:
                 candidate_signal_type=candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
             )
             if not gate_ok:
-                return Signal(
-                    SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0,
-                    gate_msg, False, 0.0, audit
-                )
+                # Direction- and candidate-specific vetoes reject THIS candidate only;
+                # the ladder must keep looking. Absolute vetoes (toxic flow, session
+                # lock) genuinely block every trade this bar and stop it.
+                _rejections.append(gate_msg)
+                if audit.get("veto_gate") in _ABSOLUTE_VETOES:
+                    _absolute_veto.append(gate_msg)
+                return None
 
             setup_id = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
             active_regime = markov_info.get("active_regime", "UNKNOWN")
 
             # Walk-forward OOS edge gate: quarantined (measured negative-EV) setups
             # are blocked in the regimes where they lost money.
+            #
+            # This must NOT terminate the ladder. Returning WAIT here meant quarantining
+            # a loser converted it into a no-trade rather than into the next-best trade —
+            # so a QUARANTINED setup firing early still pre-empted a better one later in
+            # the ladder, forfeiting its edge instead of capturing it.
             if self.edge_table is not None and not self.edge_table.is_tradeable(setup_id, active_regime):
                 audit["passed"] = False
                 audit["veto_gate"] = "EDGE_TABLE_QUARANTINED"
-                return Signal(
-                    SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0,
-                    f"Edge Table Veto: '{setup_id}' is QUARANTINED in {active_regime} regime (measured negative out-of-sample EV).",
-                    False, 0.0, audit
+                _rejections.append(
+                    f"Edge Table Veto: '{setup_id}' is QUARANTINED in {active_regime} regime (measured negative out-of-sample EV)."
                 )
+                return None
 
             candidate_sig.htf_aligned = htf_aligned_long if direction == "LONG" else htf_aligned_short
 
@@ -689,15 +708,21 @@ class StrategyEngine:
                 candidate_sig.details["size_factor"] = min(candidate_sig.details.get("size_factor", 1.0), POSITIONING_UNVERIFIED_SIZE_CAP)
                 audit["data_quality"] = "POSITIONING_UNVERIFIED"
 
-            return self._finalize_candidate(
+            _final = self._finalize_candidate(
                 candidate_sig, sub_df, htf_regime, kalman_vel, kalman_z,
                 markov_info, ofi_info, gex_info, vp_info, atr_14, audit
             )
+            # A confluence-floor rejection is candidate-specific: try the next setup
+            # rather than ending the bar on the first weak one.
+            if _final.signal_type == SignalType.WAIT:
+                _rejections.append(_final.reason)
+                return None
+            return _final
 
         # 4.05 Passive Institutional Limit Absorption Trap Strategy (v5.2)
         if absorption_trap["is_absorption"]:
             if absorption_trap["type"] == "BULLISH_ABSORPTION" and (close > bar_open or ofi_info["buyer_defense"]):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
                     sl_price=absorption_trap["suggested_sl"],
@@ -710,8 +735,10 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"absorption": absorption_trap, "skew": skew_info, "vcr": vcr_info, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
             elif absorption_trap["type"] == "BEARISH_ABSORPTION" and (close < bar_open or ofi_info["seller_defense"]):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
                     sl_price=absorption_trap["suggested_sl"],
@@ -724,12 +751,14 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"absorption": absorption_trap, "skew": skew_info, "vcr": vcr_info, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
 
         # 4.1 Liquidity Sweep Trap Strategy (SSL / BSL Purges)
         if microstructure["liquidity_sweep_detected"] and microstructure["sweep_event"]:
             sw = microstructure["sweep_event"]
             if sw["side"] == "LONG" and (close > bar_open or close > prev_close_val or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
                     sl_price=sw["suggested_sl"],
@@ -742,8 +771,10 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
                 ))
+                if _c is not None:
+                    return _c
             elif sw["side"] == "SHORT" and (close < bar_open or close < prev_close_val or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
                     sl_price=sw["suggested_sl"],
@@ -756,12 +787,14 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"sweep": sw, "microstructure": microstructure, "order_flow": order_flow, "vol_ratio": vol_ratio}
                 ))
+                if _c is not None:
+                    return _c
 
         # 4.2 Mean-Reversion Strategy (Active in MEAN_REVERTING_CHOP regime)
         if markov_info['active_regime'] == 'MEAN_REVERTING_CHOP':
             # LONG: price at or near VAL with buyer defense confirmation
             if close <= vp_info.get('val', 0) + VAL_BUFFER_ATR_MULT * atr_14 and ofi_info['buyer_defense'] and (close > bar_open or close > lower_2sd):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=round(close - 0.8 * atr_14, 2),
@@ -771,9 +804,11 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_long,
                     details={}
                 ))
+                if _c is not None:
+                    return _c
             # SHORT: price at or near VAH with seller defense confirmation
             if close >= vp_info.get('vah', 99999) - VAL_BUFFER_ATR_MULT * atr_14 and ofi_info['seller_defense'] and (close < bar_open or close < upper_2sd):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=round(close + 0.8 * atr_14, 2),
@@ -783,6 +818,8 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_short,
                     details={}
                 ))
+                if _c is not None:
+                    return _c
 
         # 4.3 IB Breakout Strategy (Active in trending / high vol expansion regimes after 10:15 IST)
         if markov_info['active_regime'] in ['LOW_VOL_TRENDING', 'HIGH_VOL_EXPANSION'] and bar_time >= '10:15':
@@ -792,7 +829,7 @@ class StrategyEngine:
             
             # LONG
             if close > ib_state.get('ib_high', 99999) and htf_aligned_long and curr_vol > avg_vol:
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=ib_state.get('ib_low', close - atr_14),
@@ -804,9 +841,11 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_long,
                     details={'ib_state': ib_state}
                 ))
+                if _c is not None:
+                    return _c
             # SHORT
             if close < ib_state.get('ib_low', 0) and htf_aligned_short and curr_vol > avg_vol:
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=ib_state.get('ib_high', close + atr_14),
@@ -818,12 +857,14 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_short,
                     details={'ib_state': ib_state}
                 ))
+                if _c is not None:
+                    return _c
 
         # 5. Auction Market Theory (AMT) Value Area Trigger Check
         amt_trigger = detect_volume_profile_triggers(sub_df, vp_info, ofi_info, atr_14=atr_14)
         if amt_trigger["trigger"] in ["VAH_REJECTION", "VAL_REJECTION"] and amt_trigger["confidence"] >= 0.85:
             if amt_trigger["side"] == "LONG" and (close >= vp_info.get("val", 0.0) or close > ema55):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=amt_trigger["sl"],
@@ -836,8 +877,10 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
             elif amt_trigger["side"] == "SHORT" and (close <= vp_info.get("vah", 999999.0) or close < ema55):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=amt_trigger["sl"],
@@ -850,6 +893,8 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"amt": amt_trigger, "vp": vp_info, "hurst": hurst_info, "ofi": ofi_info, "htf_regime": htf_regime, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
 
         # 5.1 Institutional Support Reclaim & Mean-Reversion Spring (V-Reversal Setup)
         lowest_recent = float(sub_df["low"].tail(6).min())
@@ -858,7 +903,7 @@ class StrategyEngine:
            close > current_vwap and close > ema21 and ofi_info["buyer_defense"] and (close > bar_open or close > prev_close_val):
             sl_lvl = round(lowest_recent - 5.0, 2)
             if abs(close - sl_lvl) <= 45.0:
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=sl_lvl,
@@ -871,6 +916,8 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"spring_low": lowest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
 
         highest_recent = float(sub_df["high"].tail(6).max())
         vah_lvl = float(vp_info.get("vah", 999999.0))
@@ -878,7 +925,7 @@ class StrategyEngine:
            close < current_vwap and close < ema21 and ofi_info["seller_defense"] and (close < bar_open or close < prev_close_val):
             sl_lvl = round(highest_recent + 5.0, 2)
             if abs(sl_lvl - close) <= 45.0:
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=sl_lvl,
@@ -891,12 +938,14 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"thrust_high": highest_recent, "vwap": current_vwap, "ema21": ema21, "ofi": ofi_info, "order_flow": order_flow}
                 ))
+                if _c is not None:
+                    return _c
 
         # 6. Stacked Order Flow Absorption & Footprint Imbalance Setups
         if order_flow["absorption_event"] is not None:
             abs_event = order_flow["absorption_event"]
             if abs_event["type"] == "BUYER_ABSORPTION" and (close > bar_open or ofi_info["buyer_defense"] or order_flow["recent_delta"] >= 0):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG_ORDER_FLOW,
                     entry_price=close,
                     sl_price=abs_event["suggested_sl"],
@@ -909,8 +958,10 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
                 ))
+                if _c is not None:
+                    return _c
             elif abs_event["type"] == "SELLER_ABSORPTION" and (close < bar_open or ofi_info["seller_defense"] or order_flow["recent_delta"] <= 0):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT_ORDER_FLOW,
                     entry_price=close,
                     sl_price=abs_event["suggested_sl"],
@@ -923,10 +974,12 @@ class StrategyEngine:
                     fib_retracement=0.50,
                     details={"order_flow": order_flow, "htf_regime": htf_regime, "abs_event": abs_event}
                 ))
+                if _c is not None:
+                    return _c
 
         # 6.1 Stacked Aggressive Delta Imbalance (3+ Bars Cumulative Delta Momentum)
         if order_flow.get("has_stacked_buy") and (close > ema21 or ofi_info["buyer_defense"]):
-            return _check_and_return("LONG", Signal(
+            _c = _check_and_return("LONG", Signal(
                 signal_type=SignalType.LONG_ORDER_FLOW,
                 entry_price=close,
                 sl_price=round(order_flow["stacked_support_zone"][0] - 5.0, 2) if order_flow["stacked_support_zone"] else round(close - 1.0 * atr_14, 2),
@@ -939,8 +992,10 @@ class StrategyEngine:
                 fib_retracement=0.50,
                 details={"order_flow": order_flow, "htf_regime": htf_regime}
             ))
+            if _c is not None:
+                return _c
         elif order_flow.get("has_stacked_sell") and (close < ema21 or ofi_info["seller_defense"]):
-            return _check_and_return("SHORT", Signal(
+            _c = _check_and_return("SHORT", Signal(
                 signal_type=SignalType.SHORT_ORDER_FLOW,
                 entry_price=close,
                 sl_price=round(order_flow["stacked_resistance_zone"][1] + 5.0, 2) if order_flow["stacked_resistance_zone"] else round(close + 1.0 * atr_14, 2),
@@ -953,6 +1008,8 @@ class StrategyEngine:
                 fib_retracement=0.50,
                 details={"order_flow": order_flow, "htf_regime": htf_regime}
             ))
+            if _c is not None:
+                return _c
 
         # 7. Far-Away MA Crossover Filter (with Gap-Decay Tolerance)
         dist_to_ema21 = abs(close - ema21) / close
@@ -1002,7 +1059,7 @@ class StrategyEngine:
                 t3_moonshot = round(max(upper_vakc_val, upper_2sd, close + 3.8 * atr_14), 2)
                 pyramid_trigger_lvl = round(swing_high + 2.0, 2)
                 
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.LONG,
                     entry_price=close,
                     sl_price=fib["sl_level"],
@@ -1020,6 +1077,10 @@ class StrategyEngine:
                         "skew": skew_info, "vcr": vcr_info, "hfi_score": hfi_score
                     }
                 ))
+                
+                if _c is not None:
+                
+                    return _c
 
         # 10. SHORT Setup (3-Tier Asymmetric Target Calculation with HTF Gating)
         short_avwap_cond = close < (current_vwap + 0.35 * (current_vwap - lower_2sd) / 2.0)
@@ -1034,7 +1095,7 @@ class StrategyEngine:
                 t3_moonshot = round(min(lower_vakc_val, lower_2sd, close - 3.8 * atr_14), 2)
                 pyramid_trigger_lvl = round(swing_low - 2.0, 2)
                 
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.SHORT,
                     entry_price=close,
                     sl_price=fib["sl_level"],
@@ -1052,6 +1113,10 @@ class StrategyEngine:
                         "skew": skew_info, "vcr": vcr_info, "hfi_score": hfi_score
                     }
                 ))
+                
+                if _c is not None:
+                
+                    return _c
 
         # 11. Options Desk Range Fade Strategy (+Γ Wall Pinning / Mean-Reversion)
         if options_context and gex_info.get("is_positive_gamma", False):
@@ -1062,7 +1127,7 @@ class StrategyEngine:
             pcr_z = float(options_context.get("pcr_zscore", 0.0))
 
             if close <= put_w + WALL_BUFFER_PTS and (d_v >= 0.2 or pcr_z >= PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("buyer_defense")):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.RANGE_FADE_LONG,
                     entry_price=close,
                     sl_price=round(put_w - WALL_BUFFER_PTS, 2),
@@ -1073,8 +1138,10 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_long,
                     details={"put_wall": put_w, "call_wall": call_w, "max_pain": max_p, "gex": gex_info, "ofi": ofi_info}
                 ))
+                if _c is not None:
+                    return _c
             elif close >= call_w - WALL_BUFFER_PTS and (d_v <= -0.2 or pcr_z <= -PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("seller_defense")):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.RANGE_FADE_SHORT,
                     entry_price=close,
                     sl_price=round(call_w + WALL_BUFFER_PTS, 2),
@@ -1085,6 +1152,8 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_short,
                     details={"put_wall": put_w, "call_wall": call_w, "max_pain": max_p, "gex": gex_info, "ofi": ofi_info}
                 ))
+                if _c is not None:
+                    return _c
 
         # 12. Options Desk Gamma Breakout Strategy (-Γ Expansion / Wall Clearance)
         if options_context and not gex_info.get("is_positive_gamma", True):
@@ -1093,7 +1162,7 @@ class StrategyEngine:
             d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
 
             if d_v >= 0.5 and close >= call_w and ofi_info.get("buyer_defense"):
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.GAMMA_BREAKOUT_LONG,
                     entry_price=close,
                     sl_price=round(close - 1.0 * atr_14, 2),
@@ -1104,8 +1173,10 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_long,
                     details={"call_wall": call_w, "gex": gex_info, "d_vector": d_v}
                 ))
+                if _c is not None:
+                    return _c
             elif d_v <= -0.5 and close <= put_w and ofi_info.get("seller_defense"):
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.GAMMA_BREAKOUT_SHORT,
                     entry_price=close,
                     sl_price=round(close + 1.0 * atr_14, 2),
@@ -1116,6 +1187,8 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_short,
                     details={"put_wall": put_w, "gex": gex_info, "d_vector": d_v}
                 ))
+                if _c is not None:
+                    return _c
 
         # 13. Novel: Expiry Pin Trade (IMP-11) — 3-Vector Pin Trade
         if options_context:
@@ -1129,7 +1202,7 @@ class StrategyEngine:
                 if put_w < close < call_w and abs(mp_distance) > EXPIRY_PIN_MIN_DISTANCE_PTS:
                     pin_direction = "LONG" if mp_distance < 0 else "SHORT"
                     if pin_direction == "LONG":
-                        return _check_and_return("LONG", Signal(
+                        _c = _check_and_return("LONG", Signal(
                             signal_type=SignalType.EXPIRY_PIN_LONG,
                             entry_price=close,
                             sl_price=round(put_w - 15.0, 2),
@@ -1140,8 +1213,10 @@ class StrategyEngine:
                             htf_aligned=htf_aligned_long,
                             details={"max_pain": max_p, "mp_distance": mp_distance, "gamma_regime": "POSITIVE"}
                         ))
+                        if _c is not None:
+                            return _c
                     else:
-                        return _check_and_return("SHORT", Signal(
+                        _c = _check_and_return("SHORT", Signal(
                             signal_type=SignalType.EXPIRY_PIN_SHORT,
                             entry_price=close,
                             sl_price=round(call_w + 15.0, 2),
@@ -1152,6 +1227,8 @@ class StrategyEngine:
                             htf_aligned=htf_aligned_short,
                             details={"max_pain": max_p, "mp_distance": mp_distance, "gamma_regime": "POSITIVE"}
                         ))
+                        if _c is not None:
+                            return _c
 
         # 14. Novel: Gamma Squeeze Breakout (IMP-12) — Dealer hedging cascade
         if options_context and not gex_info.get("is_positive_gamma", True):
@@ -1165,7 +1242,7 @@ class StrategyEngine:
             
             # Bullish Gamma Squeeze: spot crossed above zero-GEX in -Gamma with volume
             if d_v >= 0.3 and close > zero_gex and volume_surge and close > ema21:
-                return _check_and_return("LONG", Signal(
+                _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.GAMMA_SQUEEZE_LONG,
                     entry_price=close,
                     sl_price=round(zero_gex - 0.5 * atr_14, 2),
@@ -1176,9 +1253,11 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_long,
                     details={"zero_gex": zero_gex, "d_vector": d_v, "volume_surge": volume_surge, "gamma_regime": "NEGATIVE"}
                 ))
+                if _c is not None:
+                    return _c
             # Bearish Gamma Squeeze: spot crossed below zero-GEX in -Gamma with volume
             elif d_v <= -0.3 and close < zero_gex and volume_surge and close < ema21:
-                return _check_and_return("SHORT", Signal(
+                _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.GAMMA_SQUEEZE_SHORT,
                     entry_price=close,
                     sl_price=round(zero_gex + 0.5 * atr_14, 2),
@@ -1189,6 +1268,19 @@ class StrategyEngine:
                     htf_aligned=htf_aligned_short,
                     details={"zero_gex": zero_gex, "d_vector": d_v, "volume_surge": volume_surge, "gamma_regime": "NEGATIVE"}
                 ))
+                if _c is not None:
+                    return _c
+
+        # Report WHY nothing fired. Previously the first rejected candidate ended the bar
+        # and its message became the verdict; now every candidate is evaluated, so the
+        # fall-through names the actual blocking reasons instead of a generic
+        # "no confluence" when setups were in fact tested and rejected.
+        if _absolute_veto:
+            _wait_reason = _absolute_veto[0]
+        elif _rejections:
+            _wait_reason = f"{len(_rejections)} setup(s) evaluated and rejected: " + " | ".join(_rejections[:2])
+        else:
+            _wait_reason = "Market in consolidation / No confluence across core indicators."
 
         return Signal(
             signal_type=SignalType.WAIT,
@@ -1198,7 +1290,7 @@ class StrategyEngine:
             target_2=0.0,
             target_3_moonshot=0.0,
             pyramid_trigger=0.0,
-            reason="Market in consolidation / No confluence across core indicators.",
+            reason=_wait_reason,
             htf_aligned=True,
             fib_retracement=0.0,
             details={
