@@ -510,31 +510,58 @@ def run_pillar_5():
     print(f"[PASS] Freak Candle Suppression (09:20 AM): Signal='{sig_freak.signal_type.value}', Reason='{sig_freak.reason}'")
     
     # 2. Test 3PM Breakout Strategy (15:05 breakout above 15:00 candle)
-    df_3pm = df_synth.copy()
-    idx_3pm = pd.date_range("2026-08-14 14:00", periods=len(df_synth), freq="5min", tz=IST)
-    df_3pm.index = idx_3pm
-    # Locate 15:00 and 15:05 bars
+    n_3pm = 25
+    idx_3pm = pd.date_range("2026-08-14 13:05", periods=n_3pm, freq="5min", tz=IST)
+    opens_3pm = [24470.0 + i * 2.0 for i in range(n_3pm)]
+    closes_3pm = [24471.0 + i * 2.0 + (1.0 if i % 2 == 0 else -0.5) for i in range(n_3pm)]
+    highs_3pm = [max(o, c) + 3.0 for o, c in zip(opens_3pm, closes_3pm)]
+    lows_3pm = [min(o, c) - 3.0 for o, c in zip(opens_3pm, closes_3pm)]
+    volumes_3pm = [10000] * (n_3pm - 2) + [20000, 50000]
+
     idx_1500 = [i for i, t in enumerate(idx_3pm) if t.strftime("%H:%M") == "15:00"][0]
     idx_1505 = [i for i, t in enumerate(idx_3pm) if t.strftime("%H:%M") == "15:05"][0]
-    
-    # Force high at 15:00 = 24500, close at 15:05 = 24520 (Bullish Breakout)
-    df_3pm.iloc[idx_1500, df_3pm.columns.get_loc("high")] = 24500.0
-    df_3pm.iloc[idx_1500, df_3pm.columns.get_loc("low")] = 24470.0
-    df_3pm.iloc[idx_1505, df_3pm.columns.get_loc("close")] = 24520.0
-    # v5.3 IMP-7: Hardened 3PM requires volume surge (>1.5x avg). Inject high volume.
-    if "volume" in df_3pm.columns:
-        df_3pm["volume"] = df_3pm["volume"].astype(np.int64)
-        avg_vol_test = float(df_3pm["volume"].mean())
-        df_3pm.iloc[idx_1505, df_3pm.columns.get_loc("volume")] = int(avg_vol_test * 2.5)
-    
-    sig_3pm_long = strat.evaluate_bar(df_3pm, current_idx=idx_1505)
+    lows_3pm[idx_1500] = 24470.0
+    highs_3pm[idx_1500] = 24500.0
+    closes_3pm[idx_1500] = 24495.0
+
+    opens_3pm[idx_1505] = 24495.0
+    closes_3pm[idx_1505] = 24520.0
+    highs_3pm[idx_1505] = 24525.0
+    lows_3pm[idx_1505] = 24490.0
+
+    df_3pm = pd.DataFrame({
+        "open": opens_3pm, "high": highs_3pm, "low": lows_3pm, "close": closes_3pm, "volume": volumes_3pm
+    }, index=idx_3pm)
+
+    opt_ctx_3pm = {
+        "chain_df": pd.DataFrame({"strike": [24500, 24500], "type": ["CE", "PE"], "iv": [0.13, 0.13]}),
+        "gex_chart": {"call_wall_strike": 25000.0, "put_wall_strike": 24000.0, "net_dealer_regime": "DEALER_LONG_GAMMA"},
+        "dir_flow": {"directional_vector": 0.25}
+    }
+    sig_3pm_long = strat.evaluate_bar(df_3pm, current_idx=idx_1505, options_context=opt_ctx_3pm)
     assert sig_3pm_long.signal_type == SignalType.LONG_3PM, f"3PM Long failed, got {sig_3pm_long.signal_type}"
     assert sig_3pm_long.entry_price == 24520.0 and sig_3pm_long.sl_price == 24470.0, "3PM Long prices mismatch"
     print(f"[PASS] 3 PM Breakout Strategy (Long): Signal='{sig_3pm_long.signal_type.value}', Entry={sig_3pm_long.entry_price}, SL={sig_3pm_long.sl_price}, T1={sig_3pm_long.target_1}, T2={sig_3pm_long.target_2}")
     
-    # Force low at 15:00 = 24470, close at 15:05 = 24450 (Bearish Breakdown)
-    df_3pm.iloc[idx_1505, df_3pm.columns.get_loc("close")] = 24450.0
-    sig_3pm_short = strat.evaluate_bar(df_3pm, current_idx=idx_1505)
+    # Bearish 3PM Breakdown
+    opens_3pm_bear = [24550.0 - i * 2.0 for i in range(n_3pm)]
+    closes_3pm_bear = [24549.0 - i * 2.0 - (1.0 if i % 2 == 0 else -0.5) for i in range(n_3pm)]
+    highs_3pm_bear = [max(o, c) + 3.0 for o, c in zip(opens_3pm_bear, closes_3pm_bear)]
+    lows_3pm_bear = [min(o, c) - 3.0 for o, c in zip(opens_3pm_bear, closes_3pm_bear)]
+    lows_3pm_bear[idx_1500] = 24470.0
+    highs_3pm_bear[idx_1500] = 24500.0
+    closes_3pm_bear[idx_1500] = 24475.0
+    opens_3pm_bear[idx_1505] = 24475.0
+    closes_3pm_bear[idx_1505] = 24450.0
+    highs_3pm_bear[idx_1505] = 24480.0
+    lows_3pm_bear[idx_1505] = 24445.0
+    df_3pm_bear = pd.DataFrame({
+        "open": opens_3pm_bear, "high": highs_3pm_bear, "low": lows_3pm_bear, "close": closes_3pm_bear, "volume": volumes_3pm
+    }, index=idx_3pm)
+
+    opt_ctx_3pm_bear = dict(opt_ctx_3pm)
+    opt_ctx_3pm_bear["dir_flow"] = {"directional_vector": -0.25}
+    sig_3pm_short = strat.evaluate_bar(df_3pm_bear, current_idx=idx_1505, options_context=opt_ctx_3pm_bear)
     assert sig_3pm_short.signal_type == SignalType.SHORT_3PM, f"3PM Short failed, got {sig_3pm_short.signal_type}"
     print(f"[PASS] 3 PM Breakout Strategy (Short): Signal='{sig_3pm_short.signal_type.value}', Entry={sig_3pm_short.entry_price}, SL={sig_3pm_short.sl_price}, T1={sig_3pm_short.target_1}, T2={sig_3pm_short.target_2}")
     

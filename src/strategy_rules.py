@@ -404,7 +404,8 @@ class StrategyEngine:
         gex_info: Dict[str, Any],
         vp_info: Dict[str, Any],
         atr_14: float,
-        gate_audit: Dict[str, Any]
+        gate_audit: Dict[str, Any],
+        options_context: Optional[Dict[str, Any]] = None
     ) -> Signal:
         sig_str = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
         is_long = "LONG" in sig_str
@@ -448,7 +449,8 @@ class StrategyEngine:
             regime_state=markov_info,
             ofi_data=ofi_info,
             gex_data=gex_info,
-            vol_profile=vp_info
+            vol_profile=vp_info,
+            options_context=options_context
         )
 
         if candidate_sig.details is None:
@@ -528,51 +530,6 @@ class StrategyEngine:
                 details={"bar_time": bar_time}
             )
 
-        # 2. 3:00 PM (15:00) Hardened Breakout Strategy (v5.3: Volume + GEX + Auto-Squareoff protection)
-        if bar_time in ["15:05", "15:10"]:
-            # IMP-7: Skip 3PM strategy on expiry days (gamma explosion risk)
-            is_expiry_day = options_context.get("is_expiry_day", False) if options_context else False
-            if not is_expiry_day:
-                three_pm_indices = [
-                    i for i, idx in enumerate(df_5m.index[:current_idx + 1])
-                    if hasattr(idx, "strftime") and idx.strftime("%H:%M") == "15:00"
-                ]
-                if three_pm_indices:
-                    candle_3pm = df_5m.iloc[three_pm_indices[-1]]
-                    # Volume confirmation: require > 1.5x session average
-                    avg_vol_3pm = float(sub_df['volume'].mean()) if 'volume' in sub_df.columns else 0.0
-                    curr_vol_3pm = float(bar.get('volume', 0))
-                    volume_confirmed = curr_vol_3pm > 1.5 * avg_vol_3pm if avg_vol_3pm > 0 else True
-                    
-                    if volume_confirmed and close > float(candle_3pm["high"]):
-                        return Signal(
-                            signal_type=SignalType.LONG_3PM,
-                            entry_price=close,
-                            sl_price=float(candle_3pm["low"]),
-                            target_1=round(close + 40.0, 2),
-                            target_2=round(close + 75.0, 2),
-                            target_3_moonshot=round(close + 120.0, 2),
-                            pyramid_trigger=round(float(candle_3pm["high"]) + 10.0, 2),
-                            reason="3 PM Strategy (Hardened): Bullish breakout above 15:00 candle High. Volume confirmed. Exit before 15:15.",
-                            htf_aligned=True,
-                            fib_retracement=0.0,
-                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
-                        )
-                    elif volume_confirmed and close < float(candle_3pm["low"]):
-                        return Signal(
-                            signal_type=SignalType.SHORT_3PM,
-                            entry_price=close,
-                            sl_price=float(candle_3pm["high"]),
-                            target_1=round(close - 40.0, 2),
-                            target_2=round(close - 75.0, 2),
-                            target_3_moonshot=round(close - 120.0, 2),
-                            pyramid_trigger=round(float(candle_3pm["low"]) - 10.0, 2),
-                            reason="3 PM Strategy (Hardened): Bearish breakdown below 15:00 candle Low. Volume confirmed. Exit before 15:15.",
-                            htf_aligned=True,
-                            fib_retracement=0.0,
-                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
-                        )
-
         if len(sub_df) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
 
@@ -589,6 +546,12 @@ class StrategyEngine:
         ema21_series = compute_ema(sub_df["close"], EMA_FAST)
         vakc_upper, vakc_lower = compute_vakc_envelopes(sub_df, iv=live_iv)
         vwap_series, vwap_up_2sd, vwap_low_2sd = compute_vwap(sub_df)
+
+        sub_df = sub_df.copy()
+        sub_df["ema200"] = ema200_series
+        sub_df["ema55"] = ema55_series
+        sub_df["ema21"] = ema21_series
+        sub_df["vwap"] = vwap_series
         
         hurst_info = compute_hurst_exponent(sub_df["close"])
         ofi_info = compute_order_flow_imbalance(sub_df)
@@ -739,7 +702,8 @@ class StrategyEngine:
 
             _final = self._finalize_candidate(
                 candidate_sig, sub_df, htf_regime, kalman_vel, kalman_z,
-                markov_info, ofi_info, gex_info, vp_info, atr_14, audit
+                markov_info, ofi_info, gex_info, vp_info, atr_14, audit,
+                options_context=options_context
             )
             # A confluence-floor rejection is candidate-specific: try the next setup
             # rather than ending the bar on the first weak one.
@@ -849,6 +813,53 @@ class StrategyEngine:
                 ))
                 if _c is not None:
                     return _c
+
+        # 4.25 3:00 PM (15:00) Hardened Breakout Strategy (v5.3: Volume + GEX + Auto-Squareoff protection)
+        if bar_time in ["15:05", "15:10"]:
+            is_expiry_day = options_context.get("is_expiry_day", False) if options_context else False
+            if not is_expiry_day:
+                three_pm_indices = [
+                    i for i, idx in enumerate(df_5m.index[:current_idx + 1])
+                    if hasattr(idx, "strftime") and idx.strftime("%H:%M") == "15:00"
+                ]
+                if three_pm_indices:
+                    candle_3pm = df_5m.iloc[three_pm_indices[-1]]
+                    avg_vol_3pm = float(sub_df['volume'].mean()) if 'volume' in sub_df.columns else 0.0
+                    curr_vol_3pm = float(bar.get('volume', 0))
+                    volume_confirmed = curr_vol_3pm > 1.5 * avg_vol_3pm if avg_vol_3pm > 0 else True
+                    
+                    if volume_confirmed and close > float(candle_3pm["high"]):
+                        _c = _check_and_return("LONG", Signal(
+                            signal_type=SignalType.LONG_3PM,
+                            entry_price=close,
+                            sl_price=float(candle_3pm["low"]),
+                            target_1=round(close + 1.2 * atr_14, 2),
+                            target_2=round(close + 2.5 * atr_14, 2),
+                            target_3_moonshot=round(close + 4.0 * atr_14, 2),
+                            pyramid_trigger=round(float(candle_3pm["high"]) + 10.0, 2),
+                            reason="3 PM Strategy (Hardened): Bullish breakout above 15:00 candle High. Volume confirmed. Exit before 15:15.",
+                            htf_aligned=htf_aligned_long,
+                            fib_retracement=0.0,
+                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
+                        ))
+                        if _c is not None:
+                            return _c
+                    elif volume_confirmed and close < float(candle_3pm["low"]):
+                        _c = _check_and_return("SHORT", Signal(
+                            signal_type=SignalType.SHORT_3PM,
+                            entry_price=close,
+                            sl_price=float(candle_3pm["high"]),
+                            target_1=round(close - 1.2 * atr_14, 2),
+                            target_2=round(close - 2.5 * atr_14, 2),
+                            target_3_moonshot=round(close - 4.0 * atr_14, 2),
+                            pyramid_trigger=round(float(candle_3pm["low"]) - 10.0, 2),
+                            reason="3 PM Strategy (Hardened): Bearish breakdown below 15:00 candle Low. Volume confirmed. Exit before 15:15.",
+                            htf_aligned=htf_aligned_short,
+                            fib_retracement=0.0,
+                            details={"3pm_high": float(candle_3pm["high"]), "3pm_low": float(candle_3pm["low"]), "volume_ratio": round(curr_vol_3pm / max(avg_vol_3pm, 1), 2)}
+                        ))
+                        if _c is not None:
+                            return _c
 
         # 4.3 IB Breakout Strategy (Active in trending / high vol expansion regimes after 10:15 IST)
         if markov_info['active_regime'] in ['LOW_VOL_TRENDING', 'HIGH_VOL_EXPANSION'] and bar_time >= '10:15':
