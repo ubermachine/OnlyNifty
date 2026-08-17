@@ -1383,11 +1383,18 @@ with tab_journal:
         )
 
     # Deep Signal Audit Inspector
-    if journal_engine.entries:
+    def _get_entry_date(e):
+        ts = str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))
+        return ts[:10] if len(ts) >= 10 else ""
+
+    scoped_entries = [e for e in journal_engine.entries if (not target_date_val or _get_entry_date(e) == target_date_val)]
+    display_entries = scoped_entries if scoped_entries else journal_engine.entries
+
+    if display_entries:
         st.markdown("#### 🔍 Deep Signal Audit & Microstructure Inspector")
-        sig_ids = [e.signal_id for e in journal_engine.entries]
+        sig_ids = [e.signal_id for e in display_entries]
         selected_sig_id = st.selectbox("Select Signal for Full Audit Breakdown", sig_ids, index=len(sig_ids)-1)
-        selected_entry = next((e for e in journal_engine.entries if e.signal_id == selected_sig_id), journal_engine.entries[-1])
+        selected_entry = next((e for e in display_entries if e.signal_id == selected_sig_id), display_entries[-1])
 
         with st.expander(f"📋 Full Institutional Audit Sheet: {selected_entry.signal_id}", expanded=True):
             insp_c1, insp_c2, insp_c3 = st.columns(3)
@@ -1425,7 +1432,7 @@ with tab_journal:
 
     # Institutional Signal Performance & Execution Analytics Suite (v5.1)
     with st.expander("📊 Institutional Signal Performance & Execution Analytics (Historical & Real-Time)", expanded=False):
-        perf_analyzer = SignalPerformanceAnalyzer(journal_engine.entries)
+        perf_analyzer = SignalPerformanceAnalyzer(display_entries)
         perf_rep = perf_analyzer.generate_performance_report()
         perf_summary = perf_rep["summary"]
         

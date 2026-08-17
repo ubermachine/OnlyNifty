@@ -437,7 +437,14 @@ class LiveSignalJournal:
         risk_rupees = float(ticket.get("actual_risk_rupees", ticket.get("max_risk_rupees", 5000.0 if is_actionable else 0.0)))
         tca_friction = float(ticket.get("tca_friction", {}).get("total_friction", 180.0) if isinstance(ticket.get("tca_friction"), dict) else (180.0 if is_actionable else 0.0))
 
-        sig_id = f"SIG-{datetime.now(IST).strftime('%Y%m%d')}-{datetime.now(IST).strftime('%H%M%S')}-{strike}{opt_type}"
+        if is_seed and bar_timestamp:
+            clean_ts = bar_timestamp.replace("-", "").replace(" ", "").replace(":", "")
+            sig_date = clean_ts[:8] if len(clean_ts) >= 8 else datetime.now(IST).strftime("%Y%m%d")
+            sig_time = (clean_ts[8:12] + "00") if len(clean_ts) >= 12 else datetime.now(IST).strftime("%H%M%S")
+            sig_id = f"SIG-{sig_date}-{sig_time}-{strike}{opt_type}"
+            now_ist = f"{bar_timestamp}:00 IST" if len(bar_timestamp) == 16 else (f"{bar_timestamp} IST" if "IST" not in bar_timestamp else bar_timestamp)
+        else:
+            sig_id = f"SIG-{datetime.now(IST).strftime('%Y%m%d')}-{datetime.now(IST).strftime('%H%M%S')}-{strike}{opt_type}"
 
         # SHA-256 Chaining
         rec_payload = f"{sig_id}_{now_ist}_{strike}_{entry_prem}_{self._last_hash}"
@@ -837,9 +844,17 @@ class LiveSignalJournal:
 
         rows = []
         for e in entries:
+            bar_t = str(getattr(e, "bar_timestamp", "") or "")
+            if " " in bar_t:
+                bar_display_time = bar_t.split(" ")[1]
+            elif ":" in bar_t:
+                bar_display_time = bar_t
+            else:
+                bar_display_time = e.timestamp_ist.split(" ")[1] if " " in e.timestamp_ist else e.timestamp_ist
+
             rows.append({
                 "Signal ID": e.signal_id,
-                "Time (IST)": e.timestamp_ist.split(" ")[1] if " " in e.timestamp_ist else e.timestamp_ist,
+                "Time (IST)": bar_display_time,
                 "Direction": e.direction,
                 "Signal Type": e.signal_type,
                 "Symbol": e.symbol,
