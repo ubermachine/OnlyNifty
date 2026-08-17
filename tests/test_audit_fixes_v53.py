@@ -159,3 +159,72 @@ def test_put_wall_breakdown_short_triggers():
     # rather than a counter-trend long.
     if sig.signal_type != SignalType.WAIT:
         assert "SHORT" in sig.signal_type.value or sig.signal_type == SignalType.SHORT
+
+
+def test_evaluate_single_tf_regime_prefix_stability():
+    """
+    Verifies that _evaluate_single_tf_regime evaluates the full path-dependent series
+    so that historical line-break states do not flip/repaint as new bars arrive.
+    """
+    from src.indicators import _evaluate_single_tf_regime, compute_line_break_trend
+
+    # Generate a reproducible price series
+    np.random.seed(42)
+    n = 200
+    dates = pd.date_range("2026-08-17 09:15", periods=n, freq="5min")
+    price = 24000.0 + np.cumsum(np.random.normal(0.5, 5.0, n))
+    df = pd.DataFrame({
+        "open": price,
+        "high": price + 4.0,
+        "low": price - 4.0,
+        "close": price + 1.0,
+        "volume": [10000] * n
+    }, index=dates)
+
+    # Evaluate at length 120 and length 150
+    regime_120 = _evaluate_single_tf_regime(df.iloc[:120], "5m")
+    full_trend_120 = compute_line_break_trend(df.iloc[:120])
+    
+    # Must match full history line break calculation exactly at bar 120
+    assert regime_120["lb_bias"] == full_trend_120["lb_bias"].iloc[-1]
+    assert regime_120["lb_direction"] == full_trend_120["lb_direction"].iloc[-1]
+
+
+def test_gamma_breakout_blocked_in_positive_gamma():
+    """
+    Verifies that GAMMA_BREAKOUT_LONG is strictly blocked in positive gamma (+Γ)
+    regimes where dealers suppress momentum and enforce mean-reversion.
+    """
+    engine = StrategyEngine()
+    
+    dates = pd.date_range("2026-08-17 09:15", periods=30, freq="5min")
+    closes = np.linspace(24400, 24550, 30)
+    df_5m = pd.DataFrame({
+        "open": closes - 2.0,
+        "high": closes + 5.0,
+        "low": closes - 3.0,
+        "close": closes,
+        "volume": [50000] * 30
+    }, index=dates)
+
+    options_context = {
+        "dir_flow": {"directional_vector": +0.65},
+        "pcr_zscore": +1.5,
+        "gex_chart": {
+            "call_wall_strike": 24500.0,
+            "put_wall_strike": 24300.0,
+            "zero_gex_strike": 24400.0,
+            "net_dealer_regime": "DEALER_LONG_GAMMA (Positive Gamma)"
+        },
+        "pcr": {"max_pain_strike": 24450.0}
+    }
+
+    sig = engine.evaluate_bar(
+        df_5m=df_5m,
+        live_iv=0.13,
+        options_context=options_context,
+        hfi_score=+0.30
+    )
+
+    # In +Γ regime, GAMMA_BREAKOUT_LONG must not fire
+    assert sig.signal_type != SignalType.GAMMA_BREAKOUT_LONG

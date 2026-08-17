@@ -971,8 +971,7 @@ def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, A
     else:
         bias = "NEUTRAL"
 
-    df_lb = df_tf.iloc[-80:] if len(df_tf) > 80 else df_tf
-    lb_trend_df = compute_line_break_trend(df_lb)
+    lb_trend_df = compute_line_break_trend(df_tf)
     lb_bias = "NEUTRAL"
     lb_direction = 0
     if not lb_trend_df.empty:
