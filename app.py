@@ -269,6 +269,11 @@ def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
 def load_live_option_chain_data(mode_key: str = "Live", spot_price: float = 24500.0) -> dict:
     engine = get_data_engine()
+    if "Synthetic" in str(mode_key) or "Math" in str(mode_key):
+        syn = engine.generate_synthetic_option_chain(spot=spot_price)
+        syn["data_quality"] = "POSITIONING_UNVERIFIED"
+        syn["source"] = "Synthetic Math Simulator"
+        return syn
     try:
         res = engine.fetch_live_nse_option_chain(symbol="NIFTY", spot=spot_price)
         if isinstance(res, dict) and isinstance(res.get("dataframe"), pd.DataFrame) and not res["dataframe"].empty:
@@ -321,15 +326,19 @@ def load_multi_expiry_chain() -> dict:
         return {}
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
-def load_heavyweight_flow_index() -> dict:
+def load_heavyweight_flow_index(mode_choice: str = "Live") -> dict:
+    if "Synthetic" in str(mode_choice) or "Math" in str(mode_choice):
+        return {"hfi_score": 0.0, "advances": 2, "declines": 3, "data_quality": "SYNTHETIC", "details": []}
     engine = get_data_engine()
     try:
         return engine.fetch_heavyweight_flow_index()
     except Exception:
-        return {"hfi_score": 0.0, "data_quality": "UNAVAILABLE"}
+        return {"hfi_score": 0.0, "advances": 2, "declines": 3, "data_quality": "UNAVAILABLE", "details": []}
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
-def load_sectoral_pulse() -> dict:
+def load_sectoral_pulse(mode_choice: str = "Live") -> dict:
+    if "Synthetic" in str(mode_choice) or "Math" in str(mode_choice):
+        return {"sbm_score": 0.0, "data_quality": "SYNTHETIC", "sectors": {}}
     engine = get_data_engine()
     try:
         return engine.fetch_sectoral_pulse()
@@ -484,7 +493,7 @@ gex_data = compute_dealer_gex(current_spot)
 htf_data = compute_multi_timeframe_regime(df)
 order_flow_data = detect_stacked_order_flow_imbalances(df, key_levels={"CPR_PIVOT": cpr["pivot"], "VAH": vol_profile["vah"], "VAL": vol_profile["val"], "AVWAP": float(df.iloc[-1]["vwap"])})
 vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"].max() - df["low"].min()) / 4.0)
-hfi_res = load_heavyweight_flow_index()
+hfi_res = load_heavyweight_flow_index(data_mode)
 
 # Fetch Live Option Chain for Options Desk & GEX Walls (cached, 5s TTL)
 oc_raw = load_live_option_chain_data(data_mode, spot_price=round(current_spot, 2))
@@ -539,7 +548,7 @@ if len(_kelly_closed) >= 10:
 else:
     kelly_win_rate, kelly_payoff_ratio = 0.72, 2.43
 dyn_kelly = calculate_dynamic_kelly(win_rate=kelly_win_rate, payoff_ratio=kelly_payoff_ratio, day_type=ib_state["day_type"])
-sector_pulse = load_sectoral_pulse()
+sector_pulse = load_sectoral_pulse(data_mode)
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
 delta_div = detect_footprint_delta_divergences(df)
 ofi_data = compute_order_flow_imbalance(df)
