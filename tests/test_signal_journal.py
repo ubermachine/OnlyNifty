@@ -282,3 +282,65 @@ def test_wait_confluence_isolation(temp_journal):
     
     summary = temp_journal.compute_daily_journal_summary()
     assert summary["avg_confluence_score"] == 88.0  # Actionable trades only!
+
+
+def test_daily_journal_summary_date_scoping(temp_journal):
+    """Verifies that compute_daily_journal_summary accurately scopes to target dates."""
+    sig_1 = Signal(SignalType.LONG, 24500.0, 24450.0, 24550.0, 24600.0, 24700.0, 24525.0, "Day 1", True, 0.50)
+    ticket_1 = {"status": "READY", "symbol": "NIFTY 24500 CE", "strike": 24500, "option_type": "CE", "entry_premium": 150.0, "sl_premium": 120.0, "target1_premium": 185.0}
+    
+    # Day 1 entry
+    e1 = temp_journal.log_signal(sig_1, ticket_1, 24500.0, bar_timestamp="2026-08-14 10:00:00")
+    e1.lifecycle_status = "T3_MOONSHOT"
+    e1.realized_r_multiple = 1.0
+    e1.realized_pnl_rupees = 2625.0
+    
+    # Day 2 entry
+    sig_2 = Signal(SignalType.SHORT, 24600.0, 24650.0, 24550.0, 24500.0, 24400.0, 24575.0, "Day 2", True, 0.50)
+    ticket_2 = {"status": "READY", "symbol": "NIFTY 24600 PE", "strike": 24600, "option_type": "PE", "entry_premium": 160.0, "sl_premium": 130.0, "target1_premium": 195.0}
+    e2 = temp_journal.log_signal(sig_2, ticket_2, 24600.0, bar_timestamp="2026-08-15 11:00:00")
+    e2.lifecycle_status = "STOPPED_OUT"
+    e2.realized_r_multiple = -1.0
+    e2.realized_pnl_rupees = -2250.0
+    
+    # Scoped to Day 1
+    sum_day1 = temp_journal.compute_daily_journal_summary(target_date="2026-08-14")
+    assert sum_day1["total_signals"] == 1
+    assert sum_day1["win_rate_pct"] == 100.0
+    assert sum_day1["total_realized_pnl"] == 2625.0
+    assert sum_day1["session_date"] == "2026-08-14"
+    
+    # Scoped to Day 2
+    sum_day2 = temp_journal.compute_daily_journal_summary(target_date="2026-08-15")
+    assert sum_day2["total_signals"] == 1
+    assert sum_day2["win_rate_pct"] == 0.0
+    assert sum_day2["total_realized_pnl"] == -2250.0
+    assert sum_day2["session_date"] == "2026-08-15"
+    
+    # Scoped to All Dates
+    sum_all = temp_journal.compute_daily_journal_summary(scope="all")
+    assert sum_all["total_signals"] == 2
+    assert sum_all["win_rate_pct"] == 50.0
+    assert sum_all["total_realized_pnl"] == 375.0
+
+
+def test_log_signal_wait_reason_normalization(temp_journal):
+    """Verifies that score fluctuations on the same veto gate do not generate duplicate WAIT rows."""
+    sig_wait1 = Signal(SignalType.WAIT, 24500.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Confluence Veto: Score 54.2 < 55.0", False, 0.0)
+    sig_wait2 = Signal(SignalType.WAIT, 24500.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Confluence Veto: Score 54.8 < 55.0", False, 0.0)
+    ticket_wait = {"status": "WAIT"}
+    
+    e1 = temp_journal.log_signal(sig_wait1, ticket_wait, 24500.0)
+    assert e1 is not None
+    
+    # Second wait with slightly different score in reason should be normalized and suppressed
+    e2 = temp_journal.log_signal(sig_wait2, ticket_wait, 24500.0)
+    assert e2 is None
+    assert len(temp_journal.entries) == 1
+    
+    # But a distinct veto gate (e.g. Data Sufficiency Gate) should be logged!
+    sig_wait3 = Signal(SignalType.WAIT, 24500.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Data Sufficiency Gate: 3 core inputs unavailable", False, 0.0)
+    e3 = temp_journal.log_signal(sig_wait3, ticket_wait, 24500.0)
+    assert e3 is not None
+    assert len(temp_journal.entries) == 2
+

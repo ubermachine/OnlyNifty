@@ -267,18 +267,18 @@ def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
         return engine.generate_synthetic_nifty(bars=150, interval_mins=5 if tf == "5m" else 1)
 
 @st.cache_data(ttl=5, max_entries=5, show_spinner=False)
-def load_live_option_chain_data(mode_key: str = "Live") -> dict:
+def load_live_option_chain_data(mode_key: str = "Live", spot_price: float = 24500.0) -> dict:
     engine = get_data_engine()
     try:
-        res = engine.fetch_live_nse_option_chain(symbol="NIFTY")
+        res = engine.fetch_live_nse_option_chain(symbol="NIFTY", spot=spot_price)
         if isinstance(res, dict) and isinstance(res.get("dataframe"), pd.DataFrame) and not res["dataframe"].empty:
             return res
-        syn = engine.generate_synthetic_option_chain(spot=24395.85)
+        syn = engine.generate_synthetic_option_chain(spot=spot_price)
         syn["data_quality"] = "POSITIONING_UNVERIFIED"
         syn["source"] = "Synthetic Fallback Chain (Empty Frame)"
         return syn
     except Exception as e:
-        syn = engine.generate_synthetic_option_chain(spot=24395.85)
+        syn = engine.generate_synthetic_option_chain(spot=spot_price)
         syn["data_quality"] = "POSITIONING_UNVERIFIED"
         syn["source"] = "Synthetic Fallback Chain"
         syn["error"] = str(e)
@@ -487,7 +487,7 @@ vf_table = compute_vf_trade_table(float(df.iloc[0]["open"]), atr=float(df["high"
 hfi_res = load_heavyweight_flow_index()
 
 # Fetch Live Option Chain for Options Desk & GEX Walls (cached, 5s TTL)
-oc_raw = load_live_option_chain_data(data_mode)
+oc_raw = load_live_option_chain_data(data_mode, spot_price=round(current_spot, 2))
 oc_df = oc_raw.get("dataframe") if isinstance(oc_raw, dict) else oc_raw
 pcr_analytics = calculate_pcr_and_max_pain(oc_df)
 gex_chart_res = compute_strike_level_gex_chart_data(oc_df, current_spot, iv_input, 1.0)
@@ -758,6 +758,8 @@ try:
         options_context=options_context
     )
 except Exception as log_exc:
+    import logging
+    logging.getLogger("OnlyNifty").error(f"Failed to log signal to journal: {log_exc}", exc_info=True)
     logged_entry = None
 
 # Dispatch asynchronous Telegram alert ONLY for freshly logged actionable signals
@@ -1310,12 +1312,38 @@ with tab_journal:
     </div>
     """, unsafe_allow_html=True)
 
-    summary = journal_engine.compute_daily_journal_summary()
+    today_ist_str = datetime.now(IST).strftime("%Y-%m-%d")
+    available_dates = sorted(list({
+        str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))[:10]
+        for e in journal_engine.entries
+        if len(str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))) >= 10
+    }), reverse=True)
+
+    date_options = [f"Today ({today_ist_str})", "All Dates"] + [d for d in available_dates if d != today_ist_str]
+    
+    # Filter Bar
+    f_c0, f_c1, f_c2, f_c3 = st.columns([1.4, 1.1, 1.1, 1.2])
+    selected_date_opt = f_c0.selectbox("Session Date Scope", date_options, index=0)
+    dir_filter = f_c1.selectbox("Filter Direction", ["All", "LONG", "SHORT"], index=0)
+    status_filter = f_c2.selectbox("Filter Status", ["All", "ACTIVE", "TRIGGERED", "T1_REACHED", "T2_REACHED", "T3_MOONSHOT", "STOPPED_OUT"], index=0)
+    grade_filter = f_c3.selectbox("Min Quality Grade", ["All", "A+ Institutional", "A Standard", "B Tactical"], index=0)
+
+    if selected_date_opt.startswith("Today"):
+        target_date_val = today_ist_str
+        scope_mode = "today"
+    elif selected_date_opt == "All Dates":
+        target_date_val = None
+        scope_mode = "all"
+    else:
+        target_date_val = selected_date_opt
+        scope_mode = "auto"
+
+    summary = journal_engine.compute_daily_journal_summary(target_date=target_date_val, scope=scope_mode)
     
     # Top KPI Metrics Row
     jk1, jk2, jk3, jk4, jk5, jk6 = st.columns(6)
     with jk1:
-        st.metric(label="Total Signals (Today)", value=summary["total_signals"], delta=f"{summary['active_trades']} Active" if summary['active_trades'] > 0 else "0 Active")
+        st.metric(label=f"Total Signals ({str(summary.get('session_date', 'Today'))[:10]})", value=summary["total_signals"], delta=f"{summary['active_trades']} Active" if summary['active_trades'] > 0 else "0 Active")
     with jk2:
         st.metric(label="Long / Short Split", value=f"{summary['long_trades']}L : {summary['short_trades']}S", delta=f"{round(summary['long_trades']/max(summary['total_signals'],1)*100)}% Long")
     with jk3:
@@ -1329,29 +1357,20 @@ with tab_journal:
 
     st.markdown("---")
 
-    # Filter Bar
-    f_c1, f_c2, f_c3 = st.columns([1.2, 1.2, 1.4])
-    dir_filter = f_c1.selectbox("Filter Direction", ["All", "LONG", "SHORT"], index=0)
-    status_filter = f_c2.selectbox("Filter Status", ["All", "ACTIVE", "TRIGGERED", "T1_REACHED", "T2_REACHED", "T3_MOONSHOT", "STOPPED_OUT"], index=0)
-    grade_filter = f_c3.selectbox("Min Quality Grade", ["All", "A+ Institutional", "A Standard", "B Tactical"], index=0)
-
-    # Filter Entries
-    raw_entries = journal_engine.entries
-    filtered_entries = raw_entries.copy()
-
-    if dir_filter != "All":
-        filtered_entries = [e for e in filtered_entries if e.direction == dir_filter]
-    if status_filter == "ACTIVE":
-        filtered_entries = [e for e in filtered_entries if e.is_active()]
-    elif status_filter != "All":
-        filtered_entries = [e for e in filtered_entries if e.lifecycle_status == status_filter]
-    if grade_filter != "All":
-        filtered_entries = [e for e in filtered_entries if grade_filter in e.confluence_grade]
-
     # Journal Table
-    df_journal = journal_engine.get_journal_dataframe()
+    df_journal = journal_engine.get_journal_dataframe(target_date=target_date_val)
+    if not df_journal.empty:
+        if dir_filter != "All" and "Direction" in df_journal.columns:
+            df_journal = df_journal[df_journal["Direction"] == dir_filter]
+        if status_filter == "ACTIVE" and "Status" in df_journal.columns:
+            df_journal = df_journal[df_journal["Status"].isin(["ACTIVE", "TRIGGERED", "T1_REACHED", "T2_REACHED"])]
+        elif status_filter != "All" and "Status" in df_journal.columns:
+            df_journal = df_journal[df_journal["Status"] == status_filter]
+        if grade_filter != "All" and "Grade" in df_journal.columns:
+            df_journal = df_journal[df_journal["Grade"].str.contains(grade_filter.split(" ")[0], na=False)]
+
     if df_journal.empty:
-        st.info("ℹ️ No actionable institutional signals logged yet for today's session. Terminal is actively monitoring live 5m candles.")
+        st.info("ℹ️ No institutional signals logged for the selected scope. Terminal is actively monitoring live 5m candles.")
     else:
         st.dataframe(
             df_journal,
@@ -2031,7 +2050,7 @@ with tab_oi:
 
     
     if "Official" in oc_mode:
-        live_oc_data = load_live_option_chain_data(data_mode)
+        live_oc_data = load_live_option_chain_data(data_mode, spot_price=round(current_spot, 2))
         oc_df = live_oc_data.get("dataframe", pd.DataFrame())
         underlying_val = live_oc_data.get("underlying_value", current_spot)
         expiry_list = live_oc_data.get("expiry_dates", [])

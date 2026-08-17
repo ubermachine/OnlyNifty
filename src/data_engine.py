@@ -209,7 +209,7 @@ class DataEngine:
             "source": "Fallback Snap"
         }
 
-    def fetch_live_nse_option_chain(self, symbol: str = "NIFTY") -> Dict[str, Any]:
+    def fetch_live_nse_option_chain(self, symbol: str = "NIFTY", spot: float = 24500.0) -> Dict[str, Any]:
         """Fetches live Option Chain, preferring Fyers over jugaad-data, with synthetic fallback."""
         try:
             from src import fyers_client
@@ -261,7 +261,7 @@ class DataEngine:
                 df = pd.DataFrame(rows)
                 if not df.empty and len(df) >= 5:
                     return {
-                        "underlying_value": underlying,
+                        "underlying_value": underlying if underlying > 0 else spot,
                         "expiry_dates": expiry_dates,
                         "dataframe": df,
                         "source": "jugaad-data (NSELive Scraping)",
@@ -270,7 +270,7 @@ class DataEngine:
         except Exception:
             pass
             
-        syn = self.generate_synthetic_option_chain(spot=24395.85)
+        syn = self.generate_synthetic_option_chain(spot=spot)
         syn["data_quality"] = "POSITIONING_UNVERIFIED"
         return syn
 

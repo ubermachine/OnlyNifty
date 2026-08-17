@@ -339,8 +339,7 @@ class LiveSignalJournal:
         structure_epoch: str = "",
         gate_audit: Optional[Dict[str, Any]] = None,
         evidence: Optional[Dict[str, Any]] = None,
-        options_context: Optional[Dict[str, Any]] = None,
-        **kwargs: Any
+        options_context: Optional[Dict[str, Any]] = None
     ) -> Optional[SignalEntry]:
         """Logs a generated signal with deduplication and state-transition filtering."""
         now = datetime.now(timezone.utc)
@@ -355,12 +354,24 @@ class LiveSignalJournal:
         if not is_actionable:
             if ticket.get("status") != "WAIT":
                 return None
-            # Filter duplicate consecutive WAIT logs only when the veto reason is identical.
-            # Logging distinct veto reason transitions preserves a complete audit trail of why the desk stood aside.
+            # Filter duplicate consecutive WAIT logs only when the veto reason is structurally identical.
+            # Normalizing reasons avoids logging duplicate rows on minor score flutter (e.g. 54.3 vs 54.8).
             if self.entries and self.entries[-1].signal_type in ["WAIT", "AWAITING_SETUP", "NO_TRADE"]:
+                def _normalize_reason(r: str) -> str:
+                    if not r:
+                        return ""
+                    r_clean = r.strip()
+                    if "Confluence Veto:" in r_clean or "Awaiting confluence" in r_clean:
+                        return "CONFLUENCE_VETO"
+                    if "Data Sufficiency Gate:" in r_clean:
+                        return "DATA_SUFFICIENCY_VETO"
+                    if "Opening 15-min range" in r_clean or "Freak" in r_clean:
+                        return "FREAK_CANDLE_ISOLATION"
+                    return r_clean
+
                 last_reason = getattr(self.entries[-1], "trigger_reason", "")
                 curr_reason = getattr(signal, "reason", "")
-                if last_reason == curr_reason:
+                if _normalize_reason(last_reason) == _normalize_reason(curr_reason):
                     return None
         else:
             # Structural fingerprint: setup_id + direction + entry/SL band (10pt buckets).
@@ -782,13 +793,26 @@ class LiveSignalJournal:
 
         return seeded_count
 
-    def get_journal_dataframe(self, actionable_only: bool = False) -> pd.DataFrame:
-        """Returns the signal entries formatted as a clean pandas DataFrame."""
+    def get_journal_dataframe(self, target_date: Optional[str] = None, actionable_only: bool = False) -> pd.DataFrame:
+        """Returns a Pandas DataFrame formatted for table inspection, optionally filtered by date and actionable status."""
         if not self.entries:
             return pd.DataFrame()
 
+        def _entry_date(e: SignalEntry) -> str:
+            ts = str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))
+            return ts[:10] if len(ts) >= 10 else ""
+
+        entries = self.entries
+        if target_date:
+            entries = [e for e in entries if _entry_date(e) == target_date]
+        if actionable_only:
+            entries = [e for e in entries if e.direction in ["LONG", "SHORT"]]
+
+        if not entries:
+            return pd.DataFrame()
+
         rows = []
-        for e in self.entries:
+        for e in entries:
             rows.append({
                 "Signal ID": e.signal_id,
                 "Time (IST)": e.timestamp_ist.split(" ")[1] if " " in e.timestamp_ist else e.timestamp_ist,
@@ -817,8 +841,14 @@ class LiveSignalJournal:
 
         return pd.DataFrame(rows)
 
-    def compute_daily_journal_summary(self) -> Dict[str, Any]:
-        """Computes comprehensive daily signal statistics and performance metrics."""
+    def compute_daily_journal_summary(self, target_date: Optional[str] = None, scope: str = "auto") -> Dict[str, Any]:
+        """
+        Computes daily signal statistics and performance metrics with date scoping.
+        
+        Args:
+            target_date: Optional date string ('YYYY-MM-DD').
+            scope: 'today' (enforce today's IST date), 'all' (all dates), or 'auto' (today if exists, else latest/all).
+        """
         if not self.entries:
             return {
                 "total_signals": 0,
@@ -834,15 +864,42 @@ class LiveSignalJournal:
                 "avg_r_multiple": 0.0,
                 "avg_confluence_score": 0.0,
                 "system_quality_number_sqn": 0.0,
-                "profit_factor": 0.0
+                "profit_factor": 0.0,
+                "session_date": target_date or "N/A"
             }
 
-        total = len(self.entries)
-        longs = sum(1 for e in self.entries if e.direction == "LONG")
-        shorts = sum(1 for e in self.entries if e.direction == "SHORT")
-        active = sum(1 for e in self.entries if e.direction in ["LONG", "SHORT"] and e.is_active())
+        today_ist = datetime.now(IST).strftime("%Y-%m-%d")
 
-        actionable_entries = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
+        def _entry_date(e: SignalEntry) -> str:
+            ts = str(getattr(e, "bar_timestamp", "") or getattr(e, "timestamp_ist", ""))
+            return ts[:10] if len(ts) >= 10 else ""
+
+        if target_date == "today" or scope == "today":
+            effective_date = today_ist
+            filtered = [e for e in self.entries if _entry_date(e) == effective_date]
+        elif target_date:
+            effective_date = target_date
+            filtered = [e for e in self.entries if _entry_date(e) == effective_date]
+        elif scope == "all":
+            effective_date = "ALL_DATES"
+            filtered = self.entries
+        else:  # scope == "auto"
+            today_entries = [e for e in self.entries if _entry_date(e) == today_ist]
+            if today_entries:
+                effective_date = today_ist
+                filtered = today_entries
+            else:
+                dates = [_entry_date(e) for e in self.entries if _entry_date(e)]
+                latest_date = max(dates) if dates else today_ist
+                effective_date = latest_date
+                filtered = [e for e in self.entries if _entry_date(e) == latest_date]
+
+        total = len(filtered)
+        longs = sum(1 for e in filtered if e.direction == "LONG")
+        shorts = sum(1 for e in filtered if e.direction == "SHORT")
+        active = sum(1 for e in filtered if e.direction in ["LONG", "SHORT"] and e.is_active())
+
+        actionable_entries = [e for e in filtered if e.direction in ["LONG", "SHORT"]]
         closed = [e for e in actionable_entries if not e.is_active()]
         wins = [e for e in closed if e.realized_r_multiple > 0]
         losses = [e for e in closed if e.realized_r_multiple <= 0]
@@ -875,7 +932,8 @@ class LiveSignalJournal:
             "avg_r_multiple": round(avg_r, 2),
             "avg_confluence_score": round(avg_conf, 1),
             "system_quality_number_sqn": round(sqn, 2),
-            "profit_factor": pf
+            "profit_factor": pf,
+            "session_date": effective_date
         }
 
     def clear_journal(self):
