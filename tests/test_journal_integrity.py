@@ -157,7 +157,7 @@ def test_analyzer_filters_seeded_entries():
         total_qty=100,
         capital_risk_rupees=5000.0,
         tca_friction_est=180.0,
-        lifecycle_status=SignalLifecycleStatus.T2_REACHED.value,
+        lifecycle_status=SignalLifecycleStatus.T3_MOONSHOT.value,
         realized_r_multiple=2.25,
         realized_pnl_rupees=11250.0,
         is_seed=False

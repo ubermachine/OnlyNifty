@@ -264,11 +264,9 @@ def compute_options_desk_state(
     raw_spot_pct = ((spot - put_wall) / corridor_width) * 100.0
     spot_pos_pct = round(raw_spot_pct, 1)
     
-    if range_fc_res and "breach_status" in range_fc_res:
-        breach_status = range_fc_res["breach_status"]
-    elif spot < put_wall - 25.0:
+    if spot < put_wall - WALL_BUFFER_PTS:
         breach_status = "BROKEN_BELOW"
-    elif spot > call_wall + 25.0:
+    elif spot > call_wall + WALL_BUFFER_PTS:
         breach_status = "BROKEN_ABOVE"
     else:
         breach_status = "INSIDE"

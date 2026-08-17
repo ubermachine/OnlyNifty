@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from src.config import DEFAULT_IV, RISK_FREE_RATE, LOT_SIZE, NIFTY_WEEKLY_EXPIRY_WEEKDAY
+from src.config import DEFAULT_IV, RISK_FREE_RATE, LOT_SIZE, NIFTY_WEEKLY_EXPIRY_WEEKDAY, WALL_BUFFER_PTS
 from src.options_engine import black_scholes_greeks, calculate_pcr_and_max_pain
 
 
@@ -618,11 +618,11 @@ def compute_oi_based_range_forecast(
     raw_pct = ((spot - put_wall) / range_width) * 100.0
     spot_position_pct = round(raw_pct, 1)
 
-    if spot < put_wall - 25.0:
+    if spot < put_wall - WALL_BUFFER_PTS:
         breach_status = "BROKEN_BELOW"
         location_bias = "BREAKDOWN_BELOW_SUPPORT"
         bias_desc = f"Spot (₹{spot:.0f}) has broken below Put Wall (₹{put_wall:.0f}). Momentum breakdown accelerating."
-    elif spot > call_wall + 25.0:
+    elif spot > call_wall + WALL_BUFFER_PTS:
         breach_status = "BROKEN_ABOVE"
         location_bias = "BREAKOUT_ABOVE_RESISTANCE"
         bias_desc = f"Spot (₹{spot:.0f}) has broken above Call Wall (₹{call_wall:.0f}). Momentum breakout accelerating."

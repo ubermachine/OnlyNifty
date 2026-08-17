@@ -425,6 +425,7 @@ if auto_refresh_choice != "Off (Manual)":
 
 if st.sidebar.button("🔄 Instant Cache Purge & Rerun", width="stretch"):
     st.cache_data.clear()
+    st.cache_resource.clear()
     st.rerun()
 
 with st.sidebar.expander("🔔 Telegram Alert Webhook", expanded=False):
@@ -900,6 +901,12 @@ conviction_html = f'''<div style="display: flex; justify-content: space-between;
 </div>
 <div style="font-size: 10px; color: #64748b; margin: -6px 0 12px 2px;">{_conv_notes}</div>'''
 
+_breach_badge = ""
+if getattr(options_desk_state, "breach_status", "INSIDE") == "BROKEN_BELOW":
+    _breach_badge = ' <span style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 700;">BROKEN BELOW</span>'
+elif getattr(options_desk_state, "breach_status", "INSIDE") == "BROKEN_ABOVE":
+    _breach_badge = ' <span style="background: rgba(34, 197, 94, 0.2); color: #22c55e; border: 1px solid #22c55e; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 700;">BROKEN ABOVE</span>'
+
 desk_verdict_html = f'''<div style="background: #080c14; border: 1px solid #1c273c; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.35);">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
 <div style="display: flex; align-items: center; gap: 8px;">
@@ -945,7 +952,7 @@ Regime: <strong style="color: #cbd5e1;">{regime_state['active_regime']}</strong>
 <div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px;">Expected Range & Dealer Walls</div>
 <div style="display: flex; justify-content: space-between; align-items: center;">
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">
-<span style="color: #05df72;">₹{desk_verdict.range_corridor[0]:.0f}</span> (Put) ── <span style="color: #00d2ff;">● {desk_verdict.spot_position_pct:.0f}%</span> ── <span style="color: #ff3355;">₹{desk_verdict.range_corridor[1]:.0f}</span> (Call)
+<span style="color: #05df72;">₹{desk_verdict.range_corridor[0]:.0f}</span> (Put) ── <span style="color: #00d2ff;">● {desk_verdict.spot_position_pct:+.0f}%</span> ── <span style="color: #ff3355;">₹{desk_verdict.range_corridor[1]:.0f}</span> (Call){_breach_badge}
 </div>
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #fbb024;">
 Max Pain: ₹{desk_verdict.max_pain:.0f}

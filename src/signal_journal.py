@@ -103,7 +103,8 @@ class SignalEntry:
         return self.lifecycle_status in [
             SignalLifecycleStatus.TRIGGERED.value,
             SignalLifecycleStatus.ACTIVE.value,
-            SignalLifecycleStatus.T1_REACHED.value
+            SignalLifecycleStatus.T1_REACHED.value,
+            SignalLifecycleStatus.T2_REACHED.value
         ]
 
     def __getitem__(self, item: str) -> Any:
@@ -338,7 +339,8 @@ class LiveSignalJournal:
         structure_epoch: str = "",
         gate_audit: Optional[Dict[str, Any]] = None,
         evidence: Optional[Dict[str, Any]] = None,
-        options_context: Optional[Dict[str, Any]] = None
+        options_context: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
     ) -> Optional[SignalEntry]:
         """Logs a generated signal with deduplication and state-transition filtering."""
         now = datetime.now(timezone.utc)
@@ -382,8 +384,10 @@ class LiveSignalJournal:
         symbol = ticket.get("symbol", f"NIFTY {strike} {opt_type}" if is_actionable else "N/A")
 
         # Compute / Preserve Confluence Score
-        # Prefer the score computed at decision time to ensure 100% parity with Desk Verdict
-        if signal and signal.details and "confluence_score" in signal.details:
+        if not is_actionable:
+            c_score = 0.0
+            c_grade = "Consolidation"
+        elif signal and signal.details and "confluence_score" in signal.details:
             c_score = float(signal.details["confluence_score"])
             c_grade = str(signal.details.get("confluence_grade", "A Standard"))
         elif confluence_score is not None and confluence_score > 1.0:
@@ -537,7 +541,16 @@ class LiveSignalJournal:
             if direction == "LONG":
                 # Check SL hit
                 if current_low <= sl_spot and sl_spot > 0:
-                    if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
+                    if entry.lifecycle_status == SignalLifecycleStatus.T2_REACHED.value:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.target_1_premium
+                        entry.notes += f" | Trailed SL (T1) hit on remaining 25%."
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.target_1_premium))
+                    elif entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
@@ -597,7 +610,16 @@ class LiveSignalJournal:
 
             elif direction == "SHORT":
                 if current_high >= sl_spot and sl_spot > 0:
-                    if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
+                    if entry.lifecycle_status == SignalLifecycleStatus.T2_REACHED.value:
+                        entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                        entry.exit_timestamp_ist = now_ist
+                        entry.exit_spot = sl_spot
+                        entry.exit_premium = entry.target_1_premium
+                        entry.notes += f" | Trailed SL (T1) hit on remaining 25%."
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.target_1_premium))
+                    elif entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
@@ -824,7 +846,8 @@ class LiveSignalJournal:
         total_pnl = sum(e.realized_pnl_rupees for e in closed)
         total_r = sum(e.realized_r_multiple for e in closed)
         avg_r = (total_r / len(closed)) if closed else 0.0
-        avg_conf = float(np.mean([e.confluence_score for e in self.entries]))
+        actionable_entries = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
+        avg_conf = float(np.mean([e.confluence_score for e in actionable_entries])) if actionable_entries else float(np.mean([e.confluence_score for e in self.entries]))
 
         gross_gains = sum(e.realized_pnl_rupees for e in wins)
         gross_losses = abs(sum(e.realized_pnl_rupees for e in losses))

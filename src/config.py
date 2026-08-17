@@ -1,3 +1,7 @@
+"""
+Institutional Risk, Microstructure & Algorithmic Execution Configuration.
+OnlyNifty Master Quantitative Trading Engine.
+"""
 from typing import Tuple
 import pytz
 

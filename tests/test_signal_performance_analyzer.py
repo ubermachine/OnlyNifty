@@ -16,7 +16,7 @@ def _make_dummy_entry(
     confluence: float = 85.0,
     regime: str = "Trend",
     timestamp_ist: str = "2026-08-15 09:35:00 IST",
-    status: str = SignalLifecycleStatus.T2_REACHED.value,
+    status: str = SignalLifecycleStatus.T3_MOONSHOT.value,
     utc_ms: int = 1700000000000
 ) -> SignalEntry:
     return SignalEntry(

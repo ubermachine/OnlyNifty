@@ -206,3 +206,79 @@ def test_confluence_preservation_in_log_signal(temp_journal):
     assert entry is not None
     assert entry.confluence_score == 78.5
     assert entry.confluence_grade == "A Standard"
+
+
+def test_t2_lifecycle_progression_to_t3(temp_journal):
+    sig_long = Signal(
+        SignalType.LONG, 24500.0, 24450.0, 24550.0, 24600.0, 24700.0, 24525.0,
+        "Breakout Long", True, 0.50, {}
+    )
+    ticket_long = {
+        "status": "READY",
+        "symbol": "NIFTY 24500 CE",
+        "strike": 24500,
+        "option_type": "CE",
+        "entry_premium": 150.00,
+        "sl_premium": 120.00,
+        "target1_premium": 185.00,
+        "target2_premium": 225.00,
+        "target3_moonshot_premium": 295.00,
+        "lots": 2,
+        "total_qty": 50,
+        "actual_risk_rupees": 2500.0,
+    }
+    entry = temp_journal.log_signal(sig_long, ticket_long, 24500.0, bar_timestamp="2026-08-14 09:20:00")
+    assert entry.is_active() is True
+    
+    # 1. Reach T1
+    temp_journal.update_open_trades_lifecycle(current_spot=24555.0, current_high=24560.0, current_low=24490.0)
+    assert entry.lifecycle_status == "T1_REACHED"
+    assert entry.is_active() is True
+    
+    # 2. Reach T2
+    temp_journal.update_open_trades_lifecycle(current_spot=24605.0, current_high=24610.0, current_low=24540.0)
+    assert entry.lifecycle_status == "T2_REACHED"
+    assert entry.is_active() is True  # Must stay active to allow T3 or trailed SL!
+    
+    # 3. Reach T3 Moonshot
+    temp_journal.update_open_trades_lifecycle(current_spot=24705.0, current_high=24710.0, current_low=24590.0)
+    assert entry.lifecycle_status == "T3_MOONSHOT"
+    assert entry.is_active() is False
+    assert entry.realized_r_multiple > 0
+
+
+def test_wait_confluence_isolation(temp_journal):
+    sig_wait = Signal(
+        SignalType.WAIT, 24500.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        "Awaiting Confluence Floor", False, 0.0, {"confluence_score": 38.0, "confluence_grade": "C Weak / Vetoed"}
+    )
+    ticket_wait = {"status": "WAIT"}
+    entry_wait = temp_journal.log_signal(sig_wait, ticket_wait, 24500.0)
+    assert entry_wait is not None
+    assert entry_wait.confluence_score == 0.0
+    assert entry_wait.confluence_grade == "Consolidation"
+    
+    # Now log an actionable trade
+    sig_long = Signal(
+        SignalType.LONG, 24500.0, 24450.0, 24550.0, 24600.0, 24700.0, 24525.0,
+        "A+ Setup", True, 0.50, {"confluence_score": 88.0, "confluence_grade": "A+ Institutional"}
+    )
+    ticket_long = {
+        "status": "READY",
+        "symbol": "NIFTY 24500 CE",
+        "strike": 24500,
+        "option_type": "CE",
+        "entry_premium": 150.00,
+        "sl_premium": 120.00,
+        "target1_premium": 185.00,
+        "target2_premium": 225.00,
+        "target3_moonshot_premium": 295.00,
+        "lots": 2,
+        "total_qty": 50,
+        "actual_risk_rupees": 2500.0,
+    }
+    entry_long = temp_journal.log_signal(sig_long, ticket_long, 24500.0)
+    assert entry_long.confluence_score == 88.0
+    
+    summary = temp_journal.compute_daily_journal_summary()
+    assert summary["avg_confluence_score"] == 88.0  # Actionable trades only!

@@ -631,24 +631,29 @@ def run_pillar_5():
     assert entry1.sl_spot == entry1.spot_price, "SL not trailed to breakeven after T1"
     print(f"[PASS] Trade Lifecycle Step 1 (T1 Hit): Status='{entry1.lifecycle_status}', Trailed SL={entry1.sl_spot:.2f} (Breakeven Achieved)")
     
-    # Step 2: Bar reaches T2 (Target 2 Booked)
+    # Step 2: Bar reaches T2 (Target 2 Booked, Trailed SL to T1, Runner remains Active)
     updates = journal.update_open_trades_lifecycle(current_spot=t2_spot, current_high=t2_spot + 2.0, current_low=t1_spot)
     assert updates == 1 and entry1.lifecycle_status == SignalLifecycleStatus.T2_REACHED.value, "T2 transition failed"
-    assert not entry1.is_active(), "Trade should be marked closed after T2 hit"
-    print(f"[PASS] Trade Lifecycle Step 2 (T2 Hit): Status='{entry1.lifecycle_status}', Realized R={entry1.realized_r_multiple:+.2f}R, PnL=₹{entry1.realized_pnl_rupees:,.2f}")
+    assert entry1.is_active(), "Trade should remain active after T2 to allow runner to reach T3 or trailed SL"
+    assert entry1.sl_spot == t1_spot, "SL not trailed to T1 after T2"
+    print(f"[PASS] Trade Lifecycle Step 2 (T2 Hit): Status='{entry1.lifecycle_status}', Realized R={entry1.realized_r_multiple:+.2f}R, PnL=₹{entry1.realized_pnl_rupees:,.2f} (Active Runner, SL trailed to T1)")
     
-    # Test T3 Moonshot Direct Leap on a second long trade
-    entry_t3 = journal.log_signal(
+    # Step 3: Bar reaches T3 (Moonshot Hit -> Trade Closed)
+    updates = journal.update_open_trades_lifecycle(current_spot=t3_spot, current_high=t3_spot + 5.0, current_low=t2_spot)
+    assert updates == 1 and entry1.lifecycle_status == SignalLifecycleStatus.T3_MOONSHOT.value, "T3 Moonshot transition failed"
+    assert not entry1.is_active(), "Trade should be closed after T3"
+    print(f"[PASS] Trade Lifecycle Step 3 (T3 Moonshot): Status='{entry1.lifecycle_status}', Realized R={entry1.realized_r_multiple:+.2f}R, Realized PnL=₹{entry1.realized_pnl_rupees:,.2f}, Exit Spot={entry1.exit_spot:.2f}")
+    
+    # Test 2nd winning trade directly hitting T2/T3
+    entry_win2 = journal.log_signal(
         signal=sig_3pm_long,
         ticket=ticket_long,
         current_spot=24520.0,
         bar_timestamp="2026-08-14 15:15"
     )
-    assert entry_t3 is not None, "Failed to log T3 candidate trade"
-    updates = journal.update_open_trades_lifecycle(current_spot=entry_t3.target_3_spot, current_high=entry_t3.target_3_spot + 10.0, current_low=24520.0)
-    assert updates == 1 and entry_t3.lifecycle_status == SignalLifecycleStatus.T3_MOONSHOT.value, "T3 Moonshot transition failed"
-    assert not entry_t3.is_active(), "Trade should be closed after T3"
-    print(f"[PASS] Trade Lifecycle Step 3 (T3 Moonshot): Status='{entry_t3.lifecycle_status}', Realized R={entry_t3.realized_r_multiple:+.2f}R, Realized PnL=₹{entry_t3.realized_pnl_rupees:,.2f}, Exit Spot={entry_t3.exit_spot:.2f}")
+    assert entry_win2 is not None, "Failed to log 2nd candidate trade"
+    updates = journal.update_open_trades_lifecycle(current_spot=entry_win2.target_3_spot, current_high=entry_win2.target_3_spot + 10.0, current_low=24520.0)
+    assert entry_win2.lifecycle_status == SignalLifecycleStatus.T3_MOONSHOT.value
     
     # Test SL Stop Out scenario on short trade
     entry_sl = journal.log_signal(
