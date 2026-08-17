@@ -174,3 +174,28 @@ def test_dispatch_lifecycle_alert_mocked(mock_urlopen, sample_signal_entry):
         blocking=True
     )
     assert res_dup is False
+
+
+@patch("urllib.request.urlopen")
+def test_send_test_alert_html_safety(mock_urlopen):
+    notifier = TelegramNotifier.get_instance()
+    mock_response = MagicMock()
+    mock_response.read.return_value = b'{"ok": true, "result": {"message_id": 1003}}'
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    success, msg = notifier.send_test_alert("123456:ABC-DEF", "987654321")
+    assert success is True
+    # Verify the payload text has &lt;50ms and no unescaped <50ms
+    call_args = mock_urlopen.call_args
+    req = call_args[0][0]
+    payload_str = req.data.decode("utf-8")
+    assert "<50ms" not in payload_str
+    assert "&lt;50ms" in payload_str
+
+
+def test_format_signal_html_escapes_special_characters(sample_signal_entry):
+    notifier = TelegramNotifier.get_instance()
+    sample_signal_entry.trigger_reason = "Price < 21 EMA and Vol > 1.5x & Skew < 0"
+    html_out = notifier.format_signal_html(sample_signal_entry)
+    
+    assert "Price &lt; 21 EMA and Vol &gt; 1.5x &amp; Skew &lt; 0" in html_out
