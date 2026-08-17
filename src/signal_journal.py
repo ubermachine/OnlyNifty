@@ -467,6 +467,9 @@ class LiveSignalJournal:
         family_agreement = int(ticket.get("family_agreement", 0) or getattr(signal, "family_agreement", 0) or 0)
         directional_score = float(ticket.get("directional_score", 0.0) or getattr(signal, "directional_score", 0.0) or 0.0)
 
+        gate_audit_resolved = gate_audit or (ticket.get("gate_audit") if isinstance(ticket, dict) else None) or (signal.details.get("gate_audit") if signal and signal.details else {}) or {}
+        evidence_resolved = evidence or (ticket.get("evidence") if isinstance(ticket, dict) else None) or (signal.details.get("evidence") if signal and signal.details else {}) or {}
+
         entry = SignalEntry(
             signal_id=sig_id,
             timestamp_ist=now_ist,
@@ -508,8 +511,8 @@ class LiveSignalJournal:
             is_seed=is_seed,
             setup_id=setup_id or sig_type_str,
             structure_epoch=structure_epoch,
-            gate_audit=gate_audit or {},
-            evidence=evidence or {},
+            gate_audit=gate_audit_resolved,
+            evidence=evidence_resolved,
             greeks_snapshot={
                 "delta": ticket.get("delta", 0.55 if is_actionable else 0.0),
                 "gamma": ticket.get("gamma", 0.0008 if is_actionable else 0.0),
@@ -1128,11 +1131,14 @@ class SignalPerformanceAnalyzer:
         self,
         entries: Optional[List[SignalEntry]] = None,
         include_seeds: bool = False,
-        min_schema_version: int = 1
+        min_schema_version: Optional[int] = None
     ):
         raw = entries or []
+        # Task 05: Exclude schema v1 legacy records from performance analytics when v2 exists
+        has_v2 = any(getattr(e, "schema_version", 1) >= 2 for e in raw)
+        target_min_ver = min_schema_version if min_schema_version is not None else (2 if has_v2 else 1)
         self.raw_entries: List[SignalEntry] = [
-            e for e in raw if getattr(e, "schema_version", 1) >= min_schema_version
+            e for e in raw if getattr(e, "schema_version", 1) >= target_min_ver
         ]
         # Filter completed / closed actionable trades
         wait_val = SignalType.WAIT.value if hasattr(SignalType.WAIT, "value") else "WAIT"

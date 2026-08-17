@@ -100,8 +100,17 @@ class EdgeTable:
 class WalkForwardRunner:
     """Executes walk-forward cross-validation across rolling market regimes."""
 
-    def __init__(self, edge_table_path: str = "data/edge_table.json"):
-        self.edge_table_path = edge_table_path
+    def __init__(
+        self,
+        strategy_engine: Optional[Any] = None,
+        edge_table_path: str = "data/edge_table.json"
+    ):
+        if isinstance(strategy_engine, str):
+            self.edge_table_path = strategy_engine
+            self.strategy_engine = None
+        else:
+            self.strategy_engine = strategy_engine
+            self.edge_table_path = edge_table_path
         self.raw_records: List[Dict[str, Any]] = []
 
     def compute_edge_stats(

@@ -763,6 +763,8 @@ try:
         vol_profile=vol_profile,
         df_context=df,
         is_0dte=is_0dte_mode,
+        gate_audit=desk_verdict.gate_audit,
+        evidence=desk_verdict.evidence,
         options_context=options_context
     )
 except Exception as log_exc:
@@ -807,7 +809,11 @@ if pre_open_data and (pre_open_data.get("pChange", 0.0) != 0.0 or (now_ist.hour 
 # Market Breadth & Daily Range Ticker
 hfi_adv = hfi_res.get("advances", 0)
 hfi_dec = hfi_res.get("declines", 0)
-day_range_pts = float(df['high'].max() - df['low'].min())
+_sess_df = df
+if hasattr(df.index, "date") and len(df.index) > 0:
+    _last_date = df.index[-1].date()
+    _sess_df = df[df.index.date == _last_date]
+day_range_pts = float(_sess_df['high'].max() - _sess_df['low'].min())
 ref_vol = float(df['volume'].iloc[-2]) if len(df) > 1 else float(df['volume'].iloc[-1])
 vol_ratio = float(ref_vol / max(float(df['volume'].mean()), 1.0)) * 100.0
 st.markdown(f'''
@@ -941,6 +947,14 @@ _edge_chip = ''
 if desk_verdict.edge_status and desk_verdict.edge_status != 'UNMEASURED':
     _edge_clr = {'TRUSTED': '#05df72', 'PAPER': '#fbb024', 'QUARANTINED': '#ff3355'}.get(desk_verdict.edge_status, '#64748b')
     _edge_chip = f'<span style="font-size: 10px; color: {_edge_clr}; margin-left: 10px;">EDGE: {desk_verdict.edge_status}</span>'
+
+# Task 04: Cluster Context & Prior MFE Decay Tracking
+_cluster_dir = "LONG" if ("CE" in desk_verdict.action or desk_verdict.trend_bias == "BULLISH") else ("SHORT" if ("PE" in desk_verdict.action or desk_verdict.trend_bias == "BEARISH") else "WAIT")
+_cluster_info = journal_engine.cluster_context(_cluster_dir, last_bar_ts) if hasattr(journal_engine, "cluster_context") else {}
+_cluster_chip = ""
+if _cluster_info and _cluster_info.get("count", 0) > 0:
+    _cluster_chip = f'<span style="font-size: 10px; color: #38bdf8; margin-left: 10px;">SEQ: #{_cluster_info["index"]} in {_cluster_dir} (Med MFE: +{_cluster_info["prior_mfe_median"]:.1f}pts, Neg: {_cluster_info["prior_went_negative"]})</span>'
+
 _conv_notes = " • ".join(desk_verdict.conviction_notes[:3]) if desk_verdict.conviction_notes else ''
 _agree_label = (
     f"{desk_verdict.family_agreement}/4 aligned (WAIT)" if desk_verdict.action == "WAIT" and desk_verdict.family_agreement > 0
@@ -952,6 +966,7 @@ conviction_html = f'''<div style="display: flex; justify-content: space-between;
 <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: #f1f5f9;">{desk_verdict.conviction_score:.0f}<span style="font-size: 9px; color: #64748b;">/100</span></span>
 <span style="font-size: 10px; color: #64748b;">{_agree_label}</span>
 {_edge_chip}
+{_cluster_chip}
 </div>
 <div style="display: flex; align-items: center;">{_fam_chips}</div>
 </div>
