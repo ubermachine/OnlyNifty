@@ -238,7 +238,8 @@ def compute_options_desk_state(
         call_wall = float(gex_chart_res.get("call_wall_strike", round(spot + 200, -2)))
         put_wall = float(gex_chart_res.get("put_wall_strike", round(spot - 200, -2)))
         if call_wall <= put_wall:
-            call_wall = put_wall + 200.0
+            call_wall = max(call_wall, put_wall + 100.0)
+            put_wall = min(put_wall, call_wall - 100.0)
         zero_gex_strike = float(gex_chart_res.get("zero_gex_strike", spot))
         gamma_regime = gex_chart_res.get("net_dealer_regime", "DEALER_LONG_GAMMA")
         is_positive_gamma = gamma_regime.startswith("DEALER_LONG_GAMMA") or gamma_regime.startswith("POSITIVE")

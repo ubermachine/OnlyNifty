@@ -899,22 +899,11 @@ def compute_line_break_trend(
     stack_bull = (c >= ema1) & (ema1 >= ema2) & (ema2 >= ema3)
     stack_bear = (c <= ema1) & (ema1 <= ema2) & (ema2 <= ema3)
 
-    biases = []
     dirs = lb_df["lb_direction"].values
     s_bull = stack_bull.values
     s_bear = stack_bear.values
 
-    for i in range(len(df)):
-        d = dirs[i]
-        b = s_bull[i]
-        be = s_bear[i]
-
-        if d == 1 and b:
-            biases.append("BULLISH")
-        elif d == -1 and be:
-            biases.append("BEARISH")
-        else:
-            biases.append("NEUTRAL")
+    biases = np.where((dirs == 1) & s_bull, "BULLISH", np.where((dirs == -1) & s_bear, "BEARISH", "NEUTRAL"))
 
     res = lb_df.copy()
     res["ema_stack_bullish"] = stack_bull
@@ -982,7 +971,8 @@ def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, A
     else:
         bias = "NEUTRAL"
 
-    lb_trend_df = compute_line_break_trend(df_tf)
+    df_lb = df_tf.iloc[-80:] if len(df_tf) > 80 else df_tf
+    lb_trend_df = compute_line_break_trend(df_lb)
     lb_bias = "NEUTRAL"
     lb_direction = 0
     if not lb_trend_df.empty:

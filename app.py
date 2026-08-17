@@ -920,11 +920,15 @@ if desk_verdict.edge_status and desk_verdict.edge_status != 'UNMEASURED':
     _edge_clr = {'TRUSTED': '#05df72', 'PAPER': '#fbb024', 'QUARANTINED': '#ff3355'}.get(desk_verdict.edge_status, '#64748b')
     _edge_chip = f'<span style="font-size: 10px; color: {_edge_clr}; margin-left: 10px;">EDGE: {desk_verdict.edge_status}</span>'
 _conv_notes = " • ".join(desk_verdict.conviction_notes[:3]) if desk_verdict.conviction_notes else ''
+_agree_label = (
+    f"{desk_verdict.family_agreement}/4 aligned (WAIT)" if desk_verdict.action == "WAIT" and desk_verdict.family_agreement > 0
+    else ("Split board (WAIT)" if desk_verdict.action == "WAIT" else f"{desk_verdict.family_agreement}/4 families agree")
+)
 conviction_html = f'''<div style="display: flex; justify-content: space-between; align-items: center; background: #0d131f; border: 1px solid {conv_clr}33; border-left: 3px solid {conv_clr}; border-radius: 6px; padding: 7px 12px; margin-bottom: 12px;">
 <div style="display: flex; align-items: center; gap: 12px;">
 <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 800; color: {conv_clr}; letter-spacing: 0.06em;">{desk_verdict.conviction_tier} CONVICTION</span>
 <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: #f1f5f9;">{desk_verdict.conviction_score:.0f}<span style="font-size: 9px; color: #64748b;">/100</span></span>
-<span style="font-size: 10px; color: #64748b;">{desk_verdict.family_agreement}/4 families agree</span>
+<span style="font-size: 10px; color: #64748b;">{_agree_label}</span>
 {_edge_chip}
 </div>
 <div style="display: flex; align-items: center;">{_fam_chips}</div>

@@ -1166,7 +1166,8 @@ class StrategyEngine:
             d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
             pcr_z = float(options_context.get("pcr_zscore", 0.0))
 
-            if close <= put_w + WALL_BUFFER_PTS and (d_v >= 0.2 or pcr_z >= PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("buyer_defense")):
+            # Long fade only when defending above put wall (not broken below)
+            if put_w - 5.0 <= close <= put_w + WALL_BUFFER_PTS and (d_v >= 0.2 or pcr_z >= PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("buyer_defense")):
                 _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.RANGE_FADE_LONG,
                     entry_price=close,
@@ -1180,7 +1181,8 @@ class StrategyEngine:
                 ))
                 if _c is not None:
                     return _c
-            elif close >= call_w - WALL_BUFFER_PTS and (d_v <= -0.2 or pcr_z <= -PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("seller_defense")):
+            # Short fade only when defending below call wall (not broken above)
+            elif call_w - WALL_BUFFER_PTS <= close <= call_w + 5.0 and (d_v <= -0.2 or pcr_z <= -PCR_Z_CONTRARIAN_THRESHOLD or ofi_info.get("seller_defense")):
                 _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.RANGE_FADE_SHORT,
                     entry_price=close,
@@ -1195,13 +1197,15 @@ class StrategyEngine:
                 if _c is not None:
                     return _c
 
-        # 12. Options Desk Gamma Breakout Strategy (-Γ Expansion / Wall Clearance)
-        if options_context and not gex_info.get("is_positive_gamma", True):
+        # 12. Options Desk Gamma Breakout / Wall Breach Strategy
+        if options_context:
             call_w = float(gex_info.get("call_wall_strike", 999999.0))
             put_w = float(gex_info.get("put_wall_strike", 0.0))
             d_v = float(options_context.get("dir_flow", {}).get("directional_vector", 0.0))
+            is_pos_gamma = gex_info.get("is_positive_gamma", True)
 
-            if d_v >= 0.5 and close >= call_w and ofi_info.get("buyer_defense"):
+            # Bullish Breakout above Call Wall: In -Γ regime OR momentum breach above Call Wall
+            if (not is_pos_gamma or close >= call_w) and d_v >= 0.35 and close >= call_w - 5.0 and (ofi_info.get("buyer_defense") or close > bar_open):
                 _c = _check_and_return("LONG", Signal(
                     signal_type=SignalType.GAMMA_BREAKOUT_LONG,
                     entry_price=close,
@@ -1209,13 +1213,14 @@ class StrategyEngine:
                     target_1=round(close + 1.5 * atr_14, 2),
                     target_2=round(close + 3.0 * atr_14, 2),
                     target_3_moonshot=round(close + 5.0 * atr_14, 2),
-                    reason=f"Gamma Breakout Long: Price ({close:.1f}) cleared Call Wall ({call_w:.0f}) in -Γ expansion regime.",
+                    reason=f"Gamma Breakout Long: Price ({close:.1f}) cleared Call Wall ({call_w:.0f}) with Bullish Flow (D={d_v:+.2f}).",
                     htf_aligned=htf_aligned_long,
                     details={"call_wall": call_w, "gex": gex_info, "d_vector": d_v}
                 ))
                 if _c is not None:
                     return _c
-            elif d_v <= -0.5 and close <= put_w and ofi_info.get("seller_defense"):
+            # Bearish Breakdown below Put Wall: In -Γ regime OR momentum breach below Put Wall
+            elif (not is_pos_gamma or close <= put_w) and d_v <= -0.35 and close <= put_w + 5.0 and (ofi_info.get("seller_defense") or close < bar_open):
                 _c = _check_and_return("SHORT", Signal(
                     signal_type=SignalType.GAMMA_BREAKOUT_SHORT,
                     entry_price=close,
@@ -1223,7 +1228,7 @@ class StrategyEngine:
                     target_1=round(close - 1.5 * atr_14, 2),
                     target_2=round(close - 3.0 * atr_14, 2),
                     target_3_moonshot=round(close - 5.0 * atr_14, 2),
-                    reason=f"Gamma Breakdown Short: Price ({close:.1f}) breached Put Wall ({put_w:.0f}) in -Γ expansion regime.",
+                    reason=f"Gamma Breakdown Short: Price ({close:.1f}) breached Put Wall ({put_w:.0f}) with Bearish Flow (D={d_v:+.2f}).",
                     htf_aligned=htf_aligned_short,
                     details={"put_wall": put_w, "gex": gex_info, "d_vector": d_v}
                 ))

@@ -846,11 +846,34 @@ def compute_strike_level_gex_chart_data(
         total_put_gex += put_gex_cr
 
     if strikes:
-        call_wall_idx = int(np.argmax(call_gex_per_strike))
-        call_wall_strike = float(strikes[call_wall_idx])
+        strikes_arr = np.array(strikes, dtype=np.float64)
+        call_gex_arr = np.array(call_gex_per_strike, dtype=np.float64)
+        put_gex_arr = np.array(put_gex_per_strike, dtype=np.float64)
 
-        put_wall_idx = int(np.argmin(put_gex_per_strike))  # most negative put gex
-        put_wall_strike = float(strikes[put_wall_idx])
+        # Constrain Call Wall to strikes >= spot (highest Call GEX resistance above spot)
+        ce_mask = strikes_arr >= spot
+        if np.any(ce_mask) and np.max(call_gex_arr[ce_mask]) > 0:
+            ce_indices = np.where(ce_mask)[0]
+            call_wall_idx = ce_indices[int(np.argmax(call_gex_arr[ce_mask]))]
+            call_wall_strike = float(strikes[call_wall_idx])
+        else:
+            call_wall_idx = int(np.argmax(call_gex_arr))
+            call_wall_strike = float(strikes[call_wall_idx])
+
+        # Constrain Put Wall to strikes <= spot (most negative Put GEX support below spot)
+        pe_mask = strikes_arr <= spot
+        if np.any(pe_mask) and np.min(put_gex_arr[pe_mask]) < 0:
+            pe_indices = np.where(pe_mask)[0]
+            put_wall_idx = pe_indices[int(np.argmin(put_gex_arr[pe_mask]))]
+            put_wall_strike = float(strikes[put_wall_idx])
+        else:
+            put_wall_idx = int(np.argmin(put_gex_arr))
+            put_wall_strike = float(strikes[put_wall_idx])
+
+        # Structural ordering guard
+        if call_wall_strike <= put_wall_strike:
+            call_wall_strike = max(call_wall_strike, put_wall_strike + 100.0)
+            put_wall_strike = min(put_wall_strike, call_wall_strike - 100.0)
 
         # The gamma flip is where CUMULATIVE net GEX crosses zero — not where a single
         # strike's |GEX| is smallest. argmin(|net_gex|) always returns an outer wing

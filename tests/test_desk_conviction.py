@@ -152,10 +152,11 @@ class TestConvictionTiers:
 
     def test_wait_has_no_conviction(self):
         votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 1}
-        score, tier, agree, _ = compute_conviction("WAIT", votes, 90.0)
+        score, tier, agree, notes = compute_conviction("WAIT", votes, 90.0)
         assert score == 0.0
         assert tier == "LOW"
-        assert agree == 0
+        assert agree == 4  # All 4 families lean bullish on the underlying tape
+        assert any("bullish" in n for n in notes)
 
     def test_quarantined_setup_is_capped_low(self):
         votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 1}

@@ -295,7 +295,20 @@ def compute_conviction(
     elif action == "BUY_PE":
         wanted = -1
     else:
-        return 0.0, "LOW", 0, ["No directional action"]
+        bull_count = sum(1 for v in votes.values() if v == 1)
+        bear_count = sum(1 for v in votes.values() if v == -1)
+        if bull_count > bear_count:
+            dominant_lean = "bullish"
+            dom_agreement = bull_count
+        elif bear_count > bull_count:
+            dominant_lean = "bearish"
+            dom_agreement = bear_count
+        else:
+            dominant_lean = "neutral"
+            dom_agreement = 0
+            
+        note_str = f"Board leans {dominant_lean} ({dom_agreement}/4 families)" if dom_agreement > 0 else "Split board (no family consensus)"
+        return 0.0, "LOW", dom_agreement, [note_str]
 
     agreement = sum(1 for v in votes.values() if v == wanted)
     opposed = sum(1 for v in votes.values() if v == -wanted)
@@ -555,8 +568,22 @@ def build_desk_verdict(
     }
 
     # 6. Confluence Score & Grade
-    confluence_score = signal.details.get("confluence_score", 50.0) if (signal and signal.details) else 50.0
-    confluence_grade = signal.details.get("confluence_grade", "Standard") if (signal and signal.details) else "Standard"
+    raw_c_score = signal.details.get("confluence_score") if (signal and signal.details) else None
+    if raw_c_score is not None and isinstance(raw_c_score, (int, float)) and raw_c_score > 0:
+        confluence_score = float(raw_c_score)
+        if signal and signal.details and signal.details.get("confluence_grade"):
+            confluence_grade = str(signal.details.get("confluence_grade"))
+        elif confluence_score >= 75.0:
+            confluence_grade = "A+ Institutional"
+        elif confluence_score >= 55.0:
+            confluence_grade = "A Standard"
+        elif confluence_score >= 45.0:
+            confluence_grade = "B Tactical"
+        else:
+            confluence_grade = "C Weak / Vetoed"
+    else:
+        confluence_score = 0.0
+        confluence_grade = "Consolidation"
 
     # Walk-forward OOS status of the firing setup (stamped by the live edge gate).
     edge_status = "TRUSTED"
