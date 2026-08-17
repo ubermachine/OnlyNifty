@@ -296,12 +296,12 @@ def run_pillar_3():
     pe_sel = select_institutional_strike(spot, is_call=False, t_days=t_days, iv=iv, is_0dte_afternoon=False)
     ce_0dte = select_institutional_strike(spot, is_call=True, t_days=0.08, iv=iv, is_0dte_afternoon=True)
     
-    assert 0.50 <= ce_sel["delta"] <= 0.65, f"Standard Call Delta {ce_sel['delta']} out of [0.50, 0.65]"
-    assert 0.50 <= abs(pe_sel["delta"]) <= 0.65, f"Standard Put Delta {pe_sel['delta']} out of [-0.65, -0.50]"
+    assert 0.65 <= ce_sel["delta"] <= 0.88, f"Standard Call Delta {ce_sel['delta']} out of [0.65, 0.88]"
+    assert 0.65 <= abs(pe_sel["delta"]) <= 0.88, f"Standard Put Delta {pe_sel['delta']} out of [-0.88, -0.65]"
     assert abs(ce_0dte["delta"]) >= 0.70, f"0DTE Deep ITM Delta {ce_0dte['delta']} < 0.70"
     print(f"[PASS] select_institutional_strike:")
-    print(f"  - Standard Bullish Strike: {ce_sel['symbol']} @ ₹{ce_sel['price']:.2f} (Delta={ce_sel['delta']:.3f})")
-    print(f"  - Standard Bearish Strike: {pe_sel['symbol']} @ ₹{pe_sel['price']:.2f} (Delta={pe_sel['delta']:.3f})")
+    print(f"  - Standard Deep ITM Bullish Strike: {ce_sel['symbol']} @ ₹{ce_sel['price']:.2f} (Delta={ce_sel['delta']:.3f})")
+    print(f"  - Standard Deep ITM Bearish Strike: {pe_sel['symbol']} @ ₹{pe_sel['price']:.2f} (Delta={pe_sel['delta']:.3f})")
     print(f"  - 0DTE Deep ITM Strike: {ce_0dte['symbol']} @ ₹{ce_0dte['price']:.2f} (Delta={ce_0dte['delta']:.3f} - Microstructure Cliff Shield Active)")
     
     # 4. generate_option_trade_ticket with Taylor expansion convexity bounds

@@ -61,6 +61,8 @@ class OptionsDeskState:
     dealer_drift_score: float = 0.0    # Vanna/Charm mechanical drift vector [-1.0, +1.0]
     dwv_momentum_score: float = 0.0    # Delta-Weighted Volume flow score [-1.0, +1.0]
     gamma_flip_distance_pts: float = 0.0 # spot - zero_gex_strike (pts)
+    breach_status: str = "INSIDE"      # "INSIDE" | "BROKEN_ABOVE" | "BROKEN_BELOW"
+    spot_position_pct: float = 50.0    # Signed unclamped spot position within corridor (%)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -251,12 +253,25 @@ def compute_options_desk_state(
     if range_fc_res is None and data_quality == "VERIFIED":
         range_fc_res = compute_oi_based_range_forecast(option_chain_df, spot, max_pain)
 
-    if range_fc_res:
+    if range_fc_res and (gex_chart_res is None or not gex_chart_res.get("strikes")):
         rf_call = float(range_fc_res.get("call_wall", 0.0))
         rf_put = float(range_fc_res.get("put_wall", 0.0))
         if rf_call > rf_put > 0:
             call_wall = rf_call
             put_wall = rf_put
+
+    corridor_width = max(call_wall - put_wall, 10.0)
+    raw_spot_pct = ((spot - put_wall) / corridor_width) * 100.0
+    spot_pos_pct = round(raw_spot_pct, 1)
+    
+    if range_fc_res and "breach_status" in range_fc_res:
+        breach_status = range_fc_res["breach_status"]
+    elif spot < put_wall - 25.0:
+        breach_status = "BROKEN_BELOW"
+    elif spot > call_wall + 25.0:
+        breach_status = "BROKEN_ABOVE"
+    else:
+        breach_status = "INSIDE"
 
     # Expected Move — the conventional 1-sigma straddle-implied close-to-close move.
     sigma_daily_pts = spot * max(live_iv, 0.05) * np.sqrt(1.0 / 365.0)
@@ -363,7 +378,9 @@ def compute_options_desk_state(
         data_quality=data_quality,
         dealer_drift_score=dealer_drift_score,
         dwv_momentum_score=dwv_momentum_score,
-        gamma_flip_distance_pts=gamma_flip_distance_pts
+        gamma_flip_distance_pts=gamma_flip_distance_pts,
+        breach_status=breach_status,
+        spot_position_pct=spot_pos_pct
     )
 
 

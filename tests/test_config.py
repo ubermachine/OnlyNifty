@@ -24,8 +24,8 @@ def test_config_constants():
     assert EMA_MID == 55
     assert EMA_SLOW == 200
     assert ENVELOPE_PCT == 0.015
-    assert DELTA_MIN == 0.50
-    assert DELTA_MAX == 0.65
+    assert DELTA_MIN == 0.65
+    assert DELTA_MAX == 0.85
     assert FIB_GOLDEN_MIN == 0.50
     assert FIB_GOLDEN_MAX == 0.618
     assert MA_STRETCH_THRESHOLD == 0.0035

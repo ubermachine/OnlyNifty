@@ -16,17 +16,17 @@ def test_black_scholes_greeks():
     assert greeks["price"] > 0
 
 def test_select_institutional_strike_call():
-    # Spot 24530, Long -> Target 24500 CE (1-step ITM) or 24550 CE (ATM) with delta ~0.50-0.65
+    # Spot 24530, Long -> Deep ITM Synthetic CE (e.g. 24350 / 24400 CE) with delta ~0.65-0.85 (cuts extrinsic decay)
     res = select_institutional_strike(spot=24530.0, is_call=True)
-    assert res["strike"] in [24500, 24550]
-    assert 0.48 <= abs(res["delta"]) <= 0.65
+    assert res["strike"] <= 24530
+    assert 0.65 <= abs(res["delta"]) <= 0.88
     assert res["option_type"] == "CE"
 
 def test_select_institutional_strike_put():
-    # Spot 24480, Short -> Target ATM or ITM PE (24500, 24550, 24600) with delta ~0.50-0.65
+    # Spot 24480, Short -> Deep ITM Synthetic PE (e.g. 24650 / 24700 PE) with delta ~0.65-0.85
     res = select_institutional_strike(spot=24480.0, is_call=False)
-    assert res["strike"] in [24500, 24550, 24600]
-    assert 0.48 <= abs(res["delta"]) <= 0.65
+    assert res["strike"] >= 24480
+    assert 0.65 <= abs(res["delta"]) <= 0.88
     assert res["option_type"] == "PE"
 
 def test_calculate_position_size():

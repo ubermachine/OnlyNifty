@@ -11,6 +11,7 @@ Features:
 """
 
 import math
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 import numpy as np
 import pandas as pd
@@ -18,10 +19,12 @@ from scipy.stats import norm
 
 from src.config import (
     DEFAULT_CAPITAL, MAX_RISK_PCT, LOT_SIZE,
-    DELTA_MIN, DELTA_MAX, DELTA_DEEP_ITM_0DTE, RISK_FREE_RATE, DEFAULT_IV,
+    DELTA_MIN, DELTA_MAX, DELTA_TARGET, DELTA_DEEP_ITM_0DTE, RISK_FREE_RATE, DEFAULT_IV,
     PUT_SKEW_PREMIUM, STT_SELL_PCT, BROKERAGE_PER_ORDER,
     NSE_TURNOVER_PCT, GST_PCT, SEBI_CHARGES_PCT, STAMP_DUTY_BUY_PCT,
-    DEFAULT_SLIPPAGE_PTS, KELLY_FRACTION, MAX_TOLERABLE_MDD
+    DEFAULT_SLIPPAGE_PTS, KELLY_FRACTION, MAX_TOLERABLE_MDD,
+    IV_ADVERSE_DRIFT_T1, IV_ADVERSE_DRIFT_T2, IV_ADVERSE_DRIFT_T3,
+    NIFTY_WEEKLY_EXPIRY_WEEKDAY, IST
 )
 from src.strategy_rules import Signal, SignalType
 
@@ -1205,25 +1208,74 @@ def construct_ratio_spread(
     }
 
 
+def calculate_time_to_expiry_days(
+    timestamp: Optional[Any] = None,
+    expiry_weekday: int = NIFTY_WEEKLY_EXPIRY_WEEKDAY
+) -> float:
+    """
+    Calculates actual calendar time-to-expiry in days (t_days) to the next weekly expiry.
+    Handles exact intraday time decay leading up to 15:30 IST market close on expiry days.
+    """
+    if timestamp is None:
+        now = datetime.now(IST)
+    elif isinstance(timestamp, str):
+        try:
+            now = pd.to_datetime(timestamp)
+            if now.tzinfo is None:
+                now = now.tz_localize(IST)
+            else:
+                now = now.tz_convert(IST)
+        except Exception:
+            now = datetime.now(IST)
+    elif hasattr(timestamp, "tzinfo"):
+        if timestamp.tzinfo is None:
+            now = timestamp.tz_localize(IST) if hasattr(timestamp, "tz_localize") else timestamp.replace(tzinfo=IST)
+        else:
+            now = timestamp.astimezone(IST) if hasattr(timestamp, "astimezone") else timestamp
+    else:
+        now = datetime.now(IST)
+
+    current_weekday = now.weekday()
+    hour_float = now.hour + (now.minute / 60.0) + (now.second / 3600.0)
+    market_close_hour = 15.5
+    
+    if current_weekday == expiry_weekday:
+        if hour_float < market_close_hour:
+            remaining_hours = max(market_close_hour - hour_float, 0.25)
+            t_days = max(round(remaining_hours / 24.0, 4), 0.02)
+        else:
+            t_days = 7.0 - ((hour_float - market_close_hour) / 24.0)
+    else:
+        days_ahead = (expiry_weekday - current_weekday) % 7
+        remaining_today = max(market_close_hour - hour_float, 0.0) / 24.0
+        t_days = max(round(days_ahead + remaining_today, 4), 0.05)
+        
+    return round(float(t_days), 4)
+
+
 def select_institutional_strike(
     spot: float,
-    is_call: bool,
+    is_call: bool = True,
     t_days: float = 4.0,
     iv: float = DEFAULT_IV,
     is_0dte_afternoon: bool = False
 ) -> Dict[str, Any]:
     """
     Selects optimal institutional strike (Vectorized):
-    - Normal regimes: Target Delta ~0.58 in [0.50, 0.65].
-    - 0DTE Expiry Thursday afternoon: Selects Deep ITM (Delta ~0.75-0.85) to avoid gamma cliff.
+    - Deep ITM (Delta ~0.70-0.85) to slash extrinsic decay to <20%.
+    - 0DTE Expiry afternoon: Selects Deep ITM (Delta ~0.80) to avoid gamma cliff.
     """
     atm_base = int(round(spot / 50.0) * 50)
-    candidate_offsets = np.array([0, -50, 50, -100, 100, -150, 150, -200, 200, -250, -300] if is_call else [0, 50, -50, 100, -100, 150, -150, 200, -200, 250, 300])
+    candidate_offsets = np.array(
+        [0, -50, 50, -100, 100, -150, 150, -200, 200, -250, 250, -300, 300, -350, 350, -400, 400]
+        if is_call else
+        [0, 50, -50, 100, -100, 150, -150, 200, -200, 250, -250, 300, -300, 350, -350, 400, -400]
+    )
     candidates = atm_base + candidate_offsets
     
-    target_delta = DELTA_DEEP_ITM_0DTE if is_0dte_afternoon else 0.58
+    target_delta = DELTA_DEEP_ITM_0DTE if is_0dte_afternoon else DELTA_TARGET
     min_delta = 0.70 if is_0dte_afternoon else DELTA_MIN
-    max_delta = 0.90 if is_0dte_afternoon else DELTA_MAX
+    max_delta = 0.92 if is_0dte_afternoon else DELTA_MAX
     
     # Vectorized evaluation of all candidates at once
     batch = black_scholes_greeks_batch(spot, candidates, t_days=t_days, sigma=iv, is_call=is_call)
@@ -1235,7 +1287,8 @@ def select_institutional_strike(
         diffs = np.abs(abs_deltas[valid_indices] - target_delta)
         best_idx = valid_indices[np.argmin(diffs)]
     else:
-        best_idx = 0
+        diffs = np.abs(abs_deltas - target_delta)
+        best_idx = int(np.argmin(diffs))
         
     best_strike = int(candidates[best_idx])
     best_greeks = black_scholes_greeks(spot, best_strike, t_days=t_days, sigma=iv, is_call=is_call)
@@ -1245,7 +1298,7 @@ def select_institutional_strike(
         "strike": best_strike,
         "option_type": opt_type,
         "symbol": f"NIFTY {best_strike} {opt_type}",
-        "regime_mode": "0DTE Deep ITM Synthetic" if is_0dte_afternoon else "Standard ATM/1-ITM",
+        "regime_mode": "0DTE Deep ITM Synthetic" if is_0dte_afternoon else "Deep ITM Synthetic",
         **best_greeks
     }
 
@@ -1379,6 +1432,7 @@ def generate_option_trade_ticket(
     delta = abs(strike_info["delta"])
     gamma = strike_info["gamma"]
     theta = strike_info["theta"]
+    vega = abs(float(strike_info.get("vega", 0.0)))
     entry_prem = strike_info["price"]
     k1 = strike_info["strike"]
     
@@ -1394,7 +1448,7 @@ def generate_option_trade_ticket(
     option_risk = max((spot_risk * delta) - convexity_benefit + theta_risk, 10.0)
     sl_prem = max(round(entry_prem - option_risk, 2), 5.0)
     
-    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds (Accounting for Theta Decay)
+    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds (Accounting for Theta Decay & Adverse Vega Crush)
     t1_p = float(getattr(signal, "target_1", 0.0))
     if t1_p > 1000.0 and abs(t1_p - spot) < 400.0:
         diff_t1 = abs(t1_p - spot)
@@ -1402,7 +1456,8 @@ def generate_option_trade_ticket(
         diff_t1 = 45.0  # Default 45 pts index T1 (+1.2x ATR)
         
     theta_decay_t1 = abs(theta) * 0.10
-    target1_prem = round(max(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)) - theta_decay_t1, entry_prem + 1.0), 2)
+    vega_decay_t1 = vega * (IV_ADVERSE_DRIFT_T1 * 100.0)
+    target1_prem = round(max(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)) - theta_decay_t1 - vega_decay_t1, entry_prem + 1.0), 2)
     
     t2_p = float(getattr(signal, "target_2", 0.0))
     if t2_p > 1000.0 and abs(t2_p - spot) < 600.0:
@@ -1411,7 +1466,8 @@ def generate_option_trade_ticket(
         diff_t2 = 90.0  # Default 90 pts index T2 (+2.5x ATR)
         
     theta_decay_t2 = abs(theta) * 0.20
-    target2_prem = round(max(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)) - theta_decay_t2, target1_prem + 1.0), 2)
+    vega_decay_t2 = vega * (IV_ADVERSE_DRIFT_T2 * 100.0)
+    target2_prem = round(max(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)) - theta_decay_t2 - vega_decay_t2, target1_prem + 1.0), 2)
     
     t3_p = float(getattr(signal, "target_3_moonshot", 0.0))
     if t3_p > 1000.0 and abs(t3_p - spot) < 800.0:
@@ -1420,7 +1476,8 @@ def generate_option_trade_ticket(
         diff_t3 = 140.0  # Default 140 pts index T3 (+3.8x ATR)
         
     theta_decay_t3 = abs(theta) * 0.35
-    target3_prem = round(max(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)) - theta_decay_t3, target2_prem + 1.0), 2)
+    vega_decay_t3 = vega * (IV_ADVERSE_DRIFT_T3 * 100.0)
+    target3_prem = round(max(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)) - theta_decay_t3 - vega_decay_t3, target2_prem + 1.0), 2)
     
     risk_pct_to_use = risk_pct_override if risk_pct_override is not None else MAX_RISK_PCT
     sizing = calculate_position_size(

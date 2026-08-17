@@ -140,3 +140,69 @@ def test_journal_summary_and_export(temp_journal):
     
     csv_bytes = temp_journal.export_csv_bytes()
     assert len(csv_bytes) > 50
+
+
+def test_drain_lifecycle_events(temp_journal):
+    sig_long = Signal(
+        SignalType.GAMMA_BREAKOUT_LONG, 24350.0, 24300.0, 24420.0, 24500.0, 24600.0, 24380.0,
+        "Gamma Breakout", True, 0.50, {"confluence_score": 85.0, "confluence_grade": "A+ Institutional"}
+    )
+    ticket_long = {
+        "status": "READY",
+        "symbol": "NIFTY 24350 CE",
+        "strike": 24350,
+        "option_type": "CE",
+        "entry_premium": 145.00,
+        "sl_premium": 112.50,
+        "target1_premium": 182.00,
+        "target2_premium": 228.00,
+        "target3_moonshot_premium": 285.00,
+        "lots": 2,
+        "total_qty": 50,
+        "actual_risk_rupees": 2500.0,
+    }
+    temp_journal.log_signal(sig_long, ticket_long, 24350.0, bar_timestamp="2026-08-14 09:20:00")
+    
+    # Check T1 trigger event
+    temp_journal.update_open_trades_lifecycle(current_spot=24425.0, current_high=24430.0, current_low=24340.0)
+    events = temp_journal.drain_lifecycle_events()
+    assert len(events) == 1
+    entry, evt_status, spot_val, prem_val = events[0]
+    assert evt_status == "T1_REACHED"
+    assert spot_val == 24430.0
+    assert prem_val == 182.00
+
+    # Draining again yields empty list
+    assert len(temp_journal.drain_lifecycle_events()) == 0
+
+
+def test_confluence_preservation_in_log_signal(temp_journal):
+    sig = Signal(
+        SignalType.LONG, 24500.0, 24450.0, 24580.0, 24650.0, 24750.0, 24520.0,
+        "Confluence Test", True, 0.50, {"confluence_score": 78.5, "confluence_grade": "A Standard"}
+    )
+    ticket = {
+        "status": "READY",
+        "symbol": "NIFTY 24500 CE",
+        "strike": 24500,
+        "option_type": "CE",
+        "entry_premium": 150.00,
+        "sl_premium": 120.00,
+        "target1_premium": 190.00,
+        "target2_premium": 230.00,
+        "target3_moonshot_premium": 290.00,
+        "lots": 2,
+        "total_qty": 50,
+        "actual_risk_rupees": 2000.0,
+    }
+    dummy_df = pd.DataFrame({
+        "open": [24480, 24490, 24500],
+        "high": [24490, 24510, 24520],
+        "low": [24470, 24480, 24490],
+        "close": [24485, 24500, 24515],
+        "volume": [1000, 1200, 1500]
+    })
+    entry = temp_journal.log_signal(sig, ticket, 24500.0, df_context=dummy_df)
+    assert entry is not None
+    assert entry.confluence_score == 78.5
+    assert entry.confluence_grade == "A Standard"

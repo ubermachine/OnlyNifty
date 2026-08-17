@@ -158,16 +158,16 @@ def compute_cumulative_oi_delta_and_traps(
         total_ce_oi_change += ce_chg
         total_pe_oi_change += pe_chg
         
-        # Prioritize strikes near or above spot for Call wall
-        if ce_oi > max_ce_oi and (k >= spot - 100):
+        # Prioritize strikes at or above spot for Call wall (Resistance)
+        if ce_oi > max_ce_oi and (k >= spot):
             max_ce_oi = ce_oi
             call_wall = k
         elif max_ce_oi < 0:
             max_ce_oi = ce_oi
             call_wall = k
             
-        # Prioritize strikes near or below spot for Put wall
-        if pe_oi > max_pe_oi and (k <= spot + 100):
+        # Prioritize strikes at or below spot for Put wall (Support)
+        if pe_oi > max_pe_oi and (k <= spot):
             max_pe_oi = pe_oi
             put_wall = k
         elif max_pe_oi < 0:
@@ -587,12 +587,21 @@ def compute_oi_based_range_forecast(
         max_pain_val = float(max_pain) if (max_pain is not None and max_pain > 0) else float(atm)
     else:
         # Support is strike with highest Put OI
-        max_pe_idx = clean_df["pe_oi"].idxmax()
-        put_wall = float(clean_df.loc[max_pe_idx, "strike"])
-        
-        # Resistance is strike with highest Call OI
-        max_ce_idx = clean_df["ce_oi"].idxmax()
-        call_wall = float(clean_df.loc[max_ce_idx, "strike"])
+        pe_sub = clean_df[clean_df["strike"] <= spot]
+        if not pe_sub.empty and pe_sub["pe_oi"].max() > 0:
+            max_pe_idx = pe_sub["pe_oi"].idxmax()
+            put_wall = float(pe_sub.loc[max_pe_idx, "strike"])
+        else:
+            max_pe_idx = clean_df["pe_oi"].idxmax()
+            put_wall = float(clean_df.loc[max_pe_idx, "strike"])
+            
+        ce_sub = clean_df[clean_df["strike"] >= spot]
+        if not ce_sub.empty and ce_sub["ce_oi"].max() > 0:
+            max_ce_idx = ce_sub["ce_oi"].idxmax()
+            call_wall = float(ce_sub.loc[max_ce_idx, "strike"])
+        else:
+            max_ce_idx = clean_df["ce_oi"].idxmax()
+            call_wall = float(clean_df.loc[max_ce_idx, "strike"])
         
         if max_pain is not None and float(max_pain) > 0:
             max_pain_val = float(max_pain)
@@ -607,15 +616,26 @@ def compute_oi_based_range_forecast(
 
     range_width = max(call_wall - put_wall, 1.0)
     raw_pct = ((spot - put_wall) / range_width) * 100.0
-    spot_position_pct = max(0.0, min(100.0, round(raw_pct, 1)))
+    spot_position_pct = round(raw_pct, 1)
 
-    if spot_position_pct <= 35.0:
+    if spot < put_wall - 25.0:
+        breach_status = "BROKEN_BELOW"
+        location_bias = "BREAKDOWN_BELOW_SUPPORT"
+        bias_desc = f"Spot (₹{spot:.0f}) has broken below Put Wall (₹{put_wall:.0f}). Momentum breakdown accelerating."
+    elif spot > call_wall + 25.0:
+        breach_status = "BROKEN_ABOVE"
+        location_bias = "BREAKOUT_ABOVE_RESISTANCE"
+        bias_desc = f"Spot (₹{spot:.0f}) has broken above Call Wall (₹{call_wall:.0f}). Momentum breakout accelerating."
+    elif spot_position_pct <= 35.0:
+        breach_status = "INSIDE"
         location_bias = "NEAR_SUPPORT_ACCUMULATION"
         bias_desc = f"Spot is near Put Wall support (₹{put_wall:.0f}). High probability of accumulation bounce."
     elif spot_position_pct >= 65.0:
+        breach_status = "INSIDE"
         location_bias = "NEAR_RESISTANCE_DISTRIBUTION"
         bias_desc = f"Spot is near Call Wall resistance (₹{call_wall:.0f}). Heavy overhead writing supply."
     else:
+        breach_status = "INSIDE"
         location_bias = "MID_RANGE_CONSOLIDATION"
         bias_desc = f"Spot is rangebound between ₹{put_wall:.0f} and ₹{call_wall:.0f} with Max Pain at ₹{max_pain_val:.0f}."
 
@@ -628,6 +648,7 @@ def compute_oi_based_range_forecast(
         "max_pain": round(float(max_pain_val), 2),
         "range_width_pts": round(float(range_width), 2),
         "spot_position_pct": spot_position_pct,
+        "breach_status": breach_status,
         "location_bias": location_bias,
         "expected_corridor": (round(float(put_wall), 2), round(float(call_wall), 2)),
         "bias_description": bias_desc

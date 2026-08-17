@@ -50,7 +50,7 @@ from src.options_engine import (
     evaluate_golden_vault_lock, run_monte_carlo_simulation, compute_0dte_gamma_scalp_parameters,
     calculate_adaptive_tca_friction_multi_tier, compute_full_chain_gex_profile, construct_ratio_spread,
     generate_svi_smile_curve, construct_delta_neutral_iron_condor, calculate_dynamic_kelly,
-    construct_jade_lizard
+    construct_jade_lizard, calculate_time_to_expiry_days
 )
 from src.execution import OrderManager, slice_institutional_order
 from src.regime_switching import KalmanFilterTrendEstimator, MarkovRegimeSwitcher
@@ -665,11 +665,14 @@ if getattr(strategy_engine, '_last_lunch_lull', False):
 if signal and signal.details and "size_factor" in signal.details:
     effective_capital *= signal.details["size_factor"]
 
+t_days_live = calculate_time_to_expiry_days(df.index[-1] if not df.empty else None)
+
 ticket = generate_option_trade_ticket(
     current_spot,
     signal,
     effective_capital,
     drawdown_input,
+    t_days=t_days_live,
     iv=iv_input,
     is_0dte_afternoon=is_0dte_mode,
     current_intraday_pnl=session_risk.realized_pnl_today,
@@ -705,8 +708,26 @@ journal_engine.update_open_trades_lifecycle(
     current_low=float(df.iloc[-1]["low"]),
     bar_time_str=last_bar_time_str
 )
+
+# Dispatch asynchronous Telegram alerts for live trade lifecycle transitions (T1, T2, T3, SL, Squareoff)
+tg_notifier = TelegramNotifier.get_instance()
+tg_token = st.session_state.get("tg_bot_token", TELEGRAM_BOT_TOKEN)
+tg_cid = st.session_state.get("tg_chat_id", TELEGRAM_CHAT_ID)
+if hasattr(journal_engine, "drain_lifecycle_events"):
+    for lc_entry, lc_status, lc_spot, lc_prem in journal_engine.drain_lifecycle_events():
+        if not getattr(lc_entry, "is_seed", False):
+            tg_notifier.dispatch_lifecycle_alert(
+                entry=lc_entry,
+                status_event=lc_status,
+                current_spot=lc_spot,
+                current_prem=lc_prem,
+                bot_token=tg_token,
+                chat_id=tg_cid,
+                blocking=False
+            )
+
 last_bar_ts = df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
-journal_engine.log_signal(
+logged_entry = journal_engine.log_signal(
     signal=signal,
     ticket=ticket,
     current_spot=current_spot,
@@ -720,17 +741,16 @@ journal_engine.log_signal(
     gex_data=gex_data,
     vol_profile=vol_profile,
     df_context=df,
-    is_0dte=is_0dte_mode
+    is_0dte=is_0dte_mode,
+    options_context=options_context
 )
 
-# Dispatch asynchronous Telegram alert for actionable signals
-tg_notifier = TelegramNotifier.get_instance()
-if journal_engine.entries:
-    latest_entry = journal_engine.entries[-1]
+# Dispatch asynchronous Telegram alert ONLY for freshly logged actionable signals
+if logged_entry is not None and getattr(logged_entry, "direction", "WAIT") in ["LONG", "SHORT"]:
     tg_notifier.dispatch_signal_alert(
-        entry=latest_entry,
-        bot_token=st.session_state.get("tg_bot_token", TELEGRAM_BOT_TOKEN),
-        chat_id=st.session_state.get("tg_chat_id", TELEGRAM_CHAT_ID),
+        entry=logged_entry,
+        bot_token=tg_token,
+        chat_id=tg_cid,
         blocking=False
     )
 
@@ -1736,7 +1756,7 @@ with tab_sizer:
             "sl_premium": calc_sl
         }]
         
-    port_greeks = port_risk_mgr.compute_portfolio_greeks(active_sigs, spot=current_spot, iv=iv_input, t_days=3.5)
+    port_greeks = port_risk_mgr.compute_portfolio_greeks(active_sigs, spot=current_spot, iv=iv_input, t_days=t_days_live)
     
     # 4 Portfolio Greeks KPI Cards
     pg1, pg2, pg3, pg4 = st.columns(4)
@@ -1746,7 +1766,7 @@ with tab_sizer:
     pg4.metric("Net Vega (ν)", f"₹{port_greeks['net_vega_rupees']:+,.1f}/1%", f"Vanna: {port_greeks['net_vanna']:+.4f}")
     
     # Scenario Grid
-    scenario_res = port_risk_mgr.compute_scenario_pnl_grid(active_sigs, spot=current_spot, iv=iv_input, t_days=3.5)
+    scenario_res = port_risk_mgr.compute_scenario_pnl_grid(active_sigs, spot=current_spot, iv=iv_input, t_days=t_days_live)
     df_scen = scenario_res["scenario_dataframe"]
     
     scen_c1, scen_c2 = st.columns([1.2, 1.0])
@@ -2000,7 +2020,7 @@ with tab_oi:
         st.markdown("#### 🔥 Strike-Level Institutional OI Change Heatmap & Dealer Gamma Exposure (GEX)")
         
         oi_hm_res = compute_oi_change_heatmap(oc_filtered, spot=current_spot, range_pts=500.0)
-        gex_chart_res = compute_strike_level_gex_chart_data(oc_filtered, spot=current_spot, iv=iv_input, t_days=3.5)
+        gex_chart_res = compute_strike_level_gex_chart_data(oc_filtered, spot=current_spot, iv=iv_input, t_days=t_days_live)
         range_fc_res = compute_oi_based_range_forecast(oc_filtered, spot=current_spot, max_pain=pcr_analytics['max_pain_strike'])
         
         # Expected Range Corridor Banner
@@ -2119,17 +2139,17 @@ with tab_oi:
             valid_cols = [c for c in display_cols if c in oc_view.columns]
             st.dataframe(oc_view[valid_cols], hide_index=True, width="stretch")
     else:
-        st.subheader("🔍 Institutional Strike Ladder & 2nd-Order Greeks Matrix (Delta 0.50 – 0.65)")
+        st.subheader("🔍 Institutional Strike Ladder & 2nd-Order Greeks Matrix (Deep ITM Synthetic Delta 0.65 – 0.85)")
         atm_center = int(round(current_spot / 50.0) * 50)
         chain_rows = []
         
-        for k in range(atm_center - 200, atm_center + 250, 50):
-            ce_greeks = black_scholes_greeks(current_spot, k, t_days=4.0, sigma=iv_input, is_call=True)
-            pe_greeks = black_scholes_greeks(current_spot, k, t_days=4.0, sigma=iv_input, is_call=False)
+        for k in range(atm_center - 300, atm_center + 350, 50):
+            ce_greeks = black_scholes_greeks(current_spot, k, t_days=t_days_live, sigma=iv_input, is_call=True)
+            pe_greeks = black_scholes_greeks(current_spot, k, t_days=t_days_live, sigma=iv_input, is_call=False)
             
             is_atm = (k == atm_center)
-            ce_rec = "👉 PRO CALL" if (0.50 <= ce_greeks["delta"] <= 0.65) else ""
-            pe_rec = "👉 PRO PUT" if (0.50 <= abs(pe_greeks["delta"]) <= 0.65) else ""
+            ce_rec = "👉 PRO CALL" if (0.65 <= ce_greeks["delta"] <= 0.85) else ""
+            pe_rec = "👉 PRO PUT" if (0.65 <= abs(pe_greeks["delta"]) <= 0.85) else ""
             
             chain_rows.append({
                 "Call Setup": ce_rec,
@@ -2191,7 +2211,7 @@ with tab_backtest:
         
         # Delta-Neutral Iron Condor Structurer for Chop Regimes
         with st.expander("🦅 Delta-Neutral 4-Leg Iron Condor Structurer (For Range-Bound / Chop Days)", expanded=False):
-            ic_res = construct_delta_neutral_iron_condor(current_spot, wing_width=150, short_offset=100, t_days=3.5, iv=iv_input)
+            ic_res = construct_delta_neutral_iron_condor(current_spot, wing_width=150, short_offset=100, t_days=t_days_live, iv=iv_input)
             
             ic_c1, ic_c2, ic_c3, ic_c4 = st.columns(4)
             ic_c1.metric("Net Credit Collected", f"₹{ic_res['total_net_credit_pts']:.2f} pts", "Max Profit")

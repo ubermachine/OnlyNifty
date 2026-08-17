@@ -35,7 +35,7 @@ def sample_signal_entry():
         target_3_premium=295.0,
         r_multiple_t1=1.25,
         r_multiple_t2=2.60,
-        confluence_score=0.90,
+        confluence_score=90.0,
         confluence_grade="A+ Institutional",
         regime_summary="TREND_EXPANSION",
         kalman_velocity=1.85,
@@ -114,3 +114,63 @@ def test_dispatch_signal_mocked_success(mock_urlopen, sample_signal_entry):
         blocking=True
     )
     assert res is True
+
+
+def test_confluence_floor_filtering(sample_signal_entry):
+    notifier = TelegramNotifier.get_instance()
+    notifier._sent_set.clear()
+    notifier._sent_keys.clear()
+
+    # Sub-70 score on 0-100 scale should be filtered
+    sample_signal_entry.confluence_score = 38.0
+    res_low = notifier.dispatch_signal_alert(
+        sample_signal_entry,
+        bot_token="123456:ABC-DEF",
+        chat_id="987654321",
+        blocking=True
+    )
+    assert res_low is False
+
+    # Sub-70 score on legacy 0-1 scale (0.50 -> 50.0) should also be filtered
+    sample_signal_entry.confluence_score = 0.50
+    res_legacy_low = notifier.dispatch_signal_alert(
+        sample_signal_entry,
+        bot_token="123456:ABC-DEF",
+        chat_id="987654321",
+        blocking=True
+    )
+    assert res_legacy_low is False
+
+
+@patch("urllib.request.urlopen")
+def test_dispatch_lifecycle_alert_mocked(mock_urlopen, sample_signal_entry):
+    notifier = TelegramNotifier.get_instance()
+    notifier._sent_set.clear()
+    notifier._sent_keys.clear()
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = b'{"ok": true, "result": {"message_id": 1002}}'
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    res = notifier.dispatch_lifecycle_alert(
+        sample_signal_entry,
+        status_event="T1_REACHED",
+        current_spot=24570.0,
+        current_prem=182.0,
+        bot_token="123456:ABC-DEF",
+        chat_id="987654321",
+        blocking=True
+    )
+    assert res is True
+
+    # Duplicate lifecycle event for same signal and status should be suppressed
+    res_dup = notifier.dispatch_lifecycle_alert(
+        sample_signal_entry,
+        status_event="T1_REACHED",
+        current_spot=24575.0,
+        current_prem=185.0,
+        bot_token="123456:ABC-DEF",
+        chat_id="987654321",
+        blocking=True
+    )
+    assert res_dup is False

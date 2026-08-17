@@ -5,7 +5,7 @@ import pandas as pd
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA, VAKC_ATR_SPAN,
     HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
-    VPIN_TOXICITY_THRESHOLD
+    VPIN_TOXICITY_THRESHOLD, LINE_BREAK_COUNT, LINE_BREAK_EMA_PERIODS
 )
 
 def compute_ema(series: pd.Series, period: int) -> pd.Series:
@@ -753,6 +753,176 @@ def _resample_ohlcv_if_needed(df_source: pd.DataFrame, freq: str, bar_multiplier
     })
 
 
+def compute_line_break(
+    df: pd.DataFrame,
+    lines: int = LINE_BREAK_COUNT,
+    price_col: str = "close"
+) -> pd.DataFrame:
+    """
+    Computes causal, strictly non-repainting N-Line Break blocks.
+    
+    Mathematical & Algorithmic Specification:
+    - State is a sequential list of formed blocks: (low_b, high_b, dir_b).
+    - Blocks are price events, not time bars; most bars produce no new block.
+    - Seeding: hold the first close as reference c0; the first block forms on the first close != c0.
+    - Continuation:
+        If current direction is UP (+1) and close > high_b:
+            forms new UP block (high_b, close, +1).
+        If current direction is DOWN (-1) and close < low_b:
+            forms new DOWN block (close, low_b, -1).
+    - Asymmetric Reversal:
+        Reversal requires close to breach the extreme of the last N blocks:
+            rev_up = max(high of blocks in window of last N blocks)
+            rev_dn = min(low of blocks in window of last N blocks)
+        If current direction is UP (+1) and close < rev_dn:
+            forms new DOWN reversal block (close, rev_dn, -1).
+        If current direction is DOWN (-1) and close > rev_up:
+            forms new UP reversal block (rev_up, close, +1).
+    - Causal / Prefix-Stable Invariant:
+        Row i depends strictly on close[0..i]. State at row i-1 is identical whether
+        computed on df[:i] or full df.
+    """
+    if df.empty or price_col not in df.columns:
+        return pd.DataFrame(index=df.index, columns=[
+            "lb_direction", "lb_high", "lb_low", "lb_reversal_up",
+            "lb_reversal_dn", "lb_blocks_count", "lb_flipped"
+        ])
+
+    closes = df[price_col].values.astype(float)
+    n = len(closes)
+
+    lb_dir = np.zeros(n, dtype=int)
+    lb_high = np.zeros(n, dtype=float)
+    lb_low = np.zeros(n, dtype=float)
+    lb_rev_up = np.zeros(n, dtype=float)
+    lb_rev_dn = np.zeros(n, dtype=float)
+    lb_count = np.zeros(n, dtype=int)
+    lb_flip = np.zeros(n, dtype=bool)
+
+    blocks: List[Tuple[float, float, int]] = []
+    c0 = closes[0]
+
+    for i in range(n):
+        c = closes[i]
+        flipped = False
+
+        if not blocks:
+            if c > c0:
+                blocks.append((c0, c, 1))
+            elif c < c0:
+                blocks.append((c, c0, -1))
+            else:
+                lb_dir[i] = 0
+                lb_high[i] = c0
+                lb_low[i] = c0
+                lb_rev_up[i] = c0
+                lb_rev_dn[i] = c0
+                lb_count[i] = 0
+                lb_flip[i] = False
+                continue
+
+        low_b, high_b, dir_b = blocks[-1]
+        w_blocks = blocks[-lines:]
+        rev_up = max(b[1] for b in w_blocks)
+        rev_dn = min(b[0] for b in w_blocks)
+
+        if dir_b == 1:
+            if c > high_b:
+                blocks.append((high_b, c, 1))
+                low_b, high_b, dir_b = blocks[-1]
+            elif c < rev_dn:
+                blocks.append((c, rev_dn, -1))
+                low_b, high_b, dir_b = blocks[-1]
+                flipped = True
+        elif dir_b == -1:
+            if c < low_b:
+                blocks.append((c, low_b, -1))
+                low_b, high_b, dir_b = blocks[-1]
+            elif c > rev_up:
+                blocks.append((rev_up, c, 1))
+                low_b, high_b, dir_b = blocks[-1]
+                flipped = True
+
+        w_blocks = blocks[-lines:]
+        curr_rev_up = max(b[1] for b in w_blocks)
+        curr_rev_dn = min(b[0] for b in w_blocks)
+
+        lb_dir[i] = dir_b
+        lb_high[i] = high_b
+        lb_low[i] = low_b
+        lb_rev_up[i] = curr_rev_up
+        lb_rev_dn[i] = curr_rev_dn
+        lb_count[i] = len(blocks)
+        lb_flip[i] = flipped
+
+    return pd.DataFrame({
+        "lb_direction": lb_dir,
+        "lb_high": lb_high,
+        "lb_low": lb_low,
+        "lb_reversal_up": lb_rev_up,
+        "lb_reversal_dn": lb_rev_dn,
+        "lb_blocks_count": lb_count,
+        "lb_flipped": lb_flip
+    }, index=df.index)
+
+
+def compute_line_break_trend(
+    df: pd.DataFrame,
+    lines: int = LINE_BREAK_COUNT,
+    ema_periods: Tuple[int, int, int] = LINE_BREAK_EMA_PERIODS,
+    price_col: str = "close"
+) -> pd.DataFrame:
+    """
+    Synthesizes 6-Line Break direction with monotonic EMA(15, 20, 50) stack.
+    
+    Rules:
+    - Bullish Stack: close >= ema15 >= ema20 >= ema50
+    - Bearish Stack: close <= ema15 <= ema20 <= ema50
+    - Combined Bias:
+        'BULLISH' if lb_direction == +1 and Bullish Stack
+        'BEARISH' if lb_direction == -1 and Bearish Stack
+        'NEUTRAL' on any disagreement (chop suppression)
+    """
+    if df.empty or price_col not in df.columns:
+        return pd.DataFrame(index=df.index, columns=[
+            "lb_bias", "lb_direction", "ema_stack_bullish", "ema_stack_bearish"
+        ])
+
+    lb_df = compute_line_break(df, lines=lines, price_col=price_col)
+    
+    p1, p2, p3 = ema_periods
+    ema1 = compute_ema(df[price_col], min(p1, max(len(df), 2)))
+    ema2 = compute_ema(df[price_col], min(p2, max(len(df), 2)))
+    ema3 = compute_ema(df[price_col], min(p3, max(len(df), 2)))
+    c = df[price_col]
+
+    stack_bull = (c >= ema1) & (ema1 >= ema2) & (ema2 >= ema3)
+    stack_bear = (c <= ema1) & (ema1 <= ema2) & (ema2 <= ema3)
+
+    biases = []
+    dirs = lb_df["lb_direction"].values
+    s_bull = stack_bull.values
+    s_bear = stack_bear.values
+
+    for i in range(len(df)):
+        d = dirs[i]
+        b = s_bull[i]
+        be = s_bear[i]
+
+        if d == 1 and b:
+            biases.append("BULLISH")
+        elif d == -1 and be:
+            biases.append("BEARISH")
+        else:
+            biases.append("NEUTRAL")
+
+    res = lb_df.copy()
+    res["ema_stack_bullish"] = stack_bull
+    res["ema_stack_bearish"] = stack_bear
+    res["lb_bias"] = biases
+    return res
+
+
 def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, Any]:
     """Evaluates EMA200, EMA55, EMA21, AVWAP, and Hurst Exponent for a single timeframe."""
     if df_tf.empty or len(df_tf) < 1:
@@ -811,6 +981,13 @@ def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, A
         bias = "NEUTRAL_BEARISH"
     else:
         bias = "NEUTRAL"
+
+    lb_trend_df = compute_line_break_trend(df_tf)
+    lb_bias = "NEUTRAL"
+    lb_direction = 0
+    if not lb_trend_df.empty:
+        lb_bias = str(lb_trend_df["lb_bias"].iloc[-1])
+        lb_direction = int(lb_trend_df["lb_direction"].iloc[-1])
         
     return {
         "tf": tf_name,
@@ -823,7 +1000,9 @@ def _evaluate_single_tf_regime(df_tf: pd.DataFrame, tf_name: str) -> Dict[str, A
         "hurst": round(hurst_val, 4),
         "is_trending": is_trending,
         "ema_slope": round(ema_slope * 1000.0, 4),
-        "summary": f"{tf_name}: {bias} | C={close:.2f}, EMA200={ema200:.2f}, AVWAP={vwap:.2f}, H={hurst_val:.2f}"
+        "lb_bias": lb_bias,
+        "lb_direction": lb_direction,
+        "summary": f"{tf_name}: {bias} | C={close:.2f}, EMA200={ema200:.2f}, AVWAP={vwap:.2f}, H={hurst_val:.2f}, LB={lb_bias}"
     }
 
 

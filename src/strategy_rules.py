@@ -295,11 +295,11 @@ class StrategyEngine:
         if gex_info.get("is_positive_gamma", False):
             call_wall = float(gex_info.get("call_wall_strike", 999999.0))
             put_wall = float(gex_info.get("put_wall_strike", 0.0))
-            if candidate_direction == "LONG" and close >= call_wall - GEX_WALL_BUFFER_PTS:
+            if candidate_direction == "LONG" and (call_wall - GEX_WALL_BUFFER_PTS <= close <= call_wall + GEX_WALL_BUFFER_PTS):
                 audit["passed"] = False
                 audit["veto_gate"] = "GEX_CALL_WALL_PIN"
                 return False, f"Dealer GEX Pin Veto: Long blocked. Spot at Call Wall ({call_wall:.0f}) in Positive Gamma regime.", audit
-            elif candidate_direction == "SHORT" and close <= put_wall + GEX_WALL_BUFFER_PTS:
+            elif candidate_direction == "SHORT" and (put_wall - GEX_WALL_BUFFER_PTS <= close <= put_wall + GEX_WALL_BUFFER_PTS):
                 audit["passed"] = False
                 audit["veto_gate"] = "GEX_PUT_WALL_PIN"
                 return False, f"Dealer GEX Pin Veto: Short blocked. Spot at Put Wall ({put_wall:.0f}) in Positive Gamma regime.", audit

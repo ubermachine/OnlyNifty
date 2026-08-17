@@ -1,4 +1,4 @@
-"""JustNifty v3.0 Tier-1 Institutional Hedge Fund Configuration Constants."""
+from typing import Tuple
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -34,6 +34,10 @@ EMA_MID: int = 55                       # Intermediate trend filter EMA
 EMA_SLOW: int = 200                     # Primary market regime filter EMA
 ENVELOPE_PCT: float = 0.015             # 1.5% 200 EMA extreme band fallback
 
+# 2b. 6-Line Break & Monotonic EMA Stack Trend Engine
+LINE_BREAK_COUNT: int = 6               # 6-Block price reversal threshold (asymmetric trend confirmation)
+LINE_BREAK_EMA_PERIODS: Tuple[int, int, int] = (15, 20, 50)  # Monotonic EMA filter stack
+
 # 3. Volume-Weighted Fibonacci Golden Pocket
 FIB_GOLDEN_MIN: float = 0.50            # 50.0% Retracement boundary
 FIB_GOLDEN_MAX: float = 0.618           # 61.8% Retracement boundary
@@ -46,12 +50,18 @@ OFI_ZSCORE_MIN: float = 0.65            # Minimum rolling Z-score OFI required t
 VPIN_TOXICITY_THRESHOLD: float = 0.75   # Volume-Synchronized Probability of Informed Trading limit (0.75 institutional consensus)
 
 # ----------------- DERIVATIVES & SECOND-ORDER GREEKS -----------------
-DELTA_MIN: float = 0.50                 # Minimum Delta for ATM / 1-ITM directional options
-DELTA_MAX: float = 0.65                 # Maximum Delta for institutional directional buying
-DELTA_DEEP_ITM_0DTE: float = 0.78       # Target Delta on Thursday 0DTE after 12:30 (Deep ITM Synthetic)
+DELTA_MIN: float = 0.65                 # Minimum Delta for Deep ITM directional options (cuts extrinsic decay)
+DELTA_MAX: float = 0.85                 # Maximum Delta for institutional directional buying
+DELTA_TARGET: float = 0.75              # Target institutional execution Delta
+DELTA_DEEP_ITM_0DTE: float = 0.80       # Target Delta on 0DTE after 12:30 (Deep ITM Synthetic)
 RISK_FREE_RATE: float = 0.065           # 6.5% RBI reference repo rate
 DEFAULT_IV: float = 0.12                # 12.0% India VIX / IV baseline
 PUT_SKEW_PREMIUM: float = 0.025         # +250 bps structural downside put skew (PRICING ONLY — never applied to gamma, see below)
+
+# Adverse IV drift penalties in target projections (Vega crush modeling)
+IV_ADVERSE_DRIFT_T1: float = 0.015      # -1.5 vol pts IV crush at Target 1
+IV_ADVERSE_DRIFT_T2: float = 0.020      # -2.0 vol pts IV crush at Target 2
+IV_ADVERSE_DRIFT_T3: float = 0.025      # -2.5 vol pts IV crush at Target 3
 
 # NSE has revised the Nifty weekly expiry day more than once (historically Thursday,
 # later moved to Tuesday). VERIFY THIS AGAINST THE CURRENT NSE CIRCULAR before trading —
@@ -105,7 +115,7 @@ TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_PARSE_MODE: str = "HTML"
 TELEGRAM_TIMEOUT_SECONDS: float = 5.0
-TELEGRAM_MIN_CONFLUENCE_SCORE: float = 0.70  # Standard Grade alert floor (>=85% is A+ Institutional)
+TELEGRAM_MIN_CONFLUENCE_SCORE: float = 70.0  # Standard Grade alert floor (>=85% is A+ Institutional)
 
 # ----------------- QUANTITATIVE MICROSTRUCTURE & SKEW (v5.2) -----------------
 SKEW_ZSCORE_THRESHOLD: float = 1.50         # Z-Score boundary for 25-Delta Put Skew spikes (Crash Risk Gate)

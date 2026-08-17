@@ -15,6 +15,7 @@ import os
 import json
 import uuid
 import hashlib
+import threading
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict, field
@@ -300,6 +301,8 @@ class LiveSignalJournal:
         self.persistence_file = persistence_file
         self.entries: List[SignalEntry] = []
         self._last_hash: str = "GENESIS_ROOT_HASH_0000000000000000"
+        self._pending_lifecycle_events: List[Tuple[SignalEntry, str, float, float]] = []
+        self._lifecycle_lock = threading.Lock()
         self.reload_from_disk()
 
     def reload_from_disk(self) -> None:
@@ -334,7 +337,8 @@ class LiveSignalJournal:
         setup_id: str = "",
         structure_epoch: str = "",
         gate_audit: Optional[Dict[str, Any]] = None,
-        evidence: Optional[Dict[str, Any]] = None
+        evidence: Optional[Dict[str, Any]] = None,
+        options_context: Optional[Dict[str, Any]] = None
     ) -> Optional[SignalEntry]:
         """Logs a generated signal with deduplication and state-transition filtering."""
         now = datetime.now(timezone.utc)
@@ -377,13 +381,21 @@ class LiveSignalJournal:
         opt_type = ticket.get("option_type", "CE" if direction == "LONG" else ("PE" if direction == "SHORT" else "N/A"))
         symbol = ticket.get("symbol", f"NIFTY {strike} {opt_type}" if is_actionable else "N/A")
 
-        # Compute Confluence
-        if df_context is not None and not df_context.empty:
+        # Compute / Preserve Confluence Score
+        # Prefer the score computed at decision time to ensure 100% parity with Desk Verdict
+        if signal and signal.details and "confluence_score" in signal.details:
+            c_score = float(signal.details["confluence_score"])
+            c_grade = str(signal.details.get("confluence_grade", "A Standard"))
+        elif confluence_score is not None and confluence_score > 1.0:
+            c_score = round(float(confluence_score), 1)
+            c_grade = "A+ Institutional" if c_score >= 85.0 else ("A Standard" if c_score >= 70.0 else ("B Tactical" if c_score >= 55.0 else "C Weak / Vetoed"))
+        elif df_context is not None and not df_context.empty:
             c_score, c_grade = calculate_confluence_score(
-                signal, df_context, htf_data, kalman_vel, kalman_z, regime_info, ofi_data, gex_data, vol_profile
+                signal, df_context, htf_data, kalman_vel, kalman_z, regime_info, ofi_data, gex_data, vol_profile, options_context=options_context
             )
         else:
-            c_score, c_grade = (round(confluence_score * 100, 1), "A Standard") if confluence_score <= 1.0 else (round(confluence_score, 1), "A+ Institutional")
+            c_score = round(confluence_score * 100.0, 1) if (confluence_score is not None and 0.0 < confluence_score <= 1.0) else (float(confluence_score) if confluence_score is not None else 0.0)
+            c_grade = "A+ Institutional" if c_score >= 85.0 else ("A Standard" if c_score >= 70.0 else ("B Tactical" if c_score >= 55.0 else "C Weak / Vetoed"))
 
         entry_prem = float(ticket.get("entry_premium", 140.0 if is_actionable else 0.0))
         sl_prem = float(ticket.get("sl_premium", 110.0 if is_actionable else 0.0))
@@ -518,6 +530,8 @@ class LiveSignalJournal:
                 entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                 entry.notes += f" | 15:15 IST Mandatory Squareoff @ {squared_r:+.2f}R."
                 updates_count += 1
+                with self._lifecycle_lock:
+                    self._pending_lifecycle_events.append((entry, "SQUARED_OFF", current_spot, float(getattr(entry, "exit_premium", 0.0))))
                 continue
 
             if direction == "LONG":
@@ -530,6 +544,8 @@ class LiveSignalJournal:
                         entry.exit_premium = entry.entry_premium
                         entry.notes += f" | Breakeven SL hit on remaining 50%."
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.entry_premium))
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.realized_r_multiple = -1.0
@@ -539,6 +555,8 @@ class LiveSignalJournal:
                         entry.exit_spot = sl_spot
                         entry.exit_premium = entry.sl_premium
                         entry.notes += f" | SL Hit @ ₹{current_low:.1f}"
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
                     updates_count += 1
                 elif current_high >= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
@@ -551,6 +569,8 @@ class LiveSignalJournal:
                     entry.exit_spot = t3_spot
                     entry.exit_premium = entry.target_3_premium
                     entry.notes += f" | T3 Moonshot Hit @ ₹{current_high:.1f}"
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
                     updates_count += 1
                 elif current_high >= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
@@ -561,6 +581,8 @@ class LiveSignalJournal:
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
                     entry.notes += f" | T2 Hit @ ₹{current_high:.1f}. Trailed SL to T1."
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_high, entry.target_2_premium))
                     updates_count += 1
                 elif current_high >= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
@@ -569,6 +591,8 @@ class LiveSignalJournal:
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price  # Trail SL to Breakeven
                     entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_high, entry.target_1_premium))
                     updates_count += 1
 
             elif direction == "SHORT":
@@ -580,6 +604,8 @@ class LiveSignalJournal:
                         entry.exit_premium = entry.entry_premium
                         entry.notes += f" | Breakeven SL hit on remaining 50%."
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.entry_premium))
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.realized_r_multiple = -1.0
@@ -589,6 +615,8 @@ class LiveSignalJournal:
                         entry.exit_spot = sl_spot
                         entry.exit_premium = entry.sl_premium
                         entry.notes += f" | SL Hit @ ₹{current_high:.1f}"
+                        with self._lifecycle_lock:
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
                     updates_count += 1
                 elif current_low <= t3_spot and t3_spot > 0:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
@@ -601,6 +629,8 @@ class LiveSignalJournal:
                     entry.exit_spot = t3_spot
                     entry.exit_premium = entry.target_3_premium
                     entry.notes += f" | T3 Moonshot Hit @ ₹{current_low:.1f}"
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
                     updates_count += 1
                 elif current_low <= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
@@ -611,6 +641,8 @@ class LiveSignalJournal:
                     entry.exit_spot = t2_spot
                     entry.exit_premium = entry.target_2_premium
                     entry.notes += f" | T2 Hit @ ₹{current_low:.1f}. Trailed SL to T1."
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_low, entry.target_2_premium))
                     updates_count += 1
                 elif current_low <= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
@@ -619,12 +651,24 @@ class LiveSignalJournal:
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price
                     entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_low, entry.target_1_premium))
                     updates_count += 1
 
         if updates_count > 0:
             self._persist_to_disk()
 
         return updates_count
+
+    def drain_lifecycle_events(self) -> List[Tuple[SignalEntry, str, float, float]]:
+        """
+        Drains and returns all queued lifecycle transition events since the last call.
+        Each event is a tuple of (entry, status_event, current_spot, current_premium).
+        """
+        with self._lifecycle_lock:
+            events = list(self._pending_lifecycle_events)
+            self._pending_lifecycle_events.clear()
+            return events
 
     def seed_from_intraday_history(
         self,
@@ -705,7 +749,11 @@ class LiveSignalJournal:
                 current_low=float(df.iloc[-1]["low"]),
                 bar_time_str=final_t_str
             )
-            
+
+        # Clear historical replay lifecycle events so seeding does not trigger live alerts
+        with self._lifecycle_lock:
+            self._pending_lifecycle_events.clear()
+
         return seeded_count
 
     def get_journal_dataframe(self, actionable_only: bool = False) -> pd.DataFrame:

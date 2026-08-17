@@ -85,10 +85,11 @@ def _desk_only_candidate_direction(
             is_crisis = bool(ts.get("is_crisis", False))
 
     if desk_state.is_positive_gamma:
-        if (not is_crisis and spot <= put_wall + WALL_BUFFER_PTS
+        # Range fade at wall boundary: spot must be within WALL_BUFFER_PTS of the wall, NOT far broken through
+        if (not is_crisis and abs(spot - put_wall) <= WALL_BUFFER_PTS
                 and (d_vector >= 0.2 or desk_state.pcr_zscore >= PCR_Z_CONTRARIAN_THRESHOLD)):
             return "LONG"
-        if (spot >= call_wall - WALL_BUFFER_PTS
+        if (abs(spot - call_wall) <= WALL_BUFFER_PTS
                 and (d_vector <= -0.2 or desk_state.pcr_zscore <= -PCR_Z_CONTRARIAN_THRESHOLD)):
             return "SHORT"
     else:
@@ -406,9 +407,9 @@ def build_desk_verdict(
         trend_bias = "NEUTRAL"
         data_quality = "POSITIONING_UNVERIFIED"
 
-    # Spot position % inside corridor
+    # Spot position % inside corridor (signed unclamped)
     corridor_width = max(call_wall - put_wall, 10.0)
-    spot_pos_pct = round(max(0.0, min(100.0, ((spot - put_wall) / corridor_width) * 100.0)), 1)
+    spot_pos_pct = round(((spot - put_wall) / corridor_width) * 100.0, 1)
     range_corridor = (put_wall, call_wall)
 
     # 2. Gate Audit Extraction from Signal
@@ -447,10 +448,10 @@ def build_desk_verdict(
         elif intended_short and d_vector >= POSITIONING_VETO_STRENGTH:
             conflicts.append(f"POSITIONING_OPPOSES_CHART: Short vs Bullish Options Flow (D={d_vector:+.2f})")
 
-        # Wall fading into positive gamma
-        if intended_long and desk_state.is_positive_gamma and spot >= call_wall - WALL_BUFFER_PTS:
+        # Wall fading into positive gamma: only block when approaching or testing the wall from INSIDE
+        if intended_long and desk_state.is_positive_gamma and (call_wall - WALL_BUFFER_PTS <= spot <= call_wall + WALL_BUFFER_PTS):
             conflicts.append(f"GEX_CALL_WALL_BLOCK: Long near Call Wall ({call_wall:.0f}) in positive gamma (+Γ).")
-        elif intended_short and desk_state.is_positive_gamma and spot <= put_wall + WALL_BUFFER_PTS:
+        elif intended_short and desk_state.is_positive_gamma and (put_wall - WALL_BUFFER_PTS <= spot <= put_wall + WALL_BUFFER_PTS):
             conflicts.append(f"GEX_PUT_WALL_BLOCK: Short near Put Wall ({put_wall:.0f}) in positive gamma (+Γ).")
 
     # Smart Money Institutional Flow Conflicts
@@ -473,6 +474,18 @@ def build_desk_verdict(
             if intended_long:
                 conflicts.append(f"TERM_STRUCTURE_CRISIS: IV backwardation detected. Long trades carry extreme risk.")
 
+    # 6-Line Break + Monotonic EMA Stack Structural Conflict
+    lb_bias = "NEUTRAL"
+    if htf_data and "tf_5m" in htf_data and isinstance(htf_data["tf_5m"], dict):
+        lb_bias = htf_data["tf_5m"].get("lb_bias", "NEUTRAL")
+    elif htf_data and "tf_15m" in htf_data and isinstance(htf_data["tf_15m"], dict):
+        lb_bias = htf_data["tf_15m"].get("lb_bias", "NEUTRAL")
+        
+    if intended_long and lb_bias == "BEARISH":
+        conflicts.append("LINE_BREAK_OPPOSES: Long opposes 6-Line Break & EMA (15/20/50) Bearish Trend.")
+    elif intended_short and lb_bias == "BULLISH":
+        conflicts.append("LINE_BREAK_OPPOSES: Short opposes 6-Line Break & EMA (15/20/50) Bullish Trend.")
+
     vrp_val = None
     if options_context and "vrp" in options_context:
         vrp_val = options_context["vrp"]
@@ -490,19 +503,22 @@ def build_desk_verdict(
     # that score was reported on the verdict and never consulted when picking a side.
     # If the independent evidence nets meaningfully AGAINST the direction, that is a
     # disagreement worth naming — the same standing as a positioning or flow conflict.
-    _pre_votes, _, _pre_direction = compute_evidence_families(
-        desk_state=desk_state, htf_data=htf_data, regime_state=regime_state,
-        vol_report=vol_report, options_context=options_context
+    family_votes, family_why, directional_score = compute_evidence_families(
+        desk_state=desk_state,
+        htf_data=htf_data,
+        regime_state=regime_state,
+        vol_report=vol_report,
+        options_context=options_context
     )
-    if intended_long and _pre_direction <= -EVIDENCE_OPPOSITION_THRESHOLD:
+    if intended_long and directional_score <= -EVIDENCE_OPPOSITION_THRESHOLD:
         conflicts.append(
             f"EVIDENCE_OPPOSES_TRADE: Long vs net bearish evidence "
-            f"({_pre_direction:+.2f} across {sum(1 for v in _pre_votes.values() if v < 0)} families)."
+            f"({directional_score:+.2f} across {sum(1 for v in family_votes.values() if v < 0)} families)."
         )
-    elif intended_short and _pre_direction >= EVIDENCE_OPPOSITION_THRESHOLD:
+    elif intended_short and directional_score >= EVIDENCE_OPPOSITION_THRESHOLD:
         conflicts.append(
             f"EVIDENCE_OPPOSES_TRADE: Short vs net bullish evidence "
-            f"({_pre_direction:+.2f} across {sum(1 for v in _pre_votes.values() if v > 0)} families)."
+            f"({directional_score:+.2f} across {sum(1 for v in family_votes.values() if v > 0)} families)."
         )
 
     # 5. Build Evidence Map
@@ -522,16 +538,6 @@ def build_desk_verdict(
     if options_context and "disp_data" in options_context and isinstance(options_context["disp_data"], dict):
         disp_z = options_context["disp_data"].get("spread_zscore", 0.0)
         disp_str = f" | Disp: {disp_z:+.1f}σ"
-
-    # Independent evidence families (structure / flow / positioning / macro).
-    # This is what turns "the options model likes it" into a real conviction measure.
-    family_votes, family_why, directional_score = compute_evidence_families(
-        desk_state=desk_state,
-        htf_data=htf_data,
-        regime_state=regime_state,
-        vol_report=vol_report,
-        options_context=options_context
-    )
 
     arrow = {1: "↑", -1: "↓", 0: "→"}
     oi_str = f" | OI shift: {desk_state.itm_otm_shift:+.2f}" if desk_state and desk_state.itm_otm_shift != 0.0 else ""
@@ -565,6 +571,8 @@ def build_desk_verdict(
     reason = signal.reason if signal else "Market in consolidation."
     option_pick: Optional[Dict[str, Any]] = None
     is_breakout_action = "BREAKOUT" in sig_type_str or "GAMMA_SQUEEZE" in sig_type_str
+    t1 = float(signal.target_1) if signal else 0.0
+    t2 = float(signal.target_2) if signal else 0.0
 
     if conflicts:
         action = "WAIT"
@@ -581,15 +589,23 @@ def build_desk_verdict(
             action_label = f"BUY PE @ ₹{ticket.get('entry_premium', 0):.1f} | Target {t1:.0f} (T1) / {put_wall:.0f} (Wall)" if ticket else "BUY PE (CONFIRMED)"
 
         if ticket and ticket.get("status") == "READY":
-            delta_val = float(ticket.get("delta", 0.50))
+            delta_val = float(ticket.get("delta", 0.75))
             gamma_val = float(ticket.get("gamma", 0.0008))
+            theta_val = abs(float(ticket.get("theta_decay_daily", ticket.get("theta", 12.0))))
+            vega_val = abs(float(ticket.get("vega", 0.0)))
             entry_p = float(ticket.get("entry_premium", 0.0))
             
-            # Re-estimate target option premiums if spot targets were clamped to dealer walls
+            # Re-estimate target option premiums if spot targets were clamped to dealer walls (accounting for Theta & Vega crush)
             t1_diff = (t1 - spot) if is_chart_long else (spot - t1)
             t2_diff = (t2 - spot) if is_chart_long else (spot - t2)
-            t1_prem = max(round(entry_p + (t1_diff * delta_val) + (0.5 * gamma_val * (t1_diff ** 2)), 2), 2.0) if t1_diff > 0 else float(ticket.get("target1_premium", 0.0))
-            t2_prem = max(round(entry_p + (t2_diff * delta_val) + (0.5 * gamma_val * (t2_diff ** 2)), 2), 2.0) if t2_diff > 0 else float(ticket.get("target2_premium", 0.0))
+            
+            theta_decay_t1 = theta_val * 0.10
+            vega_decay_t1 = vega_val * 1.5
+            theta_decay_t2 = theta_val * 0.20
+            vega_decay_t2 = vega_val * 2.0
+            
+            t1_prem = max(round(entry_p + (t1_diff * delta_val) + (0.5 * gamma_val * (t1_diff ** 2)) - theta_decay_t1 - vega_decay_t1, 2), 2.0) if t1_diff > 0 else float(ticket.get("target1_premium", 0.0))
+            t2_prem = max(round(entry_p + (t2_diff * delta_val) + (0.5 * gamma_val * (t2_diff ** 2)) - theta_decay_t2 - vega_decay_t2, 2), 2.0) if t2_diff > 0 else float(ticket.get("target2_premium", 0.0))
 
             option_pick = {
                 "symbol": ticket.get("symbol", f"NIFTY {ticket.get('strike', 24500)} {ticket.get('option_type', 'CE')}"),
@@ -613,12 +629,12 @@ def build_desk_verdict(
         if desk_state is not None and data_quality == "VERIFIED" and not conflicts:
             is_crisis = vol_report.get("term_structure_regime", {}).get("is_crisis", False) if (vol_report and isinstance(vol_report, dict)) else False
             # Wall Range Fade Long
-            if not is_crisis and spot <= put_wall + WALL_BUFFER_PTS and desk_state.is_positive_gamma and (d_vector >= 0.2 or desk_state.pcr_zscore >= PCR_Z_CONTRARIAN_THRESHOLD):
+            if not is_crisis and abs(spot - put_wall) <= WALL_BUFFER_PTS and desk_state.is_positive_gamma and (d_vector >= 0.2 or desk_state.pcr_zscore >= PCR_Z_CONTRARIAN_THRESHOLD):
                 action = "BUY_CE"
                 action_label = f"BUY {round(spot/50)*50} CE | Put Wall Support Fade"
                 reason = f"Desk Wall Fade: Spot ({spot:.1f}) defending Put Wall ({put_wall:.0f}) in +Γ regime."
             # Wall Range Fade Short
-            elif spot >= call_wall - WALL_BUFFER_PTS and desk_state.is_positive_gamma and (d_vector <= -0.2 or desk_state.pcr_zscore <= -PCR_Z_CONTRARIAN_THRESHOLD):
+            elif abs(spot - call_wall) <= WALL_BUFFER_PTS and desk_state.is_positive_gamma and (d_vector <= -0.2 or desk_state.pcr_zscore <= -PCR_Z_CONTRARIAN_THRESHOLD):
                 action = "BUY_PE"
                 action_label = f"BUY {round(spot/50)*50} PE | Call Wall Resistance Fade"
                 reason = f"Desk Wall Fade: Spot ({spot:.1f}) testing Call Wall ({call_wall:.0f}) in +Γ regime."

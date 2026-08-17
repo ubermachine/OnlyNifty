@@ -220,8 +220,11 @@ class TelegramNotifier:
         if direction in ["WAIT", "NEUTRAL"]:
             return False
 
-        conf = getattr(entry, "confluence_score", 0.0)
-        if conf < TELEGRAM_MIN_CONFLUENCE_SCORE and conf <= 1.0:
+        conf = float(getattr(entry, "confluence_score", 0.0))
+        if 0.0 < conf <= 1.0:
+            conf = conf * 100.0
+
+        if conf < TELEGRAM_MIN_CONFLUENCE_SCORE:
             return False
 
         # Deduplication key: signal_id + bar_timestamp
