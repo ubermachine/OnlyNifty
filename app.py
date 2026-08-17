@@ -240,9 +240,10 @@ def get_kalman_estimator() -> KalmanFilterTrendEstimator:
 def get_markov_switcher() -> MarkovRegimeSwitcher:
     return MarkovRegimeSwitcher()
 
-@st.cache_resource(show_spinner=False)
 def get_signal_journal() -> LiveSignalJournal:
-    return LiveSignalJournal(persistence_file="data/signals_journal_today.json")
+    if "live_signal_journal_instance" not in st.session_state:
+        st.session_state["live_signal_journal_instance"] = LiveSignalJournal(persistence_file="data/signals_journal_today.json")
+    return st.session_state["live_signal_journal_instance"]
 
 # ----------------- MULTI-TIERED REACTIVE CACHE LAYER -----------------
 @st.cache_data(ttl=5, max_entries=10, show_spinner=False)
@@ -728,23 +729,26 @@ if hasattr(journal_engine, "drain_lifecycle_events"):
             )
 
 last_bar_ts = df.index[-1].strftime("%Y-%m-%d %H:%M") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
-logged_entry = journal_engine.log_signal(
-    signal=signal,
-    ticket=ticket,
-    current_spot=current_spot,
-    bar_timestamp=last_bar_ts,
-    regime_info=regime_state,
-    confluence_score=desk_verdict.confluence_score,
-    htf_data=htf_data,
-    kalman_vel=float(df_kalman["kalman_velocity"].iloc[-1]) if "kalman_velocity" in df_kalman.columns else 0.0,
-    kalman_z=float(df_kalman["kalman_vel_zscore"].iloc[-1]) if "kalman_vel_zscore" in df_kalman.columns else 0.0,
-    ofi_data=ofi_data,
-    gex_data=gex_data,
-    vol_profile=vol_profile,
-    df_context=df,
-    is_0dte=is_0dte_mode,
-    options_context=options_context
-)
+try:
+    logged_entry = journal_engine.log_signal(
+        signal=signal,
+        ticket=ticket,
+        current_spot=current_spot,
+        bar_timestamp=last_bar_ts,
+        regime_info=regime_state,
+        confluence_score=desk_verdict.confluence_score,
+        htf_data=htf_data,
+        kalman_vel=float(df_kalman["kalman_velocity"].iloc[-1]) if "kalman_velocity" in df_kalman.columns else 0.0,
+        kalman_z=float(df_kalman["kalman_vel_zscore"].iloc[-1]) if "kalman_vel_zscore" in df_kalman.columns else 0.0,
+        ofi_data=ofi_data,
+        gex_data=gex_data,
+        vol_profile=vol_profile,
+        df_context=df,
+        is_0dte=is_0dte_mode,
+        options_context=options_context
+    )
+except Exception as log_exc:
+    logged_entry = None
 
 # Dispatch asynchronous Telegram alert ONLY for freshly logged actionable signals
 if logged_entry is not None and getattr(logged_entry, "direction", "WAIT") in ["LONG", "SHORT"]:
