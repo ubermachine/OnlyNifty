@@ -52,6 +52,7 @@ class DeskVerdict:
     directional_score: float = 0.0       # net composite direction [-1.0, +1.0]
     conviction_notes: List[str] = field(default_factory=list)    # what raised/lowered conviction
     edge_status: str = "UNMEASURED"      # walk-forward OOS status of the firing setup
+    candidates: List[Dict[str, Any]] = field(default_factory=list)  # evaluated but vetoed/rejected candidate setups
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -747,5 +748,6 @@ def build_desk_verdict(
         family_agreement=family_agreement,
         directional_score=directional_score,
         conviction_notes=conviction_notes,
-        edge_status=edge_status
+        edge_status=edge_status,
+        candidates=(signal.details or {}).get("rejected_candidates", []) if signal and hasattr(signal, "details") and signal.details else []
     )

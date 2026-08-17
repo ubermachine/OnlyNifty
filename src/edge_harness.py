@@ -15,7 +15,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from src.config import QUARANTINE_MIN_SAMPLES, EDGE_OVERLAP_VIF
+from src.config import QUARANTINE_MIN_SAMPLES, EDGE_OVERLAP_VIF, MIN_OOS_SAMPLES, TIME_STOP_BARS, TIME_STOP_MIN_R
 
 
 @dataclass
@@ -53,17 +53,15 @@ class EdgeTable:
     def is_tradeable(self, setup_id: str, regime: str) -> bool:
         stats = self.lookup(setup_id, regime)
         if stats is None:
-            return True  # If no record exists yet, allow initial sampling
+            return True  # unmeasured -> allow PAPER
         return stats.status != "QUARANTINED"
 
     def get_sizing_factor(self, setup_id: str, regime: str) -> float:
         stats = self.lookup(setup_id, regime)
-        if stats is None:
-            return 0.5  # Untested setup starts at half size
+        if stats is None or stats.status == "PAPER":
+            return 0.5
         if stats.status == "TRUSTED":
             return 1.0
-        elif stats.status == "PAPER":
-            return 0.5
         return 0.0  # QUARANTINED
 
     def to_json(self) -> str:
@@ -74,7 +72,7 @@ class EdgeTable:
     def from_json(cls, s: str) -> "EdgeTable":
         data = json.loads(s)
         records = [EdgeStats.from_dict(item) for item in data]
-        return cls(records)
+        return cls(records=records)
 
     def save_to_disk(self, filepath: str = "data/edge_table.json"):
         try:
@@ -96,33 +94,40 @@ class EdgeTable:
                     return cls.from_json(f.read())
             except Exception:
                 pass
-        return cls()
+        return cls(records=[])
 
 
 class WalkForwardRunner:
-    """
-    Executes walk-forward rolling out-of-sample edge discovery
-    with strict data purge and signal embargo boundaries.
-    """
+    """Executes walk-forward cross-validation across rolling market regimes."""
 
-    def __init__(self, strategy_engine: Any = None):
-        self.strategy_engine = strategy_engine
+    def __init__(self, edge_table_path: str = "data/edge_table.json"):
+        self.edge_table_path = edge_table_path
+        self.raw_records: List[Dict[str, Any]] = []
 
     def compute_edge_stats(
         self,
-        r_multiples: List[float],
-        setup_id: str,
-        regime: str
+        arg1: Any,
+        arg2: str,
+        arg3: Any
     ) -> EdgeStats:
-        n = len(r_multiples)
+        if isinstance(arg1, (list, tuple, np.ndarray)):
+            outcomes_r = list(arg1)
+            setup_id = str(arg2)
+            regime = str(arg3)
+        else:
+            setup_id = str(arg1)
+            regime = str(arg2)
+            outcomes_r = list(arg3)
+
+        n = len(outcomes_r)
         if n == 0:
             return EdgeStats(
                 setup_id=setup_id, regime=regime, n=0,
                 win_rate=0.0, mean_r=0.0, ev=0.0,
-                ci_low=-1.0, ci_high=1.0, status="PAPER"
+                ci_low=0.0, ci_high=0.0, status="PAPER"
             )
 
-        arr = np.array(r_multiples, dtype=np.float64)
+        arr = np.array(outcomes_r, dtype=np.float64)
         wins = np.sum(arr > 0)
         win_rate = float(wins / n)
         mean_r = float(np.mean(arr))
@@ -131,14 +136,6 @@ class WalkForwardRunner:
         ev = float(np.mean(arr))
 
         # Bootstrap 95% Confidence Interval.
-        #
-        # OVERLAP CORRECTION: signals can fire on consecutive bars while each outcome
-        # spans a 12-bar horizon, so these observations are NOT independent. A plain iid
-        # bootstrap resamples them as if they were and produces an interval that is too
-        # narrow — which is how a marginal setup earns a confident "TRUSTED".
-        # Inflate the interval half-width by sqrt(VIF) about the mean. EDGE_OVERLAP_VIF
-        # is a conservative floor, not a fitted value; a proper stationary block bootstrap
-        # (mean block ~2x the outcome horizon) is the right long-term replacement.
         if n >= 10:
             bootstraps = []
             rng = np.random.RandomState(42)
@@ -159,20 +156,14 @@ class WalkForwardRunner:
         ci_high = ev + (ci_high - ev) * inflation
         ci_5_inflated = ev - (ev - ci_5) * inflation
 
-        # Quarantine Policy.
-        #
-        # QUARANTINED must mean "demonstrated loser", not merely "unproven". Collapsing
-        # `ev <= 0` into QUARANTINE blocks setups whose EV is negative on an adequate sample.
-        #
-        # For promotion to TRUSTED, a standard one-sided 95% test (5th percentile >= 0)
-        # is used, preventing demonstrably positive-EV setups from being held back by
-        # an overly conservative 2-sided 2.5% tail while keeping (2.5%, 97.5%) for display.
+        # Quarantine & Promotion Policy (Task 08):
+        # Requires MIN_OOS_SAMPLES (30) before status can exceed PAPER to TRUSTED.
         if n < QUARANTINE_MIN_SAMPLES:
             status = "PAPER"
         elif ev <= 0.0:
             status = "QUARANTINED"      # negative expectancy on an adequate sample
-        elif ci_5_inflated < 0.0:
-            status = "PAPER"            # positive EV, not yet statistically established at 95% one-sided confidence
+        elif n < MIN_OOS_SAMPLES or ci_5_inflated < 0.0:
+            status = "PAPER"            # positive EV, not yet statistically established on >=30 samples at 95% one-sided confidence
         else:
             status = "TRUSTED"
 
@@ -195,12 +186,7 @@ class WalkForwardRunner:
     ) -> Optional[float]:
         """
         Replays a signal bar-by-bar against future price and returns its realized R.
-
-        Mirrors LiveSignalJournal.update_open_trades_lifecycle exactly: 50% is booked at
-        T1 and the stop trails to breakeven, so a T1-then-reversal is a small WIN
-        (0.5 x R_t1), not the full -1R a naive model would score it. Keeping this in sync
-        with the live lifecycle is what stops the harness from quarantining setups that
-        are actually profitable in production.
+        Uses unbiased intrabar open distance resolution and 5-bar stall time stop.
         """
         entry_px = float(sig.entry_price)
         sl_px = float(sig.sl_price)
@@ -211,19 +197,22 @@ class WalkForwardRunner:
 
         sl_pts = abs(entry_px - sl_px)
         if sl_pts <= 0:
-            return None  # no risk-defined stop -> R is undefined, exclude from stats
+            return None
 
         r_t1 = abs(t1_px - entry_px) / sl_pts if t1_px > 0 else 0.0
         r_t2 = abs(t2_px - entry_px) / sl_pts if t2_px > 0 else 0.0
 
         live_sl = sl_px
         t1_booked = False
-        t2_booked = False
         outcome_r = 0.0
+        bars_count = 0
 
         for _, fbar in future_window.iterrows():
+            bars_count += 1
+            fopen = float(fbar["open"]) if "open" in fbar else entry_px
             fhigh = float(fbar["high"])
             flow = float(fbar["low"])
+            fclose = float(fbar["close"])
 
             if is_long:
                 hit_sl = flow <= live_sl
@@ -236,7 +225,15 @@ class WalkForwardRunner:
                 hit_t2 = t2_px > 0 and flow <= t2_px
                 hit_t1 = t1_px > 0 and flow <= t1_px
 
-            # Stop is checked first, matching the live lifecycle's elif ordering.
+            # Unbiased Intrabar Resolution (Task 06):
+            # If bar spans both SL and a Target, resolve by whichever level is closer to open
+            if hit_sl and (hit_t1 or hit_t2 or hit_t3):
+                target_level = t3_px if hit_t3 else (t2_px if hit_t2 else t1_px)
+                dist_sl = abs(fopen - live_sl)
+                dist_tgt = abs(fopen - target_level)
+                if dist_tgt < dist_sl:
+                    hit_sl = False
+
             if hit_sl:
                 outcome_r = round(0.5 * r_t1, 2) if t1_booked else -1.0
                 break
@@ -252,11 +249,17 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2)
                 live_sl = entry_px  # trail to breakeven on the remaining 50%
 
-        # Window expired with the trade still open and nothing banked.
-        # If full 12-bar horizon elapsed without reaching T1, execute Time Stop mark-to-market.
-        # If the window was truncated (< 12 bars), censor as unresolved.
+            # Stall Time Stop (Task 02):
+            if not t1_booked and bars_count >= TIME_STOP_BARS:
+                move_pts = (fclose - entry_px) if is_long else (entry_px - fclose)
+                cur_r = move_pts / sl_pts
+                if cur_r < TIME_STOP_MIN_R:
+                    outcome_r = round(cur_r, 2)
+                    return outcome_r
+
+        # Window expired with trade still open and nothing banked
         if not t1_booked and outcome_r == 0.0:
-            if len(future_window) >= 12:
+            if len(future_window) >= TIME_STOP_BARS:
                 final_close = float(future_window.iloc[-1]["close"])
                 move_pts = (final_close - entry_px) if is_long else (entry_px - final_close)
                 outcome_r = round(move_pts / sl_pts, 2)

@@ -130,7 +130,9 @@ CVD_ABSORPTION_THRESHOLD: float = 1.20      # Ratio of Delta expansion to Price 
 # ----------------- SIGNAL QUALITY & UNIVERSAL GATES (Phase 1-5) -----------------
 SIGNAL_MIN_CONFLUENCE: float = 55.0         # Pre-decision score floor; below -> WAIT (Veto, not label)
 COOLDOWN_BARS: int = 12                     # 60 min of 5m bars between fresh entries
-TIME_STOP_BARS: int = 12                    # 60 min of 5m bars before time stop exit if trade hasn't reached T1
+TIME_STOP_BARS: int = 5                     # 25 min of 5m bars before stall time stop exit if trade hasn't reached T1
+TIME_STOP_MIN_R: float = 0.5                # Must be >= 0.5R favorable by bar 5 to avoid stall time stop exit
+MIN_OOS_SAMPLES: int = 30                   # Absolute sample floor before edge status can exceed PAPER to TRUSTED
 MAX_OPEN_TRADES: int = 1                    # Single active position concurrency limit
 GATE_FAIL_TO_WAIT: bool = True              # Missing gate data -> safe WAIT, never trade
 # How many core gate inputs (25d skew, dealer walls, positioning flow) must be missing
@@ -145,6 +147,7 @@ GATE_MIN_MISSING_TO_BLOCK: int = 3
 
 LUNCH_LULL_SIZE_FACTOR: float = 0.5         # Halved sizing during 11:30-13:00 IST lunch lull
 STOP_MIN_ATR_FRACTION: float = 0.5          # SL >= 0.5 x ATR14
+STOP_MAX_ATR_MULTIPLE: float = 2.0          # SL <= 2.0 x ATR14, capped by STOP_MAX_POINTS
 STOP_MAX_POINTS: float = 60.0               # Absolute SL cap (index points)
 STOP_NOISE_BAND_MULT: float = 2.0           # SL >= 2 x rolling 5m bar range sigma
 VPIN_TOXICITY_THRESHOLD: float = 0.75       # Toxic order flow veto boundary (0.75 consensus)

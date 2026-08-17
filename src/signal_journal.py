@@ -25,7 +25,7 @@ import pandas as pd
 from scipy import stats
 
 from src.strategy_rules import Signal, SignalType
-from src.config import LOT_SIZE, TIME_STOP_BARS
+from src.config import LOT_SIZE, TIME_STOP_BARS, TIME_STOP_MIN_R
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -37,6 +37,7 @@ class SignalLifecycleStatus(str, Enum):
     T2_REACHED = "T2_REACHED"
     T3_MOONSHOT = "T3_MOONSHOT"
     STOPPED_OUT = "STOPPED_OUT"
+    TIME_STOPPED = "TIME_STOPPED"
     EXPIRED_EOD = "EXPIRED_EOD"
     CANCELLED = "CANCELLED"
     SQUARED_OFF = "SQUARED_OFF"
@@ -99,6 +100,16 @@ class SignalEntry:
     prev_hash: str = ""
     record_hash: str = ""
     bars_held: int = 0
+    last_counted_bar: str = ""
+    touched_t1: bool = False
+    touched_t2: bool = False
+    touched_t3: bool = False
+    conviction_score: float = 0.0
+    conviction_tier: str = "LOW"
+    family_votes: Dict[str, int] = field(default_factory=dict)
+    family_agreement: int = 0
+    directional_score: float = 0.0
+    schema_version: int = 2
 
     def is_active(self) -> bool:
         return self.lifecycle_status in [
@@ -450,6 +461,12 @@ class LiveSignalJournal:
         rec_payload = f"{sig_id}_{now_ist}_{strike}_{entry_prem}_{self._last_hash}"
         rec_hash = hashlib.sha256(rec_payload.encode("utf-8")).hexdigest()
 
+        conviction_score = float(ticket.get("conviction_score", 0.0) or getattr(signal, "conviction_score", 0.0) or 0.0)
+        conviction_tier = str(ticket.get("conviction_tier", "") or getattr(signal, "conviction_tier", "LOW") or "LOW")
+        family_votes = dict(ticket.get("family_votes", {}) or getattr(signal, "family_votes", {}) or {})
+        family_agreement = int(ticket.get("family_agreement", 0) or getattr(signal, "family_agreement", 0) or 0)
+        directional_score = float(ticket.get("directional_score", 0.0) or getattr(signal, "directional_score", 0.0) or 0.0)
+
         entry = SignalEntry(
             signal_id=sig_id,
             timestamp_ist=now_ist,
@@ -501,7 +518,13 @@ class LiveSignalJournal:
             },
             notes="Institutional setup triggered & registered in audit log." if is_actionable else "Consolidation / Awaiting confluence trigger.",
             prev_hash=self._last_hash,
-            record_hash=rec_hash
+            record_hash=rec_hash,
+            conviction_score=conviction_score,
+            conviction_tier=conviction_tier,
+            family_votes=family_votes,
+            family_agreement=family_agreement,
+            directional_score=directional_score,
+            schema_version=2
         )
 
         self._last_hash = rec_hash
@@ -514,7 +537,8 @@ class LiveSignalJournal:
         current_spot: float,
         current_high: float,
         current_low: float,
-        bar_time_str: str = "12:00"
+        bar_time_str: str = "12:00",
+        current_open: Optional[float] = None
     ) -> int:
         """Evaluates all active trades against the current bar high/low/close prices with 50% partial booking at T1."""
         updates_count = 0
@@ -524,7 +548,10 @@ class LiveSignalJournal:
             if not entry.is_active():
                 continue
 
-            entry.bars_held += 1
+            if bar_time_str and bar_time_str != entry.last_counted_bar:
+                entry.bars_held += 1
+                entry.last_counted_bar = bar_time_str
+
             direction = entry.direction
             sl_spot = entry.sl_spot
             t1_spot = entry.target_1_spot
@@ -539,15 +566,21 @@ class LiveSignalJournal:
                 entry.peak_favorable_excursion_pts = max(entry.peak_favorable_excursion_pts, entry.spot_price - current_low)
                 entry.peak_adverse_excursion_pts = max(entry.peak_adverse_excursion_pts, current_high - entry.spot_price)
 
+            # Task 14: Track Level Touches independent of terminal status
+            if direction == "LONG":
+                if t1_spot > 0 and current_high >= t1_spot: entry.touched_t1 = True
+                if t2_spot > 0 and current_high >= t2_spot: entry.touched_t2 = True
+                if t3_spot > 0 and current_high >= t3_spot: entry.touched_t3 = True
+            else:
+                if t1_spot > 0 and current_low <= t1_spot: entry.touched_t1 = True
+                if t2_spot > 0 and current_low <= t2_spot: entry.touched_t2 = True
+                if t3_spot > 0 and current_low <= t3_spot: entry.touched_t3 = True
+
             # Check 15:15 Hard Squareoff
             if bar_time_str >= "15:15" and entry.is_active():
                 entry.lifecycle_status = SignalLifecycleStatus.SQUARED_OFF.value
                 entry.exit_timestamp_ist = now_ist
                 entry.exit_spot = current_spot
-                # Book the ACTUAL mark-to-market at squareoff. Previously this set only
-                # the status, leaving realized_r_multiple / realized_pnl_rupees at 0.0 —
-                # so every timed-out trade entered the stats as a costless scratch,
-                # deflating average loss and inflating the payoff ratio that feeds Kelly.
                 sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                 move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
                 squared_r = round(move_pts / sl_pts, 2)
@@ -562,31 +595,41 @@ class LiveSignalJournal:
                     self._pending_lifecycle_events.append((entry, "SQUARED_OFF", current_spot, float(getattr(entry, "exit_premium", 0.0))))
                 continue
 
-            # Check Time Stop (Stagnation Exit before T1)
-            # If trade has been open for >= TIME_STOP_BARS (12 bars = 60 min) without reaching T1,
-            # exit at market to prevent extrinsic theta and vega bleed.
+            # Task 02: Stall Time Stop (Stagnation Exit before T1)
             if entry.bars_held >= TIME_STOP_BARS and entry.lifecycle_status in [
                 SignalLifecycleStatus.TRIGGERED.value,
                 SignalLifecycleStatus.ACTIVE.value
             ]:
-                entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
-                entry.exit_timestamp_ist = now_ist
-                entry.exit_spot = current_spot
                 sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                 move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
-                time_stop_r = round(move_pts / sl_pts, 2)
-                entry.realized_r_multiple = time_stop_r
-                entry.realized_pnl_rupees = round(entry.capital_risk_rupees * time_stop_r, 2)
-                entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
-                entry.notes += f" | Time Stop ({entry.bars_held} bars) Exit @ {time_stop_r:+.2f}R."
-                updates_count += 1
-                with self._lifecycle_lock:
-                    self._pending_lifecycle_events.append((entry, "STOPPED_OUT", current_spot, float(getattr(entry, "entry_premium", 0.0))))
-                continue
+                cur_r = move_pts / sl_pts
+                if cur_r < TIME_STOP_MIN_R:
+                    entry.lifecycle_status = SignalLifecycleStatus.TIME_STOPPED.value
+                    entry.realized_r_multiple = round(cur_r, 2)
+                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                    entry.exit_timestamp_ist = now_ist
+                    entry.exit_spot = current_spot
+                    entry.notes += f" | Time stop @ {entry.bars_held} bars ({entry.realized_r_multiple:+.2f}R)."
+                    updates_count += 1
+                    with self._lifecycle_lock:
+                        self._pending_lifecycle_events.append((entry, "TIME_STOPPED", current_spot, float(getattr(entry, "entry_premium", 0.0))))
+                    continue
 
             if direction == "LONG":
-                # Check SL hit
-                if current_low <= sl_spot and sl_spot > 0:
+                hit_sl = current_low <= sl_spot and sl_spot > 0
+                hit_t3 = current_high >= t3_spot and t3_spot > 0
+                hit_t2 = current_high >= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value
+                hit_t1 = current_high >= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value
+
+                # Task 06: Unbiased Intrabar Resolution
+                if hit_sl and (hit_t1 or hit_t2 or hit_t3):
+                    open_ref = current_open if current_open is not None else entry.spot_price
+                    target_level = t3_spot if hit_t3 else (t2_spot if hit_t2 else t1_spot)
+                    if abs(open_ref - target_level) < abs(open_ref - sl_spot):
+                        hit_sl = False
+
+                if hit_sl:
                     if entry.lifecycle_status == SignalLifecycleStatus.T2_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
@@ -617,7 +660,7 @@ class LiveSignalJournal:
                         with self._lifecycle_lock:
                             self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
                     updates_count += 1
-                elif current_high >= t3_spot and t3_spot > 0:
+                elif hit_t3:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
                     _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                     _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
@@ -631,7 +674,7 @@ class LiveSignalJournal:
                     with self._lifecycle_lock:
                         self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
                     updates_count += 1
-                elif current_high >= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
+                elif hit_t2:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
                     entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
                     entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
@@ -643,7 +686,7 @@ class LiveSignalJournal:
                     with self._lifecycle_lock:
                         self._pending_lifecycle_events.append((entry, "T2_REACHED", current_high, entry.target_2_premium))
                     updates_count += 1
-                elif current_high >= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
+                elif hit_t1:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
                     entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
                     entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
@@ -655,7 +698,19 @@ class LiveSignalJournal:
                     updates_count += 1
 
             elif direction == "SHORT":
-                if current_high >= sl_spot and sl_spot > 0:
+                hit_sl = current_high >= sl_spot and sl_spot > 0
+                hit_t3 = current_low <= t3_spot and t3_spot > 0
+                hit_t2 = current_low <= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value
+                hit_t1 = current_low <= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value
+
+                # Task 06: Unbiased Intrabar Resolution
+                if hit_sl and (hit_t1 or hit_t2 or hit_t3):
+                    open_ref = current_open if current_open is not None else entry.spot_price
+                    target_level = t3_spot if hit_t3 else (t2_spot if hit_t2 else t1_spot)
+                    if abs(open_ref - target_level) < abs(open_ref - sl_spot):
+                        hit_sl = False
+
+                if hit_sl:
                     if entry.lifecycle_status == SignalLifecycleStatus.T2_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
@@ -686,7 +741,7 @@ class LiveSignalJournal:
                         with self._lifecycle_lock:
                             self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
                     updates_count += 1
-                elif current_low <= t3_spot and t3_spot > 0:
+                elif hit_t3:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
                     _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
                     _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
@@ -700,7 +755,7 @@ class LiveSignalJournal:
                     with self._lifecycle_lock:
                         self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
                     updates_count += 1
-                elif current_low <= t2_spot and t2_spot > 0 and entry.lifecycle_status != SignalLifecycleStatus.T2_REACHED.value:
+                elif hit_t2:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
                     entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
                     entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
@@ -712,7 +767,7 @@ class LiveSignalJournal:
                     with self._lifecycle_lock:
                         self._pending_lifecycle_events.append((entry, "T2_REACHED", current_low, entry.target_2_premium))
                     updates_count += 1
-                elif current_low <= t1_spot and t1_spot > 0 and entry.lifecycle_status == SignalLifecycleStatus.TRIGGERED.value:
+                elif hit_t1:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
                     entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
                     entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
@@ -1010,6 +1065,42 @@ class LiveSignalJournal:
             return b"Timestamp,Signal_Type,Direction,Spot_Price,Symbol,Status\n"
         return df.to_csv(index=False).encode("utf-8")
 
+    def cluster_context(self, direction: str, now_ist: str = "", lookback_min: int = 90) -> Dict[str, Any]:
+        """
+        Task 04: Evaluates signal sequence cluster position and prior-signal MFE decay.
+        """
+        actionable = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
+        if not actionable:
+            return {
+                "index": 1,
+                "count": 0,
+                "prior_mfe_pts": [],
+                "prior_mfe_median": 0.0,
+                "prior_went_negative": 0
+            }
+
+        same_dir = [e for e in actionable if e.direction == direction]
+        if not same_dir:
+            return {
+                "index": 1,
+                "count": 0,
+                "prior_mfe_pts": [],
+                "prior_mfe_median": 0.0,
+                "prior_went_negative": 0
+            }
+
+        mfes = [float(e.peak_favorable_excursion_pts) for e in same_dir]
+        neg_count = sum(1 for e in same_dir if e.realized_r_multiple <= 0 and not e.is_active())
+        median_mfe = float(np.median(mfes)) if mfes else 0.0
+
+        return {
+            "index": len(same_dir) + 1,
+            "count": len(same_dir),
+            "prior_mfe_pts": mfes,
+            "prior_mfe_median": round(median_mfe, 1),
+            "prior_went_negative": neg_count
+        }
+
     def _persist_to_disk(self):
         """Saves current journal to JSON file atomically."""
         if not self.persistence_file:
@@ -1033,9 +1124,16 @@ class SignalPerformanceAnalyzer:
     and behavioral tilt / losing streak diagnostics.
     """
 
-    def __init__(self, entries: Optional[List[SignalEntry]] = None, include_seeds: bool = False):
+    def __init__(
+        self,
+        entries: Optional[List[SignalEntry]] = None,
+        include_seeds: bool = False,
+        min_schema_version: int = 1
+    ):
         raw = entries or []
-        self.raw_entries: List[SignalEntry] = list(raw)
+        self.raw_entries: List[SignalEntry] = [
+            e for e in raw if getattr(e, "schema_version", 1) >= min_schema_version
+        ]
         # Filter completed / closed actionable trades
         wait_val = SignalType.WAIT.value if hasattr(SignalType.WAIT, "value") else "WAIT"
         self.closed_entries: List[SignalEntry] = [
@@ -1044,6 +1142,39 @@ class SignalPerformanceAnalyzer:
             and (include_seeds or not getattr(e, "is_seed", False))
         ]
         self.entries: List[SignalEntry] = self.closed_entries
+
+    def t1_to_t2_conversion_rate(self) -> Dict[str, Any]:
+        """
+        Task 14: Measures empirical conversion rate of trades reaching T1 that then reached T2.
+        """
+        t1_touches = sum(
+            1 for e in self.raw_entries
+            if getattr(e, "touched_t1", False) or e.lifecycle_status in [
+                SignalLifecycleStatus.T1_REACHED.value,
+                SignalLifecycleStatus.T2_REACHED.value,
+                SignalLifecycleStatus.T3_MOONSHOT.value
+            ]
+        )
+        t2_touches = sum(
+            1 for e in self.raw_entries
+            if getattr(e, "touched_t2", False) or e.lifecycle_status in [
+                SignalLifecycleStatus.T2_REACHED.value,
+                SignalLifecycleStatus.T3_MOONSHOT.value
+            ]
+        )
+        t3_touches = sum(
+            1 for e in self.raw_entries
+            if getattr(e, "touched_t3", False) or e.lifecycle_status == SignalLifecycleStatus.T3_MOONSHOT.value
+        )
+
+        conversion_pct = (t2_touches / t1_touches * 100.0) if t1_touches > 0 else 0.0
+        return {
+            "t1_touches": t1_touches,
+            "t2_touches": t2_touches,
+            "t3_touches": t3_touches,
+            "conversion_rate_pct": round(conversion_pct, 1),
+            "verdict": "LADDER_SOUND" if conversion_pct >= 55.0 else ("MARGINAL" if conversion_pct >= 35.0 else "CANNOT_PAY")
+        }
 
     def win_rate_by_signal_type(self) -> pd.DataFrame:
         """Computes trade counts, win rate, average R-multiple, and PnL grouped by signal type."""
@@ -1183,11 +1314,10 @@ class SignalPerformanceAnalyzer:
 
         return pd.DataFrame(records)
 
-    def confluence_vs_outcome_correlation(self) -> Dict[str, Any]:
+    def score_vs_outcome_correlation(self, score_field: str = "confluence_score") -> Dict[str, Any]:
         """
-        Computes Pearson correlation (r, p-value) between institutional confluence scores
-        and trade outcomes, and bins performance into 5 institutional confluence buckets
-        ([0-50, 50-65, 65-75, 75-85, 85-100]).
+        Computes Pearson correlation (r, p-value) between score (confluence_score or conviction_score)
+        and trade outcomes, and bins performance into 5 score buckets ([0-50, 50-65, 65-75, 75-85, 85-100]).
         """
         bucket_defs = [
             ("0-50", 0.0, 50.0),
@@ -1212,7 +1342,7 @@ class SignalPerformanceAnalyzer:
                 "sample_size": 0
             }
 
-        scores = [float(e.confluence_score) for e in self.closed_entries]
+        scores = [float(getattr(e, score_field, 0.0) or 0.0) for e in self.closed_entries]
         r_multiples = [float(e.realized_r_multiple) for e in self.closed_entries]
 
         # Pearson correlation
@@ -1242,9 +1372,9 @@ class SignalPerformanceAnalyzer:
         bucket_dict = {}
         for name, low, high in bucket_defs:
             if name == "85-100":
-                b_entries = [e for e in self.closed_entries if low <= e.confluence_score <= 100.0]
+                b_entries = [e for e in self.closed_entries if low <= float(getattr(e, score_field, 0.0) or 0.0) <= 100.0]
             else:
-                b_entries = [e for e in self.closed_entries if low <= e.confluence_score < high]
+                b_entries = [e for e in self.closed_entries if low <= float(getattr(e, score_field, 0.0) or 0.0) < high]
 
             cnt = len(b_entries)
             if cnt > 0:
@@ -1274,6 +1404,10 @@ class SignalPerformanceAnalyzer:
             "statistically_significant": bool(p_val < 0.05) if len(scores) >= 5 else False,
             "sample_size": len(self.closed_entries)
         }
+
+    def confluence_vs_outcome_correlation(self) -> Dict[str, Any]:
+        """Backward-compatible proxy to score_vs_outcome_correlation using confluence_score."""
+        return self.score_vs_outcome_correlation("confluence_score")
 
     def streak_and_tilt_analysis(self) -> Dict[str, Any]:
         """
@@ -1415,6 +1549,7 @@ class SignalPerformanceAnalyzer:
             "by_regime": df_regime.to_dict(orient="records") if not df_regime.empty else [],
             "confluence_correlation": conf_corr,
             "streak_and_tilt": streak_tilt,
+            "t1_to_t2_conversion": self.t1_to_t2_conversion_rate(),
             "report_timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         }
 

@@ -71,7 +71,8 @@ class Test3PMPipelineRouting:
         assert signal.entry_price == 24555.0
         sl_dist = abs(signal.entry_price - signal.sl_price)
         assert sl_dist <= STOP_MAX_POINTS
-        assert signal.sl_price == 24555.0 - STOP_MAX_POINTS
+        assert signal.sl_price <= 24555.0 - 15.0
+        assert signal.sl_price >= 24555.0 - STOP_MAX_POINTS
 
     def test_3pm_quarantined_by_edge_table(self):
         """When LONG_3PM is quarantined in edge table, it must be blocked."""

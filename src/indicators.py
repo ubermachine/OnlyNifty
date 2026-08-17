@@ -56,11 +56,13 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
         valid = s > 1e-8
         if np.any(valid):
             raw_rs = float(np.mean(r[valid] / s[valid]))
-            expected_rs = np.sqrt((lag - 0.5) / (np.pi * 0.5)) if lag > 2 else 1.0
+            if raw_rs > 1e-8:
+                rs_values.append(raw_rs)
+                valid_lags.append(float(lag))
+
     if len(rs_values) >= 3:
-        safe_rs = np.maximum(np.array(rs_values, dtype=float), 1e-6)
-        poly = np.polyfit(np.log(valid_lags), np.log(safe_rs), 1)
-        h = float(np.clip(poly[0] + 0.50, 0.10, 0.90))
+        poly = np.polyfit(np.log(valid_lags), np.log(rs_values), 1)
+        h = float(np.clip(poly[0], 0.10, 0.90))
         if np.isnan(h) or np.isinf(h):
             h = 0.50
     else:
@@ -76,11 +78,15 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
         regime = f"RANDOM WALK NOISE (H={h:.2f} in [0.45, 0.52] - Range Bound)"
         is_trending = False
         
+    r_sq = round(float(np.corrcoef(np.log(valid_lags), np.log(rs_values))[0, 1] ** 2) if len(rs_values) >= 3 else 0.80, 2)
+    if np.isnan(r_sq):
+        r_sq = 0.80
+
     return {
         "hurst": round(h, 4),
         "regime": regime,
         "is_trending": is_trending,
-        "r_squared_proxy": round(float(np.corrcoef(np.log(valid_lags), np.log(rs_values))[0, 1] ** 2) if len(rs_values) >= 3 else 0.80, 2)
+        "r_squared_proxy": r_sq
     }
 
 def compute_vakc_envelopes(

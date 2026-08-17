@@ -705,6 +705,13 @@ desk_verdict = build_desk_verdict(
     options_context=options_context
 )
 
+# Attach conviction attributes to ticket for downstream audit persistence
+ticket["conviction_score"] = desk_verdict.conviction_score
+ticket["conviction_tier"] = desk_verdict.conviction_tier
+ticket["family_votes"] = desk_verdict.family_votes
+ticket["family_agreement"] = desk_verdict.family_agreement
+ticket["directional_score"] = desk_verdict.directional_score
+
 # Real-Time Live Signal Journal & Trade Lifecycle Tracker
 journal_engine = get_signal_journal()
 if hasattr(journal_engine, "reload_from_disk"):
@@ -718,7 +725,8 @@ journal_engine.update_open_trades_lifecycle(
     current_spot=current_spot,
     current_high=float(df.iloc[-1]["high"]),
     current_low=float(df.iloc[-1]["low"]),
-    bar_time_str=last_bar_time_str
+    bar_time_str=last_bar_time_str,
+    current_open=float(df.iloc[-1]["open"]) if "open" in df.columns else current_spot
 )
 
 # Dispatch asynchronous Telegram alerts for live trade lifecycle transitions (T1, T2, T3, SL, Squareoff)
@@ -806,6 +814,20 @@ st.markdown(f'''
 <div style="background-color: #0b101b; border: 1px solid #162032; border-radius: 6px; padding: 4px 12px; margin-bottom: 8px; font-size: 11px; color: #8e9fb5; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace;">
     <div><strong>🏛️ BREADTH:</strong> <span style="color:#05df72;">{hfi_adv}↑</span> / <span style="color:#ff3355;">{hfi_dec}↓</span> (Top 5: 41.2% Wt) | <strong>DAY RANGE:</strong> {day_range_pts:.1f} pts ({day_range_pts/current_spot*100:.2f}%)</div>
     <div><strong>VOL SURGE:</strong> <span style="color:{'#05df72' if vol_ratio >= 120 else '#94a3b8'};">{vol_ratio:.0f}% of Avg</span> | <strong>REGIME MEMORY (DFA α):</strong> {dfa_res['dfa_alpha']:.3f}</div>
+</div>
+''', unsafe_allow_html=True)
+
+# Task 11: Environment Quality Chip Row Banner
+_atr_val = round(float(df["atr14"].iloc[-1]), 1) if "atr14" in df.columns else 45.0
+_exp_move = options_desk_state.expected_move_pts if options_desk_state else 85.0
+_move_ratio = options_desk_state.move_ratio if options_desk_state else 1.0
+_exp_range = round(_exp_move * 1.596, 1)
+_vcr_val = float(vol_report.get("vcr_squeeze", {}).get("vcr_ratio", 1.0))
+
+st.markdown(f'''
+<div style="background-color: #080c14; border: 1px solid #162032; border-radius: 6px; padding: 4px 12px; margin-bottom: 8px; font-size: 11px; color: #8e9fb5; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace;">
+    <div><strong>🌐 ENVIRONMENT QUALITY:</strong> ATR(14): <strong style="color: #f1f5f9;">{_atr_val:.1f} pts</strong> | Dynamic Stop Cap: <strong style="color: #00d2ff;">2.0x ATR ({min(60.0, 2.0 * _atr_val):.1f} pts)</strong></div>
+    <div>Session Range / Exp: <strong style="color: #f1f5f9;">{day_range_pts:.1f} / {_exp_range:.1f} pts ({_move_ratio:.2f}x)</strong> | Vol Squeeze: <strong style="color: {'#05df72' if _vcr_val >= 0.15 else '#ff3355'};">{_vcr_val:.2f}</strong></div>
 </div>
 ''', unsafe_allow_html=True)
 
@@ -1018,6 +1040,23 @@ Exp Move: <strong style="color: #cbd5e1;">±{desk_verdict.expected_move_pts:.0f}
 </div>
 </div>'''
 st.markdown(desk_verdict_html, unsafe_allow_html=True)
+
+# Task 12: Evaluated Candidate Setups Drill-Down
+if getattr(desk_verdict, "candidates", None):
+    with st.expander(f"📋 Evaluated Candidate Setups ({len(desk_verdict.candidates)} evaluated & rejected this bar)", expanded=False):
+        cands_data = []
+        for c in desk_verdict.candidates:
+            cands_data.append({
+                "Signal Type": c.get("signal_type", "N/A"),
+                "Direction": c.get("direction", "N/A"),
+                "Entry (₹)": f"{c.get('entry', 0.0):.1f}",
+                "SL (₹)": f"{c.get('sl', 0.0):.1f}",
+                "Target 1 (₹)": f"{c.get('t1', 0.0):.1f}",
+                "Confluence": f"{c.get('confluence', 0.0):.1f}%",
+                "Veto Gate": c.get("veto_gate", "GATE_BLOCKED"),
+                "Reason": c.get("reason", "")
+            })
+        st.dataframe(pd.DataFrame(cands_data), hide_index=True, width="stretch")
 
 # Expandable Evidence & Microstructure Drill-Downs
 with st.expander("📊 Stochastic Indicators & 9-Cell Confluence Engine", expanded=False):
@@ -1438,12 +1477,14 @@ with tab_journal:
         perf_summary = perf_rep["summary"]
         
         # Summary Row
-        p_c1, p_c2, p_c3, p_c4, p_c5 = st.columns(5)
+        p_c1, p_c2, p_c3, p_c4, p_c5, p_c6 = st.columns(6)
         p_c1.metric("Closed Trades", f"{perf_summary['total_closed_trades']}", f"{perf_summary['winning_trades']}W / {perf_summary['losing_trades']}L")
         p_c2.metric("Win Rate", f"{perf_summary['win_rate_pct']:.1f}%", "Target: > 65%")
         p_c3.metric("Profit Factor", f"{perf_summary['profit_factor']:.2f}", f"SQN: {perf_summary['system_quality_number_sqn']:.2f}")
         p_c4.metric("Avg R-Multiple", f"{perf_summary['avg_r_multiple']:+.2f}R", f"Total: {perf_summary['total_r_multiple']:+.1f}R")
         p_c5.metric("Net Realized PnL", f"₹{perf_summary['total_realized_pnl']:+,.2f}")
+        t1_conv = perf_rep.get("t1_to_t2_conversion", {})
+        p_c6.metric("T1→T2 Conversion", f"{t1_conv.get('conversion_rate_pct', 0.0):.1f}%", f"{t1_conv.get('verdict', 'N/A')}")
         
         st.markdown("---")
         

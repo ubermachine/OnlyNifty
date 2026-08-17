@@ -278,7 +278,11 @@ def compute_options_desk_state(
 
     actual_range_pts = 0.0
     if df_ohlcv is not None and not df_ohlcv.empty:
-        actual_range_pts = round(float(df_ohlcv["high"].max() - df_ohlcv["low"].min()), 1)
+        _sess = df_ohlcv
+        if hasattr(df_ohlcv.index, "date"):
+            _last = df_ohlcv.index[-1].date()
+            _sess = df_ohlcv[df_ohlcv.index.date == _last]
+        actual_range_pts = round(float(_sess["high"].max() - _sess["low"].min()), 1)
 
     # move_ratio compares a HIGH-LOW RANGE against an expected range, so it must not be
     # divided by the 1-sigma POINT move. For driftless Brownian motion the expected range

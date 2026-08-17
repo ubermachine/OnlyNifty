@@ -11,7 +11,7 @@ from src.config import (
     HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
     SKEW_ZSCORE_THRESHOLD, GEX_WALL_BUFFER_PTS, VCR_SQUEEZE_THRESHOLD,
     SIGNAL_MIN_CONFLUENCE, VPIN_TOXICITY_THRESHOLD, STOP_MIN_ATR_FRACTION,
-    STOP_MAX_POINTS, STOP_NOISE_BAND_MULT, GATE_FAIL_TO_WAIT, GATE_MIN_MISSING_TO_BLOCK
+    STOP_MAX_ATR_MULTIPLE, STOP_MAX_POINTS, STOP_NOISE_BAND_MULT, GATE_FAIL_TO_WAIT, GATE_MIN_MISSING_TO_BLOCK
 )
 from src.indicators import (
     compute_ema, compute_vakc_envelopes, compute_vwap, compute_fibonacci_levels,
@@ -415,7 +415,8 @@ class StrategyEngine:
         if is_long or is_short:
             sl_dist = abs(candidate_sig.entry_price - candidate_sig.sl_price)
             min_sl = max(STOP_MIN_ATR_FRACTION * atr_14, 15.0)
-            max_sl = STOP_MAX_POINTS
+            max_sl = min(STOP_MAX_POINTS, STOP_MAX_ATR_MULTIPLE * atr_14)
+            max_sl = max(max_sl, min_sl)  # Never invert the band
             
             if sl_dist < min_sl:
                 candidate_sig.sl_price = round(candidate_sig.entry_price - min_sl if is_long else candidate_sig.entry_price + min_sl, 2)
@@ -643,6 +644,7 @@ class StrategyEngine:
         # ending the bar on the first setup that fails. Only an ABSOLUTE veto (toxic
         # flow, session lock) stops everything.
         _rejections: List[str] = []
+        _rejected: List[Dict[str, Any]] = []
         _absolute_veto: List[str] = []
 
         # Define internal candidate gate check and pre-decision finalizer
@@ -657,6 +659,17 @@ class StrategyEngine:
                 # the ladder must keep looking. Absolute vetoes (toxic flow, session
                 # lock) genuinely block every trade this bar and stop it.
                 _rejections.append(gate_msg)
+                _rejected.append({
+                    "signal_type": candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type),
+                    "direction": direction,
+                    "entry": candidate_sig.entry_price,
+                    "sl": candidate_sig.sl_price,
+                    "t1": candidate_sig.target_1,
+                    "t2": candidate_sig.target_2,
+                    "veto_gate": audit.get("veto_gate", "GATE_BLOCKED"),
+                    "reason": gate_msg,
+                    "confluence": (candidate_sig.details or {}).get("confluence_score", 0.0),
+                })
                 if audit.get("veto_gate") in _ABSOLUTE_VETOES:
                     _absolute_veto.append(gate_msg)
                 return None
@@ -674,9 +687,19 @@ class StrategyEngine:
             if self.edge_table is not None and not self.edge_table.is_tradeable(setup_id, active_regime):
                 audit["passed"] = False
                 audit["veto_gate"] = "EDGE_TABLE_QUARANTINED"
-                _rejections.append(
-                    f"Edge Table Veto: '{setup_id}' is QUARANTINED in {active_regime} regime (measured negative out-of-sample EV)."
-                )
+                _rej_msg = f"Edge Table Veto: '{setup_id}' is QUARANTINED in {active_regime} regime (measured negative out-of-sample EV)."
+                _rejections.append(_rej_msg)
+                _rejected.append({
+                    "signal_type": setup_id,
+                    "direction": direction,
+                    "entry": candidate_sig.entry_price,
+                    "sl": candidate_sig.sl_price,
+                    "t1": candidate_sig.target_1,
+                    "t2": candidate_sig.target_2,
+                    "veto_gate": "EDGE_TABLE_QUARANTINED",
+                    "reason": _rej_msg,
+                    "confluence": (candidate_sig.details or {}).get("confluence_score", 0.0),
+                })
                 return None
 
             candidate_sig.htf_aligned = htf_aligned_long if direction == "LONG" else htf_aligned_short
@@ -709,6 +732,17 @@ class StrategyEngine:
             # rather than ending the bar on the first weak one.
             if _final.signal_type == SignalType.WAIT:
                 _rejections.append(_final.reason)
+                _rejected.append({
+                    "signal_type": setup_id,
+                    "direction": direction,
+                    "entry": candidate_sig.entry_price,
+                    "sl": candidate_sig.sl_price,
+                    "t1": candidate_sig.target_1,
+                    "t2": candidate_sig.target_2,
+                    "veto_gate": "CONFLUENCE_FLOOR_VETO",
+                    "reason": _final.reason,
+                    "confluence": (_final.details or {}).get("confluence_score", 0.0),
+                })
                 return None
             return _final
 
@@ -1340,7 +1374,8 @@ class StrategyEngine:
                 "hurst": hurst_info, "gex": gex_info, "ofi": ofi_info,
                 "gap_info": gap_info, "htf_regime": htf_regime, "order_flow": order_flow,
                 "kalman_price": kalman_price, "kalman_velocity": kalman_vel, "kalman_vel_zscore": kalman_z,
-                "markov_regime": markov_info
+                "markov_regime": markov_info,
+                "rejected_candidates": sorted(_rejected, key=lambda c: c.get("confluence") or 0.0, reverse=True)
             }
         )
 
