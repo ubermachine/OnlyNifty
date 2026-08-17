@@ -239,6 +239,7 @@ class TestVerdictIntegration:
             ticket={"status": "READY", "symbol": "NIFTY 24500 CE", "entry_premium": 140.0},
             desk_state=make_desk_state(),
             current_spot=24500.0,
+            edge_stats="TRUSTED",
         )
         aligned = build_desk_verdict(htf_data=BULL_HTF, **common)
         against = build_desk_verdict(htf_data=BEAR_HTF, **common)

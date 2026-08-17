@@ -147,28 +147,32 @@ class WalkForwardRunner:
                 bootstraps.append(np.mean(sample))
             ci_low = float(np.percentile(bootstraps, 2.5))
             ci_high = float(np.percentile(bootstraps, 97.5))
+            ci_5 = float(np.percentile(bootstraps, 5.0))
         else:
             std_err = float(np.std(arr, ddof=1) / np.sqrt(n)) if n > 1 else 0.5
             ci_low = ev - 1.96 * std_err
             ci_high = ev + 1.96 * std_err
+            ci_5 = ev - 1.645 * std_err
 
         inflation = float(np.sqrt(max(EDGE_OVERLAP_VIF, 1.0)))
         ci_low = ev - (ev - ci_low) * inflation
         ci_high = ev + (ci_high - ev) * inflation
+        ci_5_inflated = ev - (ev - ci_5) * inflation
 
         # Quarantine Policy.
         #
         # QUARANTINED must mean "demonstrated loser", not merely "unproven". Collapsing
-        # `ci_low < 0` into QUARANTINE blocked setups whose EV is positive but whose
-        # interval simply still straddles zero — that is missing evidence, not evidence
-        # of harm, and the right response is to keep sampling at reduced size.
-        # The table is a kill-switch for losers, never a licence to size up.
+        # `ev <= 0` into QUARANTINE blocks setups whose EV is negative on an adequate sample.
+        #
+        # For promotion to TRUSTED, a standard one-sided 95% test (5th percentile >= 0)
+        # is used, preventing demonstrably positive-EV setups from being held back by
+        # an overly conservative 2-sided 2.5% tail while keeping (2.5%, 97.5%) for display.
         if n < QUARANTINE_MIN_SAMPLES:
             status = "PAPER"
         elif ev <= 0.0:
             status = "QUARANTINED"      # negative expectancy on an adequate sample
-        elif ci_low < 0.0:
-            status = "PAPER"            # positive EV, not yet statistically established
+        elif ci_5_inflated < 0.0:
+            status = "PAPER"            # positive EV, not yet statistically established at 95% one-sided confidence
         else:
             status = "TRUSTED"
 
@@ -248,9 +252,15 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2)
                 live_sl = entry_px  # trail to breakeven on the remaining 50%
 
-        # Window expired with the trade still open and nothing banked. Censor unresolved
-        # trades (None is dropped by the caller) unless T1 had already booked a partial.
+        # Window expired with the trade still open and nothing banked.
+        # If full 12-bar horizon elapsed without reaching T1, execute Time Stop mark-to-market.
+        # If the window was truncated (< 12 bars), censor as unresolved.
         if not t1_booked and outcome_r == 0.0:
+            if len(future_window) >= 12:
+                final_close = float(future_window.iloc[-1]["close"])
+                move_pts = (final_close - entry_px) if is_long else (entry_px - final_close)
+                outcome_r = round(move_pts / sl_pts, 2)
+                return outcome_r
             return None
         return outcome_r
 

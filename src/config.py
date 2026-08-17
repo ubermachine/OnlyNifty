@@ -130,6 +130,7 @@ CVD_ABSORPTION_THRESHOLD: float = 1.20      # Ratio of Delta expansion to Price 
 # ----------------- SIGNAL QUALITY & UNIVERSAL GATES (Phase 1-5) -----------------
 SIGNAL_MIN_CONFLUENCE: float = 55.0         # Pre-decision score floor; below -> WAIT (Veto, not label)
 COOLDOWN_BARS: int = 12                     # 60 min of 5m bars between fresh entries
+TIME_STOP_BARS: int = 12                    # 60 min of 5m bars before time stop exit if trade hasn't reached T1
 MAX_OPEN_TRADES: int = 1                    # Single active position concurrency limit
 GATE_FAIL_TO_WAIT: bool = True              # Missing gate data -> safe WAIT, never trade
 # How many core gate inputs (25d skew, dealer walls, positioning flow) must be missing

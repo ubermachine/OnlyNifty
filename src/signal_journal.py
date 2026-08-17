@@ -25,7 +25,7 @@ import pandas as pd
 from scipy import stats
 
 from src.strategy_rules import Signal, SignalType
-from src.config import LOT_SIZE
+from src.config import LOT_SIZE, TIME_STOP_BARS
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -98,6 +98,7 @@ class SignalEntry:
     notes: str = ""
     prev_hash: str = ""
     record_hash: str = ""
+    bars_held: int = 0
 
     def is_active(self) -> bool:
         return self.lifecycle_status in [
@@ -516,6 +517,7 @@ class LiveSignalJournal:
             if not entry.is_active():
                 continue
 
+            entry.bars_held += 1
             direction = entry.direction
             sl_spot = entry.sl_spot
             t1_spot = entry.target_1_spot
@@ -551,6 +553,28 @@ class LiveSignalJournal:
                 updates_count += 1
                 with self._lifecycle_lock:
                     self._pending_lifecycle_events.append((entry, "SQUARED_OFF", current_spot, float(getattr(entry, "exit_premium", 0.0))))
+                continue
+
+            # Check Time Stop (Stagnation Exit before T1)
+            # If trade has been open for >= TIME_STOP_BARS (12 bars = 60 min) without reaching T1,
+            # exit at market to prevent extrinsic theta and vega bleed.
+            if entry.bars_held >= TIME_STOP_BARS and entry.lifecycle_status in [
+                SignalLifecycleStatus.TRIGGERED.value,
+                SignalLifecycleStatus.ACTIVE.value
+            ]:
+                entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
+                entry.exit_timestamp_ist = now_ist
+                entry.exit_spot = current_spot
+                sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
+                move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
+                time_stop_r = round(move_pts / sl_pts, 2)
+                entry.realized_r_multiple = time_stop_r
+                entry.realized_pnl_rupees = round(entry.capital_risk_rupees * time_stop_r, 2)
+                entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                entry.notes += f" | Time Stop ({entry.bars_held} bars) Exit @ {time_stop_r:+.2f}R."
+                updates_count += 1
+                with self._lifecycle_lock:
+                    self._pending_lifecycle_events.append((entry, "STOPPED_OUT", current_spot, float(getattr(entry, "entry_premium", 0.0))))
                 continue
 
             if direction == "LONG":

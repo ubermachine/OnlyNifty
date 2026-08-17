@@ -586,7 +586,7 @@ def build_desk_verdict(
         confluence_grade = "Consolidation"
 
     # Walk-forward OOS status of the firing setup (stamped by the live edge gate).
-    edge_status = "TRUSTED"
+    edge_status = "UNMEASURED"
     if edge_stats is not None:
         edge_status = getattr(edge_stats, "status", str(edge_stats))
     elif signal and signal.details and "edge_status" in signal.details:
