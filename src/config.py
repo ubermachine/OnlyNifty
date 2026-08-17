@@ -119,7 +119,7 @@ TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_PARSE_MODE: str = "HTML"
 TELEGRAM_TIMEOUT_SECONDS: float = 5.0
-TELEGRAM_MIN_CONFLUENCE_SCORE: float = 70.0  # Standard Grade alert floor (>=85% is A+ Institutional)
+TELEGRAM_MIN_CONFLUENCE_SCORE: float = 55.0  # Standard Grade alert floor (>=75% is A+ Institutional, >=55% is A Standard)
 
 # ----------------- QUANTITATIVE MICROSTRUCTURE & SKEW (v5.2) -----------------
 SKEW_ZSCORE_THRESHOLD: float = 1.50         # Z-Score boundary for 25-Delta Put Skew spikes (Crash Risk Gate)
@@ -128,7 +128,7 @@ VCR_SQUEEZE_THRESHOLD: float = 0.15         # Realized Volatility Ratio (5d / 60
 CVD_ABSORPTION_THRESHOLD: float = 1.20      # Ratio of Delta expansion to Price displacement for Absorption
 
 # ----------------- SIGNAL QUALITY & UNIVERSAL GATES (Phase 1-5) -----------------
-SIGNAL_MIN_CONFLUENCE: float = 70.0         # Pre-decision score floor; below -> WAIT (Veto, not label)
+SIGNAL_MIN_CONFLUENCE: float = 55.0         # Pre-decision score floor; below -> WAIT (Veto, not label)
 COOLDOWN_BARS: int = 12                     # 60 min of 5m bars between fresh entries
 MAX_OPEN_TRADES: int = 1                    # Single active position concurrency limit
 GATE_FAIL_TO_WAIT: bool = True              # Missing gate data -> safe WAIT, never trade

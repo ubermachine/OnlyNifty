@@ -215,12 +215,14 @@ class DataEngine:
             from src import fyers_client
             fy_symbol = "NSE:NIFTY50-INDEX" if symbol.upper() == "NIFTY" else f"NSE:{symbol.upper()}-INDEX"
             multi = fyers_client.get_multi_expiry_chain(fy_symbol)
-            return {
-                "underlying_value": multi["underlying_value"],
-                "expiry_dates": multi["expiry_dates"],
-                "dataframe": multi["near_chain"],
-                "source": multi["source"]
-            }
+            if multi and isinstance(multi.get("near_chain"), pd.DataFrame) and not multi["near_chain"].empty:
+                return {
+                    "underlying_value": multi["underlying_value"],
+                    "expiry_dates": multi["expiry_dates"],
+                    "dataframe": multi["near_chain"],
+                    "source": multi.get("source", "Fyers API v3 (Live Broker)"),
+                    "data_quality": "VERIFIED"
+                }
         except Exception:
             pass
 
@@ -257,17 +259,20 @@ class DataEngine:
                         "pe_volume": pe_vol,
                     })
                 df = pd.DataFrame(rows)
-                if not df.empty:
+                if not df.empty and len(df) >= 5:
                     return {
                         "underlying_value": underlying,
                         "expiry_dates": expiry_dates,
                         "dataframe": df,
-                        "source": "jugaad-data (NSELive)"
+                        "source": "jugaad-data (NSELive Scraping)",
+                        "data_quality": "VERIFIED"
                     }
         except Exception:
             pass
             
-        return self.generate_synthetic_option_chain(spot=24395.85)
+        syn = self.generate_synthetic_option_chain(spot=24395.85)
+        syn["data_quality"] = "POSITIONING_UNVERIFIED"
+        return syn
 
     def generate_synthetic_option_chain(self, spot: float = 24395.85) -> Dict[str, Any]:
         """Generates realistic synthetic NSE Option Chain with OI and Greeks for offline resilience."""

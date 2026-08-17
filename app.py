@@ -270,9 +270,19 @@ def load_market_data(mode_choice: str, tf: str) -> pd.DataFrame:
 def load_live_option_chain_data(mode_key: str = "Live") -> dict:
     engine = get_data_engine()
     try:
-        return engine.fetch_live_nse_option_chain(symbol="NIFTY")
+        res = engine.fetch_live_nse_option_chain(symbol="NIFTY")
+        if isinstance(res, dict) and isinstance(res.get("dataframe"), pd.DataFrame) and not res["dataframe"].empty:
+            return res
+        syn = engine.generate_synthetic_option_chain(spot=24395.85)
+        syn["data_quality"] = "POSITIONING_UNVERIFIED"
+        syn["source"] = "Synthetic Fallback Chain (Empty Frame)"
+        return syn
     except Exception as e:
-        return {"dataframe": pd.DataFrame(), "data_quality": "UNAVAILABLE", "error": str(e)}
+        syn = engine.generate_synthetic_option_chain(spot=24395.85)
+        syn["data_quality"] = "POSITIONING_UNVERIFIED"
+        syn["source"] = "Synthetic Fallback Chain"
+        syn["error"] = str(e)
+        return syn
 
 @st.cache_data(ttl=30, max_entries=3, show_spinner=False)
 def load_live_vix() -> float:
@@ -869,12 +879,26 @@ TCA Friction: ₹{opt.get('tca_friction', 0.0):.1f}
 </div>'''
 else:
     ticket_html = '''<div style="background: rgba(251, 176, 36, 0.04); border: 1px dashed #334155; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; color: #64748b; text-align: center;">
-No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 70.0%).
+No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 55.0%).
 </div>'''
 
 qual_clr = "#05df72" if desk_verdict.data_quality == "VERIFIED" else "#fbb024"
 trend_clr = '#05df72' if desk_verdict.trend_bias == 'BULLISH' else ('#ff3355' if desk_verdict.trend_bias == 'BEARISH' else '#fbb024')
 trend_arrow = '▲' if desk_verdict.trend_bias == 'BULLISH' else ('▼' if desk_verdict.trend_bias == 'BEARISH' else '◆')
+
+_chain_source_name = str(oc_raw.get("source", "Live")) if isinstance(oc_raw, dict) else "Live"
+_oc_strike_count = len(oc_df) if isinstance(oc_df, pd.DataFrame) else 0
+_degraded_chain_banner = ""
+if desk_verdict.data_quality != "VERIFIED" or "synthetic" in _chain_source_name.lower() or "fallback" in _chain_source_name.lower():
+    _chain_err = str(oc_raw.get("error", "")) if isinstance(oc_raw, dict) else ""
+    _err_detail = f" — {_chain_err}" if _chain_err else ""
+    _degraded_chain_banner = f'''<div style="background: rgba(239, 68, 68, 0.12); border: 1px solid #ef4444; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
+<div style="display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 14px;">⚠️</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: #fca5a5;">OPTION CHAIN DATA DEGRADED: Using {_chain_source_name}{_err_detail}. Real positioning gates & wall pinning standing aside.</span>
+</div>
+<span style="font-size: 10px; color: #fca5a5; font-weight: 700; background: rgba(239, 68, 68, 0.2); padding: 2px 6px; border-radius: 3px;">UNVERIFIED</span>
+</div>'''
 
 # Conviction strip: how hard to bet, and which evidence families actually agree.
 conv_clr = {
@@ -923,6 +947,7 @@ desk_verdict_html = f'''<div style="background: #080c14; border: 1px solid #1c27
 FEED: <strong style="color: {active_feed_color};">{active_feed_label}</strong> • QUALITY: <strong style="color: {qual_clr};">{desk_verdict.data_quality}</strong> • CONFLUENCE: <strong style="color: #00d2ff;">{desk_verdict.confluence_score:.1f}% ({desk_verdict.confluence_grade})</strong>
 </div>
 </div>
+{_degraded_chain_banner}
 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #141d2f; padding-bottom: 10px; margin-bottom: 12px;">
 <div style="display: flex; align-items: center; gap: 12px;">
 <span style="background: {verdict_badge_bg}; color: {verdict_color}; border: 1px solid {verdict_color}; padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 800;">
@@ -953,7 +978,10 @@ Regime: <strong style="color: #cbd5e1;">{regime_state['active_regime']}</strong>
 </div>
 </div>
 <div style="background: #0d131f; border: 1px solid #1a2436; border-radius: 6px; padding: 10px 12px;">
-<div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px;">Expected Range & Dealer Walls</div>
+<div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px; display: flex; justify-content: space-between;">
+<span>Expected Range & Dealer Walls</span>
+<span style="font-size: 9px; color: #94a3b8; text-transform: none;">Chain: <strong style="color: {'#05df72' if desk_verdict.data_quality == 'VERIFIED' else '#fbb024'};">{_chain_source_name[:18]}</strong> ({_oc_strike_count} strikes)</span>
+</div>
 <div style="display: flex; justify-content: space-between; align-items: center;">
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: #f1f5f9;">
 <span style="color: #05df72;">₹{desk_verdict.range_corridor[0]:.0f}</span> (Put) ── <span style="color: #00d2ff;">● {desk_verdict.spot_position_pct:+.0f}%</span> ── <span style="color: #ff3355;">₹{desk_verdict.range_corridor[1]:.0f}</span> (Call){_breach_badge}

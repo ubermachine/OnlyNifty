@@ -276,11 +276,12 @@ def refresh_access_token() -> str:
     return tokens["access_token"]
 
 
-def get_access_token() -> str:
-    """Returns today's valid access_token, auto-logging in (TOTP flow) if not minted yet today."""
-    tokens = _load_tokens()
-    if tokens.get("access_token") and tokens.get("obtained_date") == _today_ist_str():
-        return tokens["access_token"]
+def get_access_token(force_refresh: bool = False) -> str:
+    """Returns today's valid access_token, auto-logging in (TOTP flow) if not minted yet today or if forced."""
+    if not force_refresh:
+        tokens = _load_tokens()
+        if tokens.get("access_token") and tokens.get("obtained_date") == _today_ist_str():
+            return tokens["access_token"]
     auto_login()
     return _load_tokens()["access_token"]
 

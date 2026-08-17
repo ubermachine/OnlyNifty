@@ -279,11 +279,11 @@ def calculate_confluence_score(
 
     final_score = min(max(round(score, 1), 0.0), 100.0)
 
-    if final_score >= 85.0:
+    if final_score >= 75.0:
         grade = "A+ Institutional"
-    elif final_score >= 70.0:
-        grade = "A Standard"
     elif final_score >= 55.0:
+        grade = "A Standard"
+    elif final_score >= 45.0:
         grade = "B Tactical"
     else:
         grade = "C Weak / Vetoed"
@@ -355,9 +355,13 @@ class LiveSignalJournal:
         if not is_actionable:
             if ticket.get("status") != "WAIT":
                 return None
-            # Filter duplicate consecutive WAIT logs
-            if self.entries and self.entries[-1].signal_type == "WAIT":
-                return None
+            # Filter duplicate consecutive WAIT logs only when the veto reason is identical.
+            # Logging distinct veto reason transitions preserves a complete audit trail of why the desk stood aside.
+            if self.entries and self.entries[-1].signal_type in ["WAIT", "AWAITING_SETUP", "NO_TRADE"]:
+                last_reason = getattr(self.entries[-1], "trigger_reason", "")
+                curr_reason = getattr(signal, "reason", "")
+                if last_reason == curr_reason:
+                    return None
         else:
             # Structural fingerprint: setup_id + direction + entry/SL band (10pt buckets).
             # Replaces the old bar_timestamp+direction dedup, which logged a fresh entry
@@ -392,14 +396,14 @@ class LiveSignalJournal:
             c_grade = str(signal.details.get("confluence_grade", "A Standard"))
         elif confluence_score is not None and confluence_score > 1.0:
             c_score = round(float(confluence_score), 1)
-            c_grade = "A+ Institutional" if c_score >= 85.0 else ("A Standard" if c_score >= 70.0 else ("B Tactical" if c_score >= 55.0 else "C Weak / Vetoed"))
+            c_grade = "A+ Institutional" if c_score >= 75.0 else ("A Standard" if c_score >= 55.0 else ("B Tactical" if c_score >= 45.0 else "C Weak / Vetoed"))
         elif df_context is not None and not df_context.empty:
             c_score, c_grade = calculate_confluence_score(
                 signal, df_context, htf_data, kalman_vel, kalman_z, regime_info, ofi_data, gex_data, vol_profile, options_context=options_context
             )
         else:
             c_score = round(confluence_score * 100.0, 1) if (confluence_score is not None and 0.0 < confluence_score <= 1.0) else (float(confluence_score) if confluence_score is not None else 0.0)
-            c_grade = "A+ Institutional" if c_score >= 85.0 else ("A Standard" if c_score >= 70.0 else ("B Tactical" if c_score >= 55.0 else "C Weak / Vetoed"))
+            c_grade = "A+ Institutional" if c_score >= 75.0 else ("A Standard" if c_score >= 55.0 else ("B Tactical" if c_score >= 45.0 else "C Weak / Vetoed"))
 
         entry_prem = float(ticket.get("entry_premium", 140.0 if is_actionable else 0.0))
         sl_prem = float(ticket.get("sl_premium", 110.0 if is_actionable else 0.0))
@@ -836,9 +840,10 @@ class LiveSignalJournal:
         total = len(self.entries)
         longs = sum(1 for e in self.entries if e.direction == "LONG")
         shorts = sum(1 for e in self.entries if e.direction == "SHORT")
-        active = sum(1 for e in self.entries if e.is_active())
+        active = sum(1 for e in self.entries if e.direction in ["LONG", "SHORT"] and e.is_active())
 
-        closed = [e for e in self.entries if not e.is_active()]
+        actionable_entries = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
+        closed = [e for e in actionable_entries if not e.is_active()]
         wins = [e for e in closed if e.realized_r_multiple > 0]
         losses = [e for e in closed if e.realized_r_multiple <= 0]
 
@@ -846,8 +851,7 @@ class LiveSignalJournal:
         total_pnl = sum(e.realized_pnl_rupees for e in closed)
         total_r = sum(e.realized_r_multiple for e in closed)
         avg_r = (total_r / len(closed)) if closed else 0.0
-        actionable_entries = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
-        avg_conf = float(np.mean([e.confluence_score for e in actionable_entries])) if actionable_entries else float(np.mean([e.confluence_score for e in self.entries]))
+        avg_conf = float(np.mean([e.confluence_score for e in actionable_entries])) if actionable_entries else 0.0
 
         gross_gains = sum(e.realized_pnl_rupees for e in wins)
         gross_losses = abs(sum(e.realized_pnl_rupees for e in losses))
@@ -859,7 +863,7 @@ class LiveSignalJournal:
 
         return {
             "total_signals": total,
-            "actionable_trades": total,
+            "actionable_trades": len(actionable_entries),
             "long_trades": longs,
             "short_trades": shorts,
             "active_trades": active,

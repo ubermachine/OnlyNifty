@@ -662,9 +662,9 @@ def build_desk_verdict(
             )
             confluence_score = float(np.clip(confluence_score, 0.0, 100.0))
             confluence_grade = (
-                "A+ Institutional" if confluence_score >= 85
-                else "A Standard" if confluence_score >= 70
-                else "B Moderate" if confluence_score >= 55
+                "A+ Institutional" if confluence_score >= 75
+                else "A Standard" if confluence_score >= 55
+                else "B Tactical" if confluence_score >= 45
                 else "C Weak / Vetoed"
             )
 

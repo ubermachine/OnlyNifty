@@ -22,19 +22,44 @@ IST = pytz.timezone("Asia/Kolkata")
 DATA_BASE = "https://api-t1.fyers.in/data"
 
 
-def _headers() -> Dict[str, str]:
+def _headers(force_refresh: bool = False) -> Dict[str, str]:
     cfg = _load_config()
     client_id = cfg["client_id"].strip()
     auth_app_id = client_id if client_id.endswith("-100") else f"{client_id}-100"
     return {
-        "Authorization": f"{auth_app_id}:{get_access_token()}",
+        "Authorization": f"{auth_app_id}:{get_access_token(force_refresh=force_refresh)}",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
 
+def _get_fyers_data(url: str, params: Dict[str, Any], timeout: int = 10) -> Dict[str, Any]:
+    """Makes a GET request to Fyers Data API, automatically re-authenticating on auth failure."""
+    try:
+        resp = requests.get(url, params=params, headers=_headers(force_refresh=False), timeout=timeout)
+        data = resp.json()
+        if data.get("s") == "ok":
+            return data
+        # Check if auth/token failure
+        err_msg = str(data.get("message") or data.get("error_msg") or "").lower()
+        if resp.status_code in (401, 403) or "token" in err_msg or "auth" in err_msg or "session" in err_msg or data.get("code") in (401, 403, -17):
+            resp = requests.get(url, params=params, headers=_headers(force_refresh=True), timeout=timeout)
+            data = resp.json()
+            if data.get("s") == "ok":
+                return data
+        return data
+    except Exception as e:
+        try:
+            resp = requests.get(url, params=params, headers=_headers(force_refresh=True), timeout=timeout)
+            data = resp.json()
+            if data.get("s") == "ok":
+                return data
+        except Exception:
+            pass
+        raise e
+
+
 def get_quote(symbol: str) -> Dict[str, Any]:
-    resp = requests.get(f"{DATA_BASE}/quotes", params={"symbols": symbol}, headers=_headers(), timeout=10)
-    data = resp.json()
+    data = _get_fyers_data(f"{DATA_BASE}/quotes", params={"symbols": symbol}, timeout=10)
     if data.get("s") != "ok" or not data.get("d"):
         raise RuntimeError(f"Fyers quote fetch failed for {symbol}: {data}")
     return data["d"][0]["v"]
@@ -50,8 +75,7 @@ def get_history(symbol: str, resolution: str, range_from: str, range_to: str) ->
         "range_to": range_to,
         "cont_flag": "1",
     }
-    resp = requests.get(f"{DATA_BASE}/history", params=params, headers=_headers(), timeout=10)
-    data = resp.json()
+    data = _get_fyers_data(f"{DATA_BASE}/history", params=params, timeout=10)
     if data.get("s") != "ok":
         raise RuntimeError(f"Fyers history fetch failed for {symbol}: {data}")
     candles = data.get("candles", [])
@@ -90,8 +114,7 @@ def _implied_vol(price: float, spot: float, strike: float, t_years: float, is_ca
 
 def get_option_chain_raw(symbol: str, strikecount: int = 20, timestamp: str = "") -> Dict[str, Any]:
     params = {"symbol": symbol, "strikecount": str(strikecount), "timestamp": timestamp}
-    resp = requests.get(f"{DATA_BASE}/options-chain-v3", params=params, headers=_headers(), timeout=10)
-    data = resp.json()
+    data = _get_fyers_data(f"{DATA_BASE}/options-chain-v3", params=params, timeout=10)
     if data.get("s") != "ok":
         raise RuntimeError(f"Fyers option chain fetch failed for {symbol}: {data}")
     return data["data"]
