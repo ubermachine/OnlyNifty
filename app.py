@@ -1295,7 +1295,8 @@ with tab_chart:
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False, "responsive": True, "scrollZoom": True})
 
     # Live Signals Stream directly in Chart View
-    df_live_feed = journal_engine.get_journal_dataframe(actionable_only=True)
+    today_date_str = datetime.now(IST).strftime("%Y-%m-%d")
+    df_live_feed = journal_engine.get_journal_dataframe(target_date=today_date_str, actionable_only=True, scope="today")
     if not df_live_feed.empty:
         with st.expander(f"📜 Today's Live Signals Feed ({len(df_live_feed)} Setups Captured Today)", expanded=True):
             display_cols = ["Time (IST)", "Direction", "Signal Type", "Symbol", "Spot Entry", "Stop Loss (₹)", "Target 1 (₹)", "Status", "Realized R", "Net PnL (₹)", "Confluence"]
@@ -1501,20 +1502,22 @@ with tab_journal:
     st.markdown("---")
     act_c1, act_c2, act_c3 = st.columns([1.5, 1.5, 1.0])
     
-    csv_bytes = journal_engine.export_csv_bytes()
+    csv_scope = "today" if selected_date_opt.startswith("Today") else ("all" if selected_date_opt == "All Dates" else "auto")
+    csv_target_date = today_ist_str if csv_scope == "today" else (target_date_val if target_date_val != "ALL" else None)
+    csv_bytes = journal_engine.export_csv_bytes(target_date=csv_target_date, scope=csv_scope)
     act_c1.download_button(
-        label="📥 Download Today's Trade Journal (CSV)",
+        label=f"📥 Download {'Today\'s' if csv_scope == 'today' else 'Selected'} Trade Journal (CSV)",
         data=csv_bytes,
-        file_name=f"nifty_trade_journal_{datetime.now(IST).strftime('%Y%m%d')}.csv",
+        file_name=f"nifty_trade_journal_{today_ist_str if csv_scope == 'today' else (csv_target_date or 'full_archive')}.csv",
         mime="text/csv",
         width="stretch"
     )
 
-    raw_json_data = json.dumps([e.to_dict() for e in journal_engine.entries], indent=2).encode("utf-8")
+    raw_json_data = json.dumps([e.to_dict() for e in display_entries], indent=2).encode("utf-8")
     act_c2.download_button(
-        label="📥 Download Full Audit Store (JSON)",
+        label=f"📥 Download {'Today\'s' if csv_scope == 'today' else 'Selected'} Audit Store (JSON)",
         data=raw_json_data,
-        file_name=f"nifty_audit_store_{datetime.now(IST).strftime('%Y%m%d')}.json",
+        file_name=f"nifty_audit_store_{today_ist_str if csv_scope == 'today' else (csv_target_date or 'full_archive')}.json",
         mime="application/json",
         width="stretch"
     )

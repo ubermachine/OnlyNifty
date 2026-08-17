@@ -824,8 +824,20 @@ class LiveSignalJournal:
 
         return seeded_count
 
-    def get_journal_dataframe(self, target_date: Optional[str] = None, actionable_only: bool = False) -> pd.DataFrame:
-        """Returns a Pandas DataFrame formatted for table inspection, optionally filtered by date and actionable status."""
+    def get_journal_dataframe(
+        self,
+        target_date: Optional[str] = None,
+        actionable_only: bool = False,
+        scope: str = "auto"
+    ) -> pd.DataFrame:
+        """
+        Returns a Pandas DataFrame formatted for table inspection, optionally filtered by date and actionable status.
+        
+        Args:
+            target_date: Optional date string ('YYYY-MM-DD').
+            actionable_only: If True, include only LONG and SHORT setups.
+            scope: 'today' (enforce today's date), 'all' (return full history), or 'auto' (target_date if passed, else all).
+        """
         if not self.entries:
             return pd.DataFrame()
 
@@ -834,8 +846,18 @@ class LiveSignalJournal:
             return ts[:10] if len(ts) >= 10 else ""
 
         entries = self.entries
-        if target_date:
-            entries = [e for e in entries if _entry_date(e) == target_date]
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+        if scope == "today":
+            target = target_date or today_str
+            entries = [e for e in entries if _entry_date(e) == target]
+        elif scope == "all":
+            if target_date and target_date != "ALL":
+                entries = [e for e in entries if _entry_date(e) == target_date]
+        else:  # "auto"
+            if target_date and target_date != "ALL":
+                entries = [e for e in entries if _entry_date(e) == target_date]
+
         if actionable_only:
             entries = [e for e in entries if e.direction in ["LONG", "SHORT"]]
 
@@ -981,9 +1003,9 @@ class LiveSignalJournal:
         self._last_hash = "GENESIS_ROOT_HASH_0000000000000000"
         self._persist_to_disk()
 
-    def export_csv_bytes(self) -> bytes:
+    def export_csv_bytes(self, target_date: Optional[str] = None, scope: str = "all") -> bytes:
         """Exports the journal entries to CSV format as bytes for browser downloading."""
-        df = self.get_journal_dataframe(actionable_only=False)
+        df = self.get_journal_dataframe(target_date=target_date, actionable_only=False, scope=scope)
         if df.empty:
             return b"Timestamp,Signal_Type,Direction,Spot_Price,Symbol,Status\n"
         return df.to_csv(index=False).encode("utf-8")
