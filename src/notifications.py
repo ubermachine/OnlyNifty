@@ -65,12 +65,19 @@ class TelegramNotifier:
 
     def _send_telegram_post(self, token: str, chat_id: str, text: str, parse_mode: str = "HTML") -> Tuple[bool, str]:
         """Synchronous HTTP POST to Telegram Bot API with timeout."""
-        if not token or not chat_id:
+        clean_token = (token or "").strip()
+        clean_chat_id = (chat_id or "").strip()
+
+        if not clean_token or not clean_chat_id:
             return False, "Telegram Bot Token or Chat ID not configured."
 
-        url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
+        # Validate token format to avoid malformed URL requests from accidental text paste
+        if " " in clean_token or "\n" in clean_token or ":" not in clean_token:
+            return False, "Invalid Telegram Bot Token format. Tokens look like '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ'. Please verify the Bot Token."
+
+        url = f"https://api.telegram.org/bot{clean_token}/sendMessage"
         payload = {
-            "chat_id": chat_id.strip(),
+            "chat_id": clean_chat_id,
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": True
