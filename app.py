@@ -845,10 +845,12 @@ _vcr_val = float(vol_report.get("vcr_squeeze", {}).get("vcr_ratio", 1.0))
 _er_val = float(ker_data.get("efficiency_ratio", 0.0))
 _er_regime = str(ker_data.get("regime", "CHOP_OR_REVERSAL"))
 _er_clr = "#05df72" if _er_val >= 0.15 else ("#fbb024" if _er_val >= 0.08 else "#ff3355")
+_session_bars = int(np.sum(df.index.date == df.index[-1].date())) if (hasattr(df.index, "date") and len(df.index) > 0) else len(df)
+_conv_tag = f"converging · {_session_bars}/75 bars" if _session_bars < 45 else f"mature · {_session_bars}/75 bars"
 
 st.markdown(f'''
 <div style="background-color: #080c14; border: 1px solid #162032; border-radius: 6px; padding: 4px 12px; margin-bottom: 8px; font-size: 11px; color: #8e9fb5; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace;">
-    <div><strong>🌐 ENVIRONMENT QUALITY:</strong> Efficiency Ratio (ER): <strong style="color: {_er_clr};">{_er_val:.3f} ({_er_regime})</strong> | ATR(14): <strong style="color: #f1f5f9;">{_atr_val:.1f} pts</strong> | Dynamic Stop Cap: <strong style="color: #00d2ff;">2.0x ATR ({min(60.0, 2.0 * _atr_val):.1f} pts)</strong></div>
+    <div><strong>🌐 ENVIRONMENT QUALITY:</strong> ER: <strong style="color: {_er_clr};">{_er_val:.3f}</strong> <span style="font-size: 10px; color: {_er_clr}; opacity: 0.9;">({_er_regime} · {_conv_tag})</span> | ATR(14): <strong style="color: #f1f5f9;">{_atr_val:.1f} pts</strong> | Stop Cap: <strong style="color: #00d2ff;">2.0x ATR ({min(60.0, 2.0 * _atr_val):.1f} pts)</strong></div>
     <div>Session Range / Exp: <strong style="color: #f1f5f9;">{day_range_pts:.1f} / {_exp_range:.1f} pts ({_move_ratio:.2f}x)</strong> | Vol Squeeze: <strong style="color: {'#05df72' if _vcr_val >= 0.15 else '#ff3355'};">{_vcr_val:.2f}</strong></div>
 </div>
 ''', unsafe_allow_html=True)

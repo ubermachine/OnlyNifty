@@ -240,7 +240,7 @@ data_quality: str                   # "VERIFIED" vs "UNVERIFIED"
 | **Daily Loss Limit (DLL)** | $\text{Realized PnL} \le -1.5\%$ | Daily capital defense ceiling | Session halt & terminal lock |
 | **2-Strike Loss Breaker** | 2 consecutive session losses | Negative momentum streak | Session halt & terminal lock |
 | **Relative Cooldown** | $< 12$ bars since last entry | High-frequency overtrading prevention | Blocks new entries until 12 bars elapse |
-| **Kaufman Efficiency Ratio (KER)** | $ER < 0.08$ (Chop) vs $ER \ge 0.15$ (Trend) | Trend vs Chop discrimination | Penalizes momentum breakouts in chop ($-15\text{ pts}$); boosts in strong trend ($+8\text{ pts}$) |
+| **Kaufman Efficiency Ratio (KER)** | $ER < 0.08$ (Chop) vs $ER \ge 0.15$ (Trend) | Trend vs Chop discrimination | Displayed in Banner (`N/75 bars`); decoupled from live intraday conviction scoring |
 
 ---
 
@@ -248,16 +248,20 @@ data_quality: str                   # "VERIFIED" vs "UNVERIFIED"
 
 1. **Pure Session Kaufman Efficiency Ratio ($ER$):**
    $$ER_{\text{session}} = \frac{|P_{\text{current}} - P_{\text{open\_session}}|}{\sum_{i=1}^{N_{\text{session}}} |P_i - P_{i-1}|}$$
-   - **Agent Invariant:** Never blend short rolling windows (e.g. 14 bars) into session ER when $\ge 6$ bars exist. Rolling 14-bar windows lack multi-hour V-reversals and hover around $\approx 0.42$ on both trend and chop days, destroying the 5x discrimination ($ER=0.037$ on chop vs $0.189$ on trend).
+   - **Agent Invariant:** Never blend short rolling windows (e.g. 14 bars) into session ER when $\ge 6$ bars exist. Rolling 14-bar windows lack multi-hour V-reversals and hover around $\approx 0.42$ on both trend and chop days, destroying the 5× discrimination ($ER=0.037$ on chop vs $0.189$ on trend).
+   - **Execution Invariant (Decoupled from Live Conviction):** Do NOT feed ER into live intraday conviction scoring or setup bonuses/penalties. Session ER is anchored to the session open and is naturally linear ($0.42$–$0.48$) through the entire morning of a V-reversal chop day. It is reserved strictly for display in the **Environment Quality Banner** (with a `converging · N/75 bars` progress tag) and post-session journal attribution where completed-session hindsight is valid.
    - **Regime Thresholds:**
-     - $ER \ge 0.15 \implies \text{STRONG\_TREND}$ (Momentum bonus $+8\text{ pts}$, counter-trend fade penalty $-15\text{ pts}$).
-     - $0.08 \le ER < 0.15 \implies \text{MODERATE\_TREND}$ (Neutral persistence).
-     - $ER < 0.08 \implies \text{CHOP\_OR\_REVERSAL}$ (Momentum penalty $-15\text{ pts}$, range fade/absorption bonus $+8\text{ pts}$).
+     - $ER \ge 0.15 \implies \text{STRONG\_TREND}$
+     - $0.08 \le ER < 0.15 \implies \text{MODERATE\_TREND}$
+     - $ER < 0.08 \implies \text{CHOP\_OR\_REVERSAL}$
 
 2. **Ranked Opportunity Board Contract Defense:**
    - **Dual Key Resolution Invariant:** Extraction layers (`desk_verdict.py`, `app.py`) must defensively extract both short (`entry`, `sl`, `t1`, `t2`, `t3`) and verbose (`entry_price`, `sl_price`, `target_1`, etc.) keys.
    - **Opportunity Preservation:** Never delete or collapse rejected setups into a single string. Surface all candidates (Active Recommended, Gate Vetoed, Quarantined, Confluence Floor) ranked by conviction with full price levels and $R_{\text{T1}}$.
+   - **Strict Status Precedence:** Prioritize `EDGE_QUARANTINED` before `CONFLUENCE_FLOOR` and match strictly on `veto_gate` enums (never prose text).
+   - **10-Point Bucket Deduplication:** Bucket entries and SLs to 10 points to cleanly collapse near-identical setups on the same bar.
 
 3. **Signature Keyword Defense Invariant:**
    - Always call multi-parameter journal/analytical functions (`cluster_context`, `log_signal`, `build_desk_verdict`) with explicit keyword arguments to prevent positional argument sliding.
+
 
