@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import json
 import textwrap
@@ -847,6 +847,65 @@ if logged_entry is not None and getattr(logged_entry, "direction", "WAIT") in ["
         blocking=False
     )
 
+# ----------------- PERISHABLE PREMIUM HARVESTER (QUOTE-tier edge) -----------------
+# Option-premium history is perishable: Fyers serves a contract's own candles only while it
+# is live, and returns "Invalid symbol" once expired. So we must (1) capture the exact live
+# contract at signal time and (2) resolve matured captures from that contract's real premium
+# OHLCV on subsequent runs. This is the ONLY path to edge measured in the instrument traded.
+# Every failure is swallowed — the harvester must never break the decision pipeline.
+measured_conviction = None
+try:
+    from src.premium_harvester import PremiumHarvester
+    from src.signal_edge import SignalEdgeWeighter
+    from src.edge_harness import EdgeTable
+    from src.premium_archive import PremiumArchive
+    from src import fyers_client as _fc
+
+    _harvester = PremiumHarvester()
+    _archive = PremiumArchive()   # durable parquet candle store — survives contract expiry
+    _active_regime = regime_state.get("active_regime", "UNKNOWN") if isinstance(regime_state, dict) else "UNKNOWN"
+    _setup_id = getattr(signal, "signal_type", None).value if getattr(signal, "signal_type", None) else "UNKNOWN"
+    _near_expiry_label = oc_raw.get("near_expiry") if isinstance(oc_raw, dict) else ""
+
+    # 1. Capture: only fires for actionable, live MARKET_QUOTE tickets (no-op otherwise).
+    if (
+        ticket.get("status") == "READY"
+        and ticket.get("pricing_source") == "MARKET_QUOTE"
+        and getattr(signal, "direction", "WAIT") in ("LONG", "SHORT")
+    ):
+        _harvester.capture(
+            ticket=ticket, setup_id=_setup_id, regime=_active_regime,
+            direction=signal.direction, bar_timestamp=last_bar_ts,
+            expiry_epoch=int(near_expiry_epoch or 0), expiry_label=_near_expiry_label,
+        )
+        # Persist the captured contract's candles to the durable archive so this trade can
+        # be resolved later even after the weekly contract expires and Fyers drops it.
+        try:
+            _fy_sym = ticket.get("fyers_symbol")
+            if _fy_sym:
+                _to = (now_ist_capture := datetime.now(IST)).date().isoformat()
+                _from = (now_ist_capture - timedelta(days=8)).date().isoformat()
+                _hist_df = _fc.get_history(_fy_sym, "5", _from, _to)
+                _archive.upsert(_near_expiry_label, ticket.get("strike"), ticket.get("option_type"),
+                                _hist_df, symbol=_fy_sym, resolution="5")
+        except Exception:
+            pass
+
+    # 2. Resolve matured captures — durable archive first, live re-fetch as fallback.
+    _harvester.resolve(fetch_history_fn=_fc.get_history, archive=_archive)
+
+    # 3. Fold realized QUOTE-tier edge over the walk-forward table and grade THIS setup by
+    #    demonstrated premium expectancy — the number the trader should actually weigh.
+    _quote_table = _harvester.build_edge_table()
+    _wf_table = EdgeTable.load_from_disk()
+    _weighter = SignalEdgeWeighter(_wf_table, _quote_table)
+    measured_conviction = _weighter.conviction_for(_setup_id, _active_regime)
+    _harvester_summary = _harvester.summary()
+except Exception as _harv_exc:
+    import logging
+    logging.getLogger("OnlyNifty").warning(f"Premium harvester skipped: {_harv_exc}")
+    _harvester_summary = {}
+
 t_latency_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
 refresh_tag = f"{auto_refresh_choice.upper()}" if auto_refresh_choice != "Off (Manual)" else "MANUAL STREAM"
 last_bar_display = df.index[-1].strftime("%H:%M:%S IST (%d %b)") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
@@ -1025,12 +1084,26 @@ _agree_label = (
     f"{desk_verdict.family_agreement}/4 aligned (WAIT)" if desk_verdict.action == "WAIT" and desk_verdict.family_agreement > 0
     else ("Split board (WAIT)" if desk_verdict.action == "WAIT" else f"{desk_verdict.family_agreement}/4 families agree")
 )
+# Measured Edge chip: setup graded by REALIZED option-premium expectancy (QUOTE-tier),
+# not asserted confluence. This is the number the trader should weigh most heavily.
+_measured_chip = ""
+if measured_conviction is not None:
+    _mc = measured_conviction
+    _mc_clr = {"A+": "#05df72", "A": "#38bdf8", "B": "#fbbf24", "C": "#ff3355", "UNMEASURED": "#64748b"}.get(_mc.grade, "#64748b")
+    _tier_txt = _mc.evidence_tier or "none"
+    _measured_chip = (
+        f'<span style="font-size: 10px; color: {_mc_clr}; margin-left: 10px; font-weight: 700;" '
+        f'title="{_mc.rationale}">MEASURED: {_mc.grade} '
+        f'({_mc.realized_ev:+.2f}R ×{_mc.n} [{_tier_txt}]) ⇒ size ×{_mc.conviction:.2f}</span>'
+    )
+
 conviction_html = f'''<div style="display: flex; justify-content: space-between; align-items: center; background: #0d131f; border: 1px solid {conv_clr}33; border-left: 3px solid {conv_clr}; border-radius: 6px; padding: 7px 12px; margin-bottom: 12px;">
 <div style="display: flex; align-items: center; gap: 12px;">
 <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 800; color: {conv_clr}; letter-spacing: 0.06em;">{desk_verdict.conviction_tier} CONVICTION</span>
 <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: #f1f5f9;">{desk_verdict.conviction_score:.0f}<span style="font-size: 9px; color: #64748b;">/100</span></span>
 <span style="font-size: 10px; color: #64748b;">{_agree_label}</span>
 {_edge_chip}
+{_measured_chip}
 {_cluster_chip}
 </div>
 <div style="display: flex; align-items: center;">{_fam_chips}</div>

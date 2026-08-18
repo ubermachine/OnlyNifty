@@ -18,6 +18,76 @@ import pandas as pd
 from src.config import QUARANTINE_MIN_SAMPLES, EDGE_OVERLAP_VIF, MIN_OOS_SAMPLES, TIME_STOP_BARS, TIME_STOP_MIN_R
 
 
+def replay_option_quote_series(
+    quote_series: pd.DataFrame,
+    entry_prem: float,
+    sl_prem: float,
+    t1_prem: float,
+    t2_prem: float,
+    t3_prem: float,
+) -> Optional[float]:
+    """Single authoritative QUOTE-tier resolver: replays a real option OHLCV series and
+    returns realized option R with 3-tier partial booking, breakeven trail after T1,
+    unbiased intrabar SL/target resolution (closer-to-open wins), and a stall time stop.
+
+    Used by BOTH the walk-forward harness and the perishable premium harvester so there
+    is exactly one option-outcome definition in the system.
+    """
+    if quote_series is None or quote_series.empty:
+        return None
+    sl_pts = max(entry_prem - sl_prem, 1.0)
+    r_t1 = (t1_prem - entry_prem) / sl_pts
+    r_t2 = (t2_prem - entry_prem) / sl_pts
+
+    live_sl = sl_prem
+    t1_booked = False
+    outcome_r = 0.0
+    bars_count = 0
+
+    for _, qbar in quote_series.iterrows():
+        bars_count += 1
+        qopen = float(qbar.get("open", entry_prem))
+        qhigh = float(qbar.get("high", entry_prem))
+        qlow = float(qbar.get("low", entry_prem))
+        qclose = float(qbar.get("close", entry_prem))
+
+        hit_sl = qlow <= live_sl
+        hit_t3 = t3_prem > 0 and qhigh >= t3_prem
+        hit_t2 = t2_prem > 0 and qhigh >= t2_prem
+        hit_t1 = t1_prem > 0 and qhigh >= t1_prem
+
+        # Unbiased intrabar resolution: if a bar spans both stop and a target,
+        # award whichever level sits closer to the bar's open.
+        if hit_sl and (hit_t1 or hit_t2 or hit_t3):
+            target_level = t3_prem if hit_t3 else (t2_prem if hit_t2 else t1_prem)
+            if abs(qopen - target_level) < abs(qopen - live_sl):
+                hit_sl = False
+
+        if hit_sl:
+            return round(0.5 * r_t1, 2) if t1_booked else -1.0
+        elif hit_t3 and t3_prem > 0:
+            return round((t3_prem - entry_prem) / sl_pts, 2)
+        elif hit_t2 and t2_prem > 0:
+            return round(0.5 * r_t1 + 0.5 * r_t2, 2)
+        elif hit_t1 and not t1_booked:
+            t1_booked = True
+            outcome_r = round(0.5 * r_t1, 2)
+            live_sl = entry_prem  # trail remaining 50% to breakeven
+
+        if not t1_booked and bars_count >= TIME_STOP_BARS:
+            cur_r = (qclose - entry_prem) / sl_pts
+            if cur_r < TIME_STOP_MIN_R:
+                return round(cur_r, 2)
+
+    # Window expired still open
+    if not t1_booked and outcome_r == 0.0:
+        if len(quote_series) >= TIME_STOP_BARS:
+            final_close = float(quote_series.iloc[-1]["close"])
+            return round((final_close - entry_prem) / sl_pts, 2)
+        return None
+    return outcome_r
+
+
 @dataclass
 class EdgeStats:
     setup_id: str
@@ -212,64 +282,15 @@ class WalkForwardRunner:
         """
         is_long = "LONG" in sig.signal_type.value
         
-        # 1. Direct Option Quote Series Replay (QUOTE Tier)
+        # 1. Direct Option Quote Series Replay (QUOTE Tier) — delegates to the single
+        #    shared resolver so harness and harvester never diverge.
         if quote_series is not None and not quote_series.empty:
             entry_prem = float(ticket.get("entry_premium", quote_series.iloc[0]["open"])) if ticket else float(quote_series.iloc[0]["open"])
             sl_prem = float(ticket.get("sl_premium", max(entry_prem * 0.75, 5.0))) if ticket else max(entry_prem * 0.75, 5.0)
             t1_prem = float(ticket.get("target1_premium", entry_prem * 1.30)) if ticket else entry_prem * 1.30
             t2_prem = float(ticket.get("target2_premium", entry_prem * 1.60)) if ticket else entry_prem * 1.60
             t3_prem = float(ticket.get("target3_moonshot_premium", entry_prem * 2.0)) if ticket else entry_prem * 2.0
-
-            sl_pts = max(entry_prem - sl_prem, 1.0)
-            r_t1 = (t1_prem - entry_prem) / sl_pts
-            r_t2 = (t2_prem - entry_prem) / sl_pts
-
-            live_sl = sl_prem
-            t1_booked = False
-            outcome_r = 0.0
-            bars_count = 0
-
-            for _, qbar in quote_series.iterrows():
-                bars_count += 1
-                qopen = float(qbar.get("open", entry_prem))
-                qhigh = float(qbar.get("high", entry_prem))
-                qlow = float(qbar.get("low", entry_prem))
-                qclose = float(qbar.get("close", entry_prem))
-
-                hit_sl = qlow <= live_sl
-                hit_t3 = t3_prem > 0 and qhigh >= t3_prem
-                hit_t2 = t2_prem > 0 and qhigh >= t2_prem
-                hit_t1 = t1_prem > 0 and qhigh >= t1_prem
-
-                if hit_sl and (hit_t1 or hit_t2 or hit_t3):
-                    target_level = t3_prem if hit_t3 else (t2_prem if hit_t2 else t1_prem)
-                    if abs(qopen - target_level) < abs(qopen - live_sl):
-                        hit_sl = False
-
-                if hit_sl:
-                    outcome_r = round(0.5 * r_t1, 2) if t1_booked else -1.0
-                    return outcome_r
-                elif hit_t3 and t3_prem > 0:
-                    r_t3 = (t3_prem - entry_prem) / sl_pts
-                    return round(r_t3, 2)
-                elif hit_t2 and t2_prem > 0:
-                    return round(0.5 * r_t1 + 0.5 * r_t2, 2)
-                elif hit_t1 and not t1_booked:
-                    t1_booked = True
-                    outcome_r = round(0.5 * r_t1, 2)
-                    live_sl = entry_prem
-
-                if not t1_booked and bars_count >= TIME_STOP_BARS:
-                    cur_r = (qclose - entry_prem) / sl_pts
-                    if cur_r < TIME_STOP_MIN_R:
-                        return round(cur_r, 2)
-
-            if not t1_booked and outcome_r == 0.0:
-                if len(quote_series) >= TIME_STOP_BARS:
-                    final_close = float(quote_series.iloc[-1]["close"])
-                    return round((final_close - entry_prem) / sl_pts, 2)
-                return None
-            return outcome_r
+            return replay_option_quote_series(quote_series, entry_prem, sl_prem, t1_prem, t2_prem, t3_prem)
 
         # 2. Derivatives-Translated Greeks Model Replay (MODEL Tier)
         entry_px = float(sig.entry_price)

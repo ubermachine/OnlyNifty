@@ -38,3 +38,5 @@ data/options_state.json
 !data/archive/
 !data/archive/*.jsonl
 !data/edge_table.json
+data/premium_pending.jsonl
+data/premium_resolved.jsonl
