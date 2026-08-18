@@ -20,6 +20,8 @@ data/test_*.json
 .secrets/*
 !.secrets/*.example.json
 .env
+.streamlit/secrets.toml
+.streamlit/*.toml
 
 # OS generated
 .DS_Store

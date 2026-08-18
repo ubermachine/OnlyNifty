@@ -11,4 +11,5 @@ pytest>=8.2.0
 requests>=2.32.0
 optuna>=4.0.0
 pyotp>=2.9.0
-
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0

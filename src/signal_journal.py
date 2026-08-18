@@ -415,6 +415,20 @@ class LiveSignalJournal:
             except Exception:
                 self.entries = []
 
+        # If local disk has no entries (e.g. fresh ephemeral container on Streamlit Cloud), restore from Neon
+        if not self.entries:
+            try:
+                today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+                from src.cloud_storage import fetch_signals_by_date
+                cloud_records = fetch_signals_by_date(today_ist)
+                if cloud_records:
+                    self.entries = [SignalEntry.from_dict(item) for item in cloud_records]
+                    if self.entries:
+                        self._last_hash = self.entries[-1].record_hash or self._last_hash
+                    self._persist_to_disk()
+            except Exception:
+                pass
+
     def log_signal(
         self,
         signal: Signal,
@@ -618,6 +632,11 @@ class LiveSignalJournal:
         self._last_hash = rec_hash
         self.entries.append(entry)
         self._persist_to_disk()
+        try:
+            from src.cloud_storage import upsert_signal_async
+            upsert_signal_async(entry.to_dict())
+        except Exception:
+            pass
         return entry
 
     def update_open_trades_lifecycle(
@@ -868,6 +887,13 @@ class LiveSignalJournal:
 
         if updates_count > 0:
             self._persist_to_disk()
+            try:
+                from src.cloud_storage import upsert_signal_async
+                with self._lifecycle_lock:
+                    for ev_entry, _, _, _ in self._pending_lifecycle_events:
+                        upsert_signal_async(ev_entry.to_dict())
+            except Exception:
+                pass
 
         return updates_count
 
