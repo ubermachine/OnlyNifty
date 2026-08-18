@@ -333,15 +333,18 @@ class LiveSignalJournal:
         self.reload_from_disk()
 
     def _cleanup_orphaned_temps(self) -> None:
-        """Unlinks any stale atomic-write temp files left over from interrupted sessions."""
+        """Unlinks any stale atomic-write temp files older than 60 seconds."""
         if not self.persistence_file:
             return
         try:
+            import time
+            now = time.time()
             parent_dir = os.path.dirname(self.persistence_file) or "."
             pattern = os.path.join(parent_dir, "*.tmp.*")
             for tmp_file in glob.glob(pattern):
                 try:
-                    os.unlink(tmp_file)
+                    if (now - os.path.getmtime(tmp_file)) > 60:
+                        os.unlink(tmp_file)
                 except Exception:
                     pass
         except Exception:
@@ -351,6 +354,7 @@ class LiveSignalJournal:
         """
         Flushes entries belonging to previous calendar dates into immutable JSONL daily archives
         (data/archive/signals-YYYY-MM-DD.jsonl) and retains only today's session entries in active memory.
+        Uses bar_timestamp as the authoritative session date and record_hash as unique dedup key.
         """
         if not self.entries or not self.archive_dir:
             return
@@ -360,11 +364,12 @@ class LiveSignalJournal:
         today_entries: List[SignalEntry] = []
 
         for e in self.entries:
+            # Authoritative session date: bar_timestamp first, fallback to timestamp_ist
             e_date = None
-            if e.timestamp_ist and len(e.timestamp_ist) >= 10:
-                e_date = e.timestamp_ist[:10]
-            elif e.bar_timestamp and len(e.bar_timestamp) >= 10:
+            if e.bar_timestamp and len(e.bar_timestamp) >= 10:
                 e_date = e.bar_timestamp[:10]
+            elif e.timestamp_ist and len(e.timestamp_ist) >= 10:
+                e_date = e.timestamp_ist[:10]
 
             if e_date and e_date < today_ist:
                 by_date.setdefault(e_date, []).append(e)
@@ -379,23 +384,25 @@ class LiveSignalJournal:
             for date_str, old_entries in by_date.items():
                 archive_file = os.path.join(self.archive_dir, f"signals-{date_str}.jsonl")
                 
-                existing_ids = set()
+                # Content-addressed deduplication by record_hash
+                existing_hashes = set()
                 if os.path.exists(archive_file):
                     try:
                         with open(archive_file, "r", encoding="utf-8") as f:
                             for line in f:
                                 if line.strip():
                                     rec = json.loads(line)
-                                    if "signal_id" in rec:
-                                        existing_ids.add(rec["signal_id"])
+                                    h = rec.get("record_hash") or f"{rec.get('signal_id')}_{rec.get('bar_timestamp')}"
+                                    existing_hashes.add(h)
                     except Exception:
                         pass
 
                 with open(archive_file, "a", encoding="utf-8") as f:
                     for entry in old_entries:
-                        if entry.signal_id not in existing_ids:
+                        h = entry.record_hash or f"{entry.signal_id}_{entry.bar_timestamp}"
+                        if h not in existing_hashes:
                             f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
-                            existing_ids.add(entry.signal_id)
+                            existing_hashes.add(h)
 
             self.entries = today_entries
             self._persist_to_disk()
@@ -556,10 +563,6 @@ class LiveSignalJournal:
         else:
             sig_id = f"SIG-{datetime.now(IST).strftime('%Y%m%d')}-{datetime.now(IST).strftime('%H%M%S')}-{strike}{opt_type}"
 
-        # SHA-256 Chaining
-        rec_payload = f"{sig_id}_{now_ist}_{strike}_{entry_prem}_{self._last_hash}"
-        rec_hash = hashlib.sha256(rec_payload.encode("utf-8")).hexdigest()
-
         conviction_score = float(ticket.get("conviction_score", 0.0) or getattr(signal, "conviction_score", 0.0) or 0.0)
         conviction_tier = str(ticket.get("conviction_tier", "") or getattr(signal, "conviction_tier", "LOW") or "LOW")
         family_votes = dict(ticket.get("family_votes", {}) or getattr(signal, "family_votes", {}) or {})
@@ -620,7 +623,7 @@ class LiveSignalJournal:
             },
             notes="Institutional setup triggered & registered in audit log." if is_actionable else "Consolidation / Awaiting confluence trigger.",
             prev_hash=self._last_hash,
-            record_hash=rec_hash,
+            record_hash="",
             conviction_score=conviction_score,
             conviction_tier=conviction_tier,
             family_votes=family_votes,
@@ -629,6 +632,8 @@ class LiveSignalJournal:
             schema_version=2
         )
 
+        rec_hash = compute_sha256_record_hash(self._last_hash, entry.to_dict())
+        entry.record_hash = rec_hash
         self._last_hash = rec_hash
         self.entries.append(entry)
         self._persist_to_disk()

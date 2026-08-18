@@ -84,7 +84,8 @@ def init_db() -> bool:
             with conn.cursor() as cur:
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals_journal_audit (
-                    signal_id TEXT PRIMARY KEY,
+                    record_hash TEXT PRIMARY KEY,
+                    signal_id TEXT,
                     timestamp_ist TEXT,
                     session_date TEXT,
                     spot_price DOUBLE PRECISION,
@@ -99,13 +100,13 @@ def init_db() -> bool:
                     lifecycle_status TEXT,
                     realized_r_multiple DOUBLE PRECISION DEFAULT 0.0,
                     realized_pnl_rupees DOUBLE PRECISION DEFAULT 0.0,
-                    record_hash TEXT,
                     prev_hash TEXT,
                     payload JSONB,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS idx_signals_session_date ON signals_journal_audit (session_date);
+                CREATE INDEX IF NOT EXISTS idx_signals_signal_id ON signals_journal_audit (signal_id);
                 CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals_journal_audit (created_at);
                 """)
                 conn.commit()
@@ -130,7 +131,7 @@ def upsert_signal(entry_dict: Dict[str, Any]) -> bool:
 
     sig_id = entry_dict["signal_id"]
     ts_ist = entry_dict.get("timestamp_ist", "")
-    sess_date = ts_ist[:10] if len(ts_ist) >= 10 else (entry_dict.get("bar_timestamp", "")[:10] or datetime.now(IST).strftime("%Y-%m-%d"))
+    sess_date = entry_dict.get("bar_timestamp", "")[:10] or (ts_ist[:10] if len(ts_ist) >= 10 else datetime.now(IST).strftime("%Y-%m-%d"))
     spot = float(entry_dict.get("spot_price", 0.0))
     sig_type = str(entry_dict.get("signal_type", ""))
     direction = str(entry_dict.get("direction", "WAIT"))
@@ -143,7 +144,7 @@ def upsert_signal(entry_dict: Dict[str, Any]) -> bool:
     status = str(entry_dict.get("lifecycle_status", "TRIGGERED"))
     r_mult = float(entry_dict.get("realized_r_multiple", 0.0))
     pnl = float(entry_dict.get("realized_pnl_rupees", 0.0))
-    rec_hash = str(entry_dict.get("record_hash", ""))
+    rec_hash = str(entry_dict.get("record_hash", "")) or f"{sig_id}_{entry_dict.get('bar_timestamp', '')}"
     prev_hash = str(entry_dict.get("prev_hash", ""))
     payload_json = json.dumps(entry_dict, default=str)
 
@@ -153,24 +154,24 @@ def upsert_signal(entry_dict: Dict[str, Any]) -> bool:
             with conn.cursor() as cur:
                 cur.execute("""
                 INSERT INTO signals_journal_audit (
-                    signal_id, timestamp_ist, session_date, spot_price, signal_type,
+                    record_hash, signal_id, timestamp_ist, session_date, spot_price, signal_type,
                     direction, selected_strike, option_type, entry_premium, sl_spot,
                     target_1_spot, confluence_score, lifecycle_status, realized_r_multiple,
-                    realized_pnl_rupees, record_hash, prev_hash, payload, updated_at
+                    realized_pnl_rupees, prev_hash, payload, updated_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
                 )
-                ON CONFLICT (signal_id) DO UPDATE SET
+                ON CONFLICT (record_hash) DO UPDATE SET
                     lifecycle_status = EXCLUDED.lifecycle_status,
                     realized_r_multiple = EXCLUDED.realized_r_multiple,
                     realized_pnl_rupees = EXCLUDED.realized_pnl_rupees,
                     payload = EXCLUDED.payload,
                     updated_at = NOW();
                 """, (
-                    sig_id, ts_ist, sess_date, spot, sig_type,
+                    rec_hash, sig_id, ts_ist, sess_date, spot, sig_type,
                     direction, strike, opt_type, entry_prem, sl_spot,
                     t1_spot, conf_score, status, r_mult,
-                    pnl, rec_hash, prev_hash, payload_json
+                    pnl, prev_hash, payload_json
                 ))
                 conn.commit()
         return True
@@ -205,7 +206,7 @@ def upsert_signals_batch(entries: List[Dict[str, Any]]) -> int:
                     if not sig_id:
                         continue
                     ts_ist = entry_dict.get("timestamp_ist", "")
-                    sess_date = ts_ist[:10] if len(ts_ist) >= 10 else (entry_dict.get("bar_timestamp", "")[:10] or datetime.now(IST).strftime("%Y-%m-%d"))
+                    sess_date = entry_dict.get("bar_timestamp", "")[:10] or (ts_ist[:10] if len(ts_ist) >= 10 else datetime.now(IST).strftime("%Y-%m-%d"))
                     spot = float(entry_dict.get("spot_price", 0.0))
                     sig_type = str(entry_dict.get("signal_type", ""))
                     direction = str(entry_dict.get("direction", "WAIT"))
@@ -218,34 +219,33 @@ def upsert_signals_batch(entries: List[Dict[str, Any]]) -> int:
                     status = str(entry_dict.get("lifecycle_status", "TRIGGERED"))
                     r_mult = float(entry_dict.get("realized_r_multiple", 0.0))
                     pnl = float(entry_dict.get("realized_pnl_rupees", 0.0))
-                    rec_hash = str(entry_dict.get("record_hash", ""))
+                    rec_hash = str(entry_dict.get("record_hash", "")) or f"{sig_id}_{entry_dict.get('bar_timestamp', '')}"
                     prev_hash = str(entry_dict.get("prev_hash", ""))
                     payload_json = json.dumps(entry_dict, default=str)
 
                     cur.execute("""
                     INSERT INTO signals_journal_audit (
-                        signal_id, timestamp_ist, session_date, spot_price, signal_type,
+                        record_hash, signal_id, timestamp_ist, session_date, spot_price, signal_type,
                         direction, selected_strike, option_type, entry_premium, sl_spot,
                         target_1_spot, confluence_score, lifecycle_status, realized_r_multiple,
-                        realized_pnl_rupees, record_hash, prev_hash, payload, updated_at
+                        realized_pnl_rupees, prev_hash, payload, updated_at
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
                     )
-                    ON CONFLICT (signal_id) DO UPDATE SET
+                    ON CONFLICT (record_hash) DO UPDATE SET
                         lifecycle_status = EXCLUDED.lifecycle_status,
                         realized_r_multiple = EXCLUDED.realized_r_multiple,
                         realized_pnl_rupees = EXCLUDED.realized_pnl_rupees,
                         payload = EXCLUDED.payload,
                         updated_at = NOW();
                     """, (
-                        sig_id, ts_ist, sess_date, spot, sig_type,
+                        rec_hash, sig_id, ts_ist, sess_date, spot, sig_type,
                         direction, strike, opt_type, entry_prem, sl_spot,
                         t1_spot, conf_score, status, r_mult,
-                        pnl, rec_hash, prev_hash, payload_json
+                        pnl, prev_hash, payload_json
                     ))
                     count += 1
                 conn.commit()
-        return count
     except Exception as e:
         logger.warning(f"Batch upsert failed: {e}")
         return count
