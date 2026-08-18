@@ -53,6 +53,9 @@ class DeskVerdict:
     conviction_notes: List[str] = field(default_factory=list)    # what raised/lowered conviction
     edge_status: str = "UNMEASURED"      # walk-forward OOS status of the firing setup
     candidates: List[Dict[str, Any]] = field(default_factory=list)  # evaluated but vetoed/rejected candidate setups
+    efficiency_ratio: float = 0.0        # Kaufman Efficiency Ratio (ER) [0.0, 1.0]
+    efficiency_regime: str = "NEUTRAL"   # "STRONG_TREND" | "MODERATE_TREND" | "CHOP_OR_REVERSAL"
+    ranked_opportunities: List[Dict[str, Any]] = field(default_factory=list) # Full unified ranked board (Active + Vetoed)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -283,11 +286,13 @@ def compute_conviction(
     desk_state: Optional[OptionsDeskState] = None,
     data_quality: str = "VERIFIED",
     edge_status: str = "TRUSTED",
-    is_breakout: bool = False
+    is_breakout: bool = False,
+    efficiency_ratio: Optional[float] = None,
+    setup_id: str = ""
 ) -> Tuple[float, str, int, List[str]]:
     """
-    Blends independent-family agreement with the confluence score, then applies
-    real-world dampeners. Returns (score_0_100, tier, agreement_count, notes).
+    Blends independent-family agreement with the confluence score, Kaufman Efficiency Ratio (ER),
+    and real-world market microstructure dampeners. Returns (score_0_100, tier, agreement_count, notes).
     """
     notes: List[str] = []
 
@@ -326,6 +331,24 @@ def compute_conviction(
     elif opposed == 1:
         score -= 7.0
         notes.append("1 family opposes")
+
+    # Kaufman Efficiency Ratio (KER) Dynamic Conviction Calibration:
+    if efficiency_ratio is not None and efficiency_ratio > 0.0:
+        is_fade = "FADE" in setup_id.upper() or "ABSORPTION" in setup_id.upper() or "MEAN_REV" in setup_id.upper()
+        if efficiency_ratio >= 0.15:
+            if not is_fade:
+                score += 8.0
+                notes.append(f"trend efficiency high (ER={efficiency_ratio:.3f} >= 0.15)")
+            else:
+                score -= 15.0
+                notes.append(f"counter-trend fade penalized in strong trend (ER={efficiency_ratio:.3f})")
+        elif efficiency_ratio < 0.08:
+            if not is_fade:
+                score -= 15.0
+                notes.append(f"momentum penalized in chop regime (ER={efficiency_ratio:.3f} < 0.08)")
+            else:
+                score += 8.0
+                notes.append(f"range fade favored in chop regime (ER={efficiency_ratio:.3f} < 0.08)")
 
     if desk_state is not None:
         # Range exhaustion: if the day has already travelled well past its implied
@@ -697,6 +720,10 @@ def build_desk_verdict(
             )
 
     # 8. Conviction Synthesis — how hard to bet, not just which way.
+    er_raw = (options_context or {}).get("efficiency_ratio")
+    er_val = float(er_raw) if er_raw is not None else None
+    er_regime = str((options_context or {}).get("efficiency_regime", "NEUTRAL"))
+
     conviction_score, conviction_tier, family_agreement, conviction_notes = compute_conviction(
         action=action,
         votes=family_votes,
@@ -704,7 +731,9 @@ def build_desk_verdict(
         desk_state=desk_state,
         data_quality=data_quality,
         edge_status=edge_status,
-        is_breakout=is_breakout_action
+        is_breakout=is_breakout_action,
+        efficiency_ratio=er_val,
+        setup_id=sig_type_str
     )
 
     # 8b. Conviction floor — an actual veto, not a caption.
@@ -724,6 +753,81 @@ def build_desk_verdict(
 
     if action != "WAIT":
         action_label = f"[{conviction_tier}] {action_label}"
+
+    # 9. Unified Ranked Opportunity Board Synthesis
+    ranked_opps: List[Dict[str, Any]] = []
+
+    # Active recommended or evaluated primary setup
+    if sig_type_str and sig_type_str != "WAIT":
+        cand_r1 = round(abs(signal.target_1 - signal.entry_price) / max(abs(signal.entry_price - signal.sl_price), 1.0), 2) if signal.target_1 and signal.sl_price else 0.0
+        sig_stat = "ACTIVE_RECOMMENDED" if (option_pick is not None and action != "WAIT") else ("CONVICTION_FLOOR" if "CONVICTION_FLOOR" in reason else "VETOED_BY_GATE")
+        ranked_opps.append({
+            "setup_id": sig_type_str,
+            "direction": "LONG" if ("LONG" in sig_type_str or "CE" in action) else "SHORT",
+            "status": sig_stat,
+            "entry_price": round(signal.entry_price, 2),
+            "sl_price": round(signal.sl_price, 2),
+            "target_1": round(signal.target_1, 2),
+            "target_2": round(signal.target_2, 2),
+            "target_3": round(getattr(signal, "target_3_moonshot", 0.0), 2),
+            "r_multiple_t1": cand_r1,
+            "confluence_score": confluence_score,
+            "conviction_score": conviction_score,
+            "conviction_tier": conviction_tier,
+            "edge_status": edge_status,
+            "family_votes": family_votes,
+            "gate_audit": gate_audit,
+            "reason": reason
+        })
+
+    # Evaluated candidates (vetoed by gate, edge quarantine, or confluence floor)
+    rejected_list = (signal.details or {}).get("rejected_candidates", []) if signal and hasattr(signal, "details") and signal.details else []
+    for rej in rejected_list:
+        rej_setup = rej.get("signal_type", "UNKNOWN")
+        rej_dir = rej.get("direction", "LONG" if "LONG" in rej_setup else ("SHORT" if "SHORT" in rej_setup else "WAIT"))
+        rej_conf = float(rej.get("confluence", 0.0))
+        rej_edge = rej.get("edge_status", "UNMEASURED")
+        rej_action = "BUY_CE" if rej_dir == "LONG" else ("BUY_PE" if rej_dir == "SHORT" else "WAIT")
+        rej_is_bk = "BREAKOUT" in rej_setup.upper() or "3PM" in rej_setup.upper()
+        rej_conv_score, rej_tier, rej_agree, rej_notes = compute_conviction(
+            action=rej_action,
+            votes=family_votes,
+            confluence_score=rej_conf,
+            desk_state=desk_state,
+            data_quality=data_quality,
+            edge_status=rej_edge,
+            is_breakout=rej_is_bk,
+            efficiency_ratio=er_val,
+            setup_id=rej_setup
+        )
+        rej_entry = float(rej.get("entry_price", spot))
+        rej_sl = float(rej.get("sl_price", 0.0))
+        rej_t1 = float(rej.get("target_1", 0.0))
+        rej_r1 = round(abs(rej_t1 - rej_entry) / max(abs(rej_entry - rej_sl), 1.0), 2) if rej_t1 and rej_sl else 0.0
+        
+        ranked_opps.append({
+            "setup_id": rej_setup,
+            "direction": rej_dir,
+            "status": "VETOED_BY_GATE" if rej.get("veto_gate") else ("EDGE_QUARANTINED" if rej_edge == "QUARANTINED" else "CONFLUENCE_FLOOR"),
+            "entry_price": round(rej_entry, 2),
+            "sl_price": round(rej_sl, 2),
+            "target_1": round(rej_t1, 2),
+            "target_2": round(float(rej.get("target_2", 0.0)), 2),
+            "target_3": round(float(rej.get("target_3", 0.0)), 2),
+            "r_multiple_t1": rej_r1,
+            "confluence_score": rej_conf,
+            "conviction_score": rej_conv_score,
+            "conviction_tier": rej_tier,
+            "edge_status": rej_edge,
+            "family_votes": family_votes,
+            "gate_audit": rej.get("gate_audit", {}),
+            "reason": rej.get("reason", "Vetoed")
+        })
+
+    # Sort opportunities descending by conviction score, prioritizing active trades
+    ranked_opps.sort(key=lambda x: (x["status"] == "ACTIVE_RECOMMENDED", x["conviction_score"], x["confluence_score"]), reverse=True)
+    for idx, opp in enumerate(ranked_opps, 1):
+        opp["rank"] = idx
 
     return DeskVerdict(
         action=action,
@@ -749,5 +853,8 @@ def build_desk_verdict(
         directional_score=directional_score,
         conviction_notes=conviction_notes,
         edge_status=edge_status,
-        candidates=(signal.details or {}).get("rejected_candidates", []) if signal and hasattr(signal, "details") and signal.details else []
+        candidates=rejected_list,
+        efficiency_ratio=er_val if er_val is not None else 0.0,
+        efficiency_regime=er_regime,
+        ranked_opportunities=ranked_opps
     )

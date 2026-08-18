@@ -1068,9 +1068,16 @@ class LiveSignalJournal:
             return b"Timestamp,Signal_Type,Direction,Spot_Price,Symbol,Status\n"
         return df.to_csv(index=False).encode("utf-8")
 
-    def cluster_context(self, direction: str, now_ist: str = "", lookback_min: int = 90) -> Dict[str, Any]:
+    def cluster_context(
+        self,
+        direction: str,
+        setup_id: Optional[str] = None,
+        now_ist: str = "",
+        lookback_min: int = 90
+    ) -> Dict[str, Any]:
         """
-        Task 04: Evaluates signal sequence cluster position and prior-signal MFE decay.
+        Task 04 & Setup-Level Attribution: Evaluates signal sequence cluster position 
+        and prior-signal MFE decay across direction and specific setup_id.
         """
         actionable = [e for e in self.entries if e.direction in ["LONG", "SHORT"]]
         if not actionable:
@@ -1079,29 +1086,46 @@ class LiveSignalJournal:
                 "count": 0,
                 "prior_mfe_pts": [],
                 "prior_mfe_median": 0.0,
-                "prior_went_negative": 0
+                "prior_went_negative": 0,
+                "setup_index": 1,
+                "setup_count": 0,
+                "setup_mfe_median": 0.0,
+                "setup_went_negative": 0
             }
 
         same_dir = [e for e in actionable if e.direction == direction]
-        if not same_dir:
-            return {
-                "index": 1,
-                "count": 0,
-                "prior_mfe_pts": [],
-                "prior_mfe_median": 0.0,
-                "prior_went_negative": 0
-            }
-
         mfes = [float(e.peak_favorable_excursion_pts) for e in same_dir]
         neg_count = sum(1 for e in same_dir if e.realized_r_multiple <= 0 and not e.is_active())
         median_mfe = float(np.median(mfes)) if mfes else 0.0
+
+        # Setup-specific cluster context
+        if setup_id:
+            same_setup = [
+                e for e in actionable 
+                if (getattr(e, "setup_id", "") == setup_id or e.signal_type == setup_id)
+            ]
+            setup_mfes = [float(e.peak_favorable_excursion_pts) for e in same_setup]
+            setup_neg = sum(1 for e in same_setup if e.realized_r_multiple <= 0 and not e.is_active())
+            setup_med_mfe = float(np.median(setup_mfes)) if setup_mfes else 0.0
+            setup_idx = len(same_setup) + 1
+            setup_cnt = len(same_setup)
+        else:
+            setup_mfes = []
+            setup_neg = 0
+            setup_med_mfe = 0.0
+            setup_idx = 1
+            setup_cnt = 0
 
         return {
             "index": len(same_dir) + 1,
             "count": len(same_dir),
             "prior_mfe_pts": mfes,
             "prior_mfe_median": round(median_mfe, 1),
-            "prior_went_negative": neg_count
+            "prior_went_negative": neg_count,
+            "setup_index": setup_idx,
+            "setup_count": setup_cnt,
+            "setup_mfe_median": round(setup_med_mfe, 1),
+            "setup_went_negative": setup_neg
         }
 
     def _persist_to_disk(self):

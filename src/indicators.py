@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple, Any, List, Optional
+from typing import Dict, Tuple, Any, List, Optional, Union
 import numpy as np
 import pandas as pd
 from src.config import (
@@ -91,6 +91,98 @@ def compute_hurst_exponent(series: pd.Series, min_lag: int = 5, max_lag: int = 3
         "regime": regime,
         "is_trending": is_trending,
         "r_squared_proxy": r_sq
+    }
+
+
+def compute_kaufman_efficiency_ratio(
+    df_or_series: Union[pd.DataFrame, pd.Series],
+    window: int = 14,
+    session_scoped: bool = True
+) -> Dict[str, Any]:
+    """
+    Computes the Kaufman Efficiency Ratio (KER):
+    KER = |Price Change| / Sum of Absolute Bar Price Changes
+    
+    Acts as the authoritative trend vs chop discriminator:
+    - ER >= 0.15: STRONG_TREND (High directional momentum; favors breakouts & order flow)
+    - 0.08 <= ER < 0.15: MODERATE_TREND (Standard directional persistence)
+    - ER < 0.08: CHOP_OR_REVERSAL (Multi-reversal chop; penalizes momentum, favors range fades)
+    """
+    if isinstance(df_or_series, pd.DataFrame):
+        if "close" in df_or_series.columns:
+            series = df_or_series["close"]
+            df_ref = df_or_series
+        else:
+            series = df_or_series.iloc[:, 0]
+            df_ref = df_or_series
+    else:
+        series = df_or_series
+        df_ref = None
+
+    if len(series) < 2:
+        return {
+            "efficiency_ratio": 0.0,
+            "session_er": 0.0,
+            "rolling_er": 0.0,
+            "regime": "CHOP_OR_REVERSAL",
+            "is_trending": False,
+            "net_move_pts": 0.0,
+            "total_path_pts": 0.0
+        }
+
+    # 1. Session-Scoped Efficiency Ratio
+    sess_series = series
+    if session_scoped and df_ref is not None and hasattr(df_ref.index, "date") and len(df_ref.index) > 0:
+        last_date = df_ref.index[-1].date()
+        sess_mask = (df_ref.index.date == last_date)
+        if np.any(sess_mask):
+            sess_series = series.loc[sess_mask]
+
+    if len(sess_series) >= 2:
+        sess_net = abs(float(sess_series.iloc[-1]) - float(sess_series.iloc[0]))
+        sess_diffs = sess_series.diff().abs().dropna()
+        sess_path = float(sess_diffs.sum())
+        session_er = float(sess_net / max(sess_path, 1e-4))
+    else:
+        sess_net = 0.0
+        sess_path = 0.0
+        session_er = 0.0
+
+    # 2. Rolling Window Efficiency Ratio
+    w = min(window, len(series) - 1)
+    if w >= 1:
+        sub_series = series.iloc[-w-1:]
+        roll_net = abs(float(sub_series.iloc[-1]) - float(sub_series.iloc[0]))
+        roll_diffs = sub_series.diff().abs().dropna()
+        roll_path = float(roll_diffs.sum())
+        rolling_er = float(roll_net / max(roll_path, 1e-4))
+    else:
+        rolling_er = session_er
+
+    # Primary headline ER: blend session (0.6) + rolling (0.4) if session has enough bars, else rolling
+    if len(sess_series) >= 12:
+        effective_er = round(0.60 * session_er + 0.40 * rolling_er, 4)
+    else:
+        effective_er = round(rolling_er, 4)
+
+    if effective_er >= 0.15:
+        regime = "STRONG_TREND"
+        is_trending = True
+    elif effective_er >= 0.08:
+        regime = "MODERATE_TREND"
+        is_trending = True
+    else:
+        regime = "CHOP_OR_REVERSAL"
+        is_trending = False
+
+    return {
+        "efficiency_ratio": effective_er,
+        "session_er": round(session_er, 4),
+        "rolling_er": round(rolling_er, 4),
+        "regime": regime,
+        "is_trending": is_trending,
+        "net_move_pts": round(sess_net, 2),
+        "total_path_pts": round(sess_path, 2)
     }
 
 def compute_vakc_envelopes(

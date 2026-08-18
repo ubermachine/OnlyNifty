@@ -41,7 +41,8 @@ from src.indicators import (
     compute_pre_open_gap_filter, detect_volume_profile_triggers,
     detect_iceberg_orders_and_liquidity_sweeps, compute_initial_balance_and_day_type,
     compute_vwap_multi_dispersion_and_half_life, detect_footprint_delta_divergences,
-    compute_dfa_alpha, compute_vpin_toxicity, compute_volume_synchronized_gamma_tracker
+    compute_dfa_alpha, compute_vpin_toxicity, compute_volume_synchronized_gamma_tracker,
+    compute_kaufman_efficiency_ratio
 )
 from src.strategy_rules import StrategyEngine, SignalType, Signal
 from src.options_engine import (
@@ -552,6 +553,7 @@ sector_pulse = load_sectoral_pulse(data_mode)
 vwap_disp = compute_vwap_multi_dispersion_and_half_life(df)
 delta_div = detect_footprint_delta_divergences(df)
 ofi_data = compute_order_flow_imbalance(df)
+ker_data = compute_kaufman_efficiency_ratio(df, window=14, session_scoped=True)
 
 vol_engine = VolatilityIntelligence()
 
@@ -621,7 +623,9 @@ options_context = {
     "inst_flow": inst_flow_res,
     "flow_score": inst_flow_res["flow_score"],
     "dwv_score": options_desk_state.dwv_momentum_score,
-    "is_0dte": is_0dte_mode
+    "is_0dte": is_0dte_mode,
+    "efficiency_ratio": float(ker_data.get("efficiency_ratio", 0.0)),
+    "efficiency_regime": str(ker_data.get("regime", "CHOP_OR_REVERSAL"))
 }
 
 # Evaluate Active Signal
@@ -832,16 +836,19 @@ st.markdown(f'''
 </div>
 ''', unsafe_allow_html=True)
 
-# Task 11: Environment Quality Chip Row Banner
+# Task 11 & Headline Regime: Environment Quality Chip Row Banner
 _atr_val = round(float(df["atr14"].iloc[-1]), 1) if "atr14" in df.columns else 45.0
 _exp_move = options_desk_state.expected_move_pts if options_desk_state else 85.0
 _move_ratio = options_desk_state.move_ratio if options_desk_state else 1.0
 _exp_range = round(_exp_move * 1.596, 1)
 _vcr_val = float(vol_report.get("vcr_squeeze", {}).get("vcr_ratio", 1.0))
+_er_val = float(ker_data.get("efficiency_ratio", 0.0))
+_er_regime = str(ker_data.get("regime", "CHOP_OR_REVERSAL"))
+_er_clr = "#05df72" if _er_val >= 0.15 else ("#fbb024" if _er_val >= 0.08 else "#ff3355")
 
 st.markdown(f'''
 <div style="background-color: #080c14; border: 1px solid #162032; border-radius: 6px; padding: 4px 12px; margin-bottom: 8px; font-size: 11px; color: #8e9fb5; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace;">
-    <div><strong>🌐 ENVIRONMENT QUALITY:</strong> ATR(14): <strong style="color: #f1f5f9;">{_atr_val:.1f} pts</strong> | Dynamic Stop Cap: <strong style="color: #00d2ff;">2.0x ATR ({min(60.0, 2.0 * _atr_val):.1f} pts)</strong></div>
+    <div><strong>🌐 ENVIRONMENT QUALITY:</strong> Efficiency Ratio (ER): <strong style="color: {_er_clr};">{_er_val:.3f} ({_er_regime})</strong> | ATR(14): <strong style="color: #f1f5f9;">{_atr_val:.1f} pts</strong> | Dynamic Stop Cap: <strong style="color: #00d2ff;">2.0x ATR ({min(60.0, 2.0 * _atr_val):.1f} pts)</strong></div>
     <div>Session Range / Exp: <strong style="color: #f1f5f9;">{day_range_pts:.1f} / {_exp_range:.1f} pts ({_move_ratio:.2f}x)</strong> | Vol Squeeze: <strong style="color: {'#05df72' if _vcr_val >= 0.15 else '#ff3355'};">{_vcr_val:.2f}</strong></div>
 </div>
 ''', unsafe_allow_html=True)
@@ -1065,20 +1072,51 @@ Exp Move: <strong style="color: #cbd5e1;">±{desk_verdict.expected_move_pts:.0f}
 </div>'''
 st.markdown(desk_verdict_html, unsafe_allow_html=True)
 
-# Task 12: Evaluated Candidate Setups Drill-Down
-if getattr(desk_verdict, "candidates", None):
-    with st.expander(f"📋 Evaluated Candidate Setups ({len(desk_verdict.candidates)} evaluated & rejected this bar)", expanded=False):
+# Task 12 & Item 1: Unified Ranked Opportunity Board
+_opps = getattr(desk_verdict, "ranked_opportunities", None) or getattr(desk_verdict, "candidates", None)
+if _opps:
+    _board_title = f"🏆 Ranked Opportunity Board ({len(_opps)} setups evaluated this bar — ordered by conviction)"
+    with st.expander(_board_title, expanded=True):
         cands_data = []
-        for c in desk_verdict.candidates:
+        for opp in _opps:
+            _setup_id = opp.get("setup_id") or opp.get("signal_type", "N/A")
+            _opp_dir = opp.get("direction", "N/A")
+            
+            # Setup-level cluster context
+            _cl = journal_engine.cluster_context(_opp_dir, setup_id=_setup_id, now_ist=last_bar_ts) if hasattr(journal_engine, "cluster_context") else {}
+            _cl_txt = f"#{_cl.get('setup_index', 1)} fire (Med MFE: +{_cl.get('setup_mfe_median', 0.0):.1f}pts)" if _cl and _cl.get("setup_count", 0) > 0 else "1st fire"
+
+            _stat = opp.get("status") or ("🔴 GATE VETO" if opp.get("veto_gate") else "🟡 EVALUATED")
+            if _stat == "ACTIVE_RECOMMENDED":
+                stat_badge = "🟢 ACTIVE (READY)"
+            elif _stat == "VETOED_BY_GATE":
+                stat_badge = "🔴 GATE VETO"
+            elif _stat == "EDGE_QUARANTINED":
+                stat_badge = "🛑 QUARANTINED"
+            elif _stat == "CONFLUENCE_FLOOR":
+                stat_badge = "🟡 CONFLUENCE"
+            else:
+                stat_badge = _stat
+
+            _conv = float(opp.get("conviction_score", opp.get("confluence", 0.0)))
+            _tier = opp.get("conviction_tier", "LOW")
+            _edge = opp.get("edge_status", "UNMEASURED")
+            _entry = float(opp.get("entry_price") or opp.get("entry", 0.0))
+            _sl = float(opp.get("sl_price") or opp.get("sl", 0.0))
+            _t1 = float(opp.get("target_1") or opp.get("t1", 0.0))
+            _r1 = float(opp.get("r_multiple_t1", abs(_t1 - _entry) / max(abs(_entry - _sl), 1.0) if _t1 and _sl else 0.0))
+
             cands_data.append({
-                "Signal Type": c.get("signal_type", "N/A"),
-                "Direction": c.get("direction", "N/A"),
-                "Entry (₹)": f"{c.get('entry', 0.0):.1f}",
-                "SL (₹)": f"{c.get('sl', 0.0):.1f}",
-                "Target 1 (₹)": f"{c.get('t1', 0.0):.1f}",
-                "Confluence": f"{c.get('confluence', 0.0):.1f}%",
-                "Veto Gate": c.get("veto_gate", "GATE_BLOCKED"),
-                "Reason": c.get("reason", "")
+                "Rank": f"#{opp.get('rank', len(cands_data) + 1)}",
+                "Setup": _setup_id,
+                "Dir": f"{'🟢' if _opp_dir == 'LONG' else ('🔴' if _opp_dir == 'SHORT' else '⚪')} {_opp_dir}",
+                "Status": stat_badge,
+                "Conviction": f"{_conv:.0f}/100 ({_tier})",
+                "Entry / SL / T1": f"₹{_entry:.1f} / ₹{_sl:.1f} / ₹{_t1:.1f}",
+                "R-at-T1": f"+{_r1:.2f}R",
+                "Edge Status": _edge,
+                "Cluster Sequence": _cl_txt,
+                "Reason / Gate Audit": opp.get("reason") or opp.get("veto_gate", "")
             })
         st.dataframe(pd.DataFrame(cands_data), hide_index=True, width="stretch")
 
