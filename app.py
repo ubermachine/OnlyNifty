@@ -910,19 +910,13 @@ active_feed_label = "Fyers API v3 (Live Broker)" if "Fyers" in data_mode else ("
 active_feed_color = "#05df72" if "Fyers" in data_mode else ("#00d2ff" if ("Public" in data_mode or "yfinance" in data_mode) else "#fbb024")
 
 st.markdown(f"""
-<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-    <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="badge-pro">DESK v5.3</span>
-        <h2 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em;">Nifty Institutional Signal Terminal</h2>
-    </div>
-    <div style="display: flex; align-items: center; gap: 14px;">
-        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">FEED: <strong style="color: {active_feed_color};">{active_feed_label}</strong></div>
-        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">LATEST BAR: <strong style="color: #f1f5f9;">{last_bar_display}</strong></div>
-        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">LATENCY: <strong style="color: #00d2ff;">{t_latency_ms:.1f}ms</strong></div>
-        <div class="live-pulse">
-            <div class="pulse-dot"></div>
-            <span>● {refresh_tag}</span>
-        </div>
+<div style="display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin-bottom: 8px;">
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">FEED: <strong style="color: {active_feed_color};">{active_feed_label}</strong></div>
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;">LATEST BAR: <strong style="color: #f1f5f9;">{last_bar_display}</strong></div>
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">LATENCY: <strong style="color: #00d2ff;">{t_latency_ms:.1f}ms</strong></div>
+    <div class="live-pulse">
+        <div class="pulse-dot"></div>
+        <span>● {refresh_tag}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
