@@ -425,9 +425,19 @@ else:
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
-from src.fyers_client import check_is_market_open
-market_status_info = check_is_market_open()
-is_market_hours = market_status_info["is_open"]
+is_market_hours = False
+market_status_src = "IST Trading Bell (09:15–15:30 Mon–Fri)"
+try:
+    from src import fyers_client
+    market_status_info = fyers_client.check_is_market_open()
+    is_market_hours = bool(market_status_info.get("is_open", False))
+    market_status_src = market_status_info.get("source", market_status_src)
+except Exception:
+    now_ist_dt = datetime.now(IST)
+    is_weekday = now_ist_dt.weekday() < 5
+    mkt_open = now_ist_dt.replace(hour=9, minute=15, second=0, microsecond=0)
+    mkt_close = now_ist_dt.replace(hour=15, minute=30, second=0, microsecond=0)
+    is_market_hours = is_weekday and (mkt_open <= now_ist_dt <= mkt_close)
 
 refresh_options = [
     "Every 60 Seconds (Default)",
@@ -443,7 +453,7 @@ auto_refresh_choice = st.sidebar.selectbox(
     "⚡ Stream Refresh Rate",
     refresh_options,
     index=default_refresh_idx,
-    help=f"Status Source: {market_status_info['source']}. Defaults to 60s during active market hours and Off outside market hours."
+    help=f"Status Source: {market_status_src}. Defaults to 60s during active market hours and Off outside market hours."
 )
 
 if auto_refresh_choice != "Off (Manual)":
