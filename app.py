@@ -425,10 +425,27 @@ else:
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
+now_ist_dt = datetime.now(IST)
+is_weekday = now_ist_dt.weekday() < 5
+market_open_time = now_ist_dt.replace(hour=9, minute=15, second=0, microsecond=0)
+market_close_time = now_ist_dt.replace(hour=15, minute=30, second=0, microsecond=0)
+is_market_hours = is_weekday and (market_open_time <= now_ist_dt <= market_close_time)
+
+refresh_options = [
+    "Every 60 Seconds (Default)",
+    "Every 30 Seconds",
+    "Every 15 Seconds",
+    "Every 10 Seconds",
+    "Every 5 Seconds",
+    "Off (Manual)"
+]
+default_refresh_idx = 0 if is_market_hours else 5
+
 auto_refresh_choice = st.sidebar.selectbox(
     "⚡ Stream Refresh Rate",
-    ["Every 60 Seconds (Default)", "Every 30 Seconds", "Every 15 Seconds", "Every 10 Seconds", "Every 5 Seconds", "Off (Manual)"],
-    index=0
+    refresh_options,
+    index=default_refresh_idx,
+    help="Defaults to 60s during NSE market hours (09:15–15:30 IST) and Off outside market hours to save compute."
 )
 
 if auto_refresh_choice != "Off (Manual)":
@@ -444,6 +461,11 @@ if auto_refresh_choice != "Off (Manual)":
     st.sidebar.caption(f"🟢 Real-time auto-refresh active ({delay_secs}s cadence)")
     if st_autorefresh is not None:
         st_autorefresh(interval=delay_secs * 1000, key="nifty_live_stream_auto_refresh")
+else:
+    if not is_market_hours:
+        st.sidebar.caption("🌙 Market Closed (09:15–15:30 IST) • Auto-refresh paused")
+    else:
+        st.sidebar.caption("⚪ Auto-refresh Off (Manual Refresh Mode)")
 
 if st.sidebar.button("🔄 Instant Cache Purge & Rerun", width="stretch"):
     st.cache_data.clear()
