@@ -202,3 +202,61 @@ def get_multi_expiry_chain(symbol: str = "NSE:NIFTY50-INDEX", strikecount: int =
 def get_vix() -> float:
     raw = get_option_chain_raw("NSE:NIFTY50-INDEX", strikecount=1, timestamp="")
     return float(raw.get("indiavixData", {}).get("ltp", 0.0))
+
+
+def get_market_status() -> Dict[str, Any]:
+    """
+    Queries Fyers Market Status API v3.
+    Returns dict with 'is_open', 'status_list', and 'source'.
+    """
+    try:
+        data = _get_fyers_data(f"{DATA_BASE}/market-status", params={}, timeout=5)
+        if data.get("s") == "ok" and "marketStatus" in data:
+            statuses = data.get("marketStatus", [])
+            is_open = False
+            for item in statuses:
+                if str(item.get("market", "")).upper() == "NSE":
+                    st_val = str(item.get("status", "")).upper()
+                    if st_val == "OPEN":
+                        is_open = True
+            return {
+                "is_open": is_open,
+                "status_list": statuses,
+                "source": "Fyers API v3"
+            }
+    except Exception as e:
+        pass
+    return {"is_open": None, "error": "Fyers market status unavailable"}
+
+
+def check_is_market_open() -> Dict[str, Any]:
+    """
+    Determines if Indian Equity/Derivatives markets are currently open.
+    Primary: Fyers Live Market Status API (if configured).
+    Fallback: Exact Indian Standard Time Trading Bell (09:15 - 15:30 IST, Mon-Fri).
+    """
+    # 1. Try Fyers live broker status
+    try:
+        cfg = _load_config()
+        if cfg.get("client_id") and cfg.get("secret_key"):
+            res = get_market_status()
+            if res.get("is_open") is not None:
+                return {
+                    "is_open": bool(res["is_open"]),
+                    "source": "Fyers Broker API (Live)",
+                    "detail": "Market Status reported from exchange gateway"
+                }
+    except Exception:
+        pass
+
+    # 2. Fallback to IST Trading Bell
+    now_ist = datetime.now(IST)
+    is_weekday = now_ist.weekday() < 5
+    mkt_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    mkt_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    is_open = is_weekday and (mkt_open <= now_ist <= mkt_close)
+    return {
+        "is_open": is_open,
+        "source": "IST Trading Bell (09:15–15:30 Mon–Fri)",
+        "detail": "Session clock calculation"
+    }

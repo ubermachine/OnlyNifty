@@ -425,11 +425,9 @@ else:
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["5m (Primary Execution)", "1m (Micro Trailing)"], index=0)
 tf_str = "5m" if "5m" in timeframe else "1m"
 
-now_ist_dt = datetime.now(IST)
-is_weekday = now_ist_dt.weekday() < 5
-market_open_time = now_ist_dt.replace(hour=9, minute=15, second=0, microsecond=0)
-market_close_time = now_ist_dt.replace(hour=15, minute=30, second=0, microsecond=0)
-is_market_hours = is_weekday and (market_open_time <= now_ist_dt <= market_close_time)
+from src.fyers_client import check_is_market_open
+market_status_info = check_is_market_open()
+is_market_hours = market_status_info["is_open"]
 
 refresh_options = [
     "Every 60 Seconds (Default)",
@@ -445,7 +443,7 @@ auto_refresh_choice = st.sidebar.selectbox(
     "⚡ Stream Refresh Rate",
     refresh_options,
     index=default_refresh_idx,
-    help="Defaults to 60s during NSE market hours (09:15–15:30 IST) and Off outside market hours to save compute."
+    help=f"Status Source: {market_status_info['source']}. Defaults to 60s during active market hours and Off outside market hours."
 )
 
 if auto_refresh_choice != "Off (Manual)":
@@ -463,7 +461,7 @@ if auto_refresh_choice != "Off (Manual)":
         st_autorefresh(interval=delay_secs * 1000, key="nifty_live_stream_auto_refresh")
 else:
     if not is_market_hours:
-        st.sidebar.caption("🌙 Market Closed (09:15–15:30 IST) • Auto-refresh paused")
+        st.sidebar.caption(f"🌙 Market Closed • Auto-refresh paused")
     else:
         st.sidebar.caption("⚪ Auto-refresh Off (Manual Refresh Mode)")
 
