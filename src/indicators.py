@@ -159,9 +159,14 @@ def compute_kaufman_efficiency_ratio(
     else:
         rolling_er = session_er
 
-    # Primary headline ER: blend session (0.6) + rolling (0.4) if session has enough bars, else rolling
-    if len(sess_series) >= 12:
-        effective_er = round(0.60 * session_er + 0.40 * rolling_er, 4)
+    # Primary headline ER: Use pure session_er when session has >= 6 bars.
+    # Short rolling windows (e.g. 14 bars) lack multi-hour mean-reverting reversals
+    # and artificially inflate ER (to ~0.42 even on choppy 1/15 reversal days).
+    # Session ER faithfully captures whether today is directional (Aug 18: 0.189) vs choppy (Aug 17: 0.037).
+    if len(sess_series) >= 6:
+        effective_er = round(session_er, 4)
+    elif len(sess_series) >= 2:
+        effective_er = round(0.80 * session_er + 0.20 * rolling_er, 4)
     else:
         effective_er = round(rolling_er, 4)
 

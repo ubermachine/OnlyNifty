@@ -8,7 +8,7 @@ from src.strategy_rules import Signal, SignalType
 from src.options_positioning import OptionsDeskState
 
 def test_kaufman_efficiency_ratio_discrimination():
-    # 1. Pure Trend series
+    # 1. Pure Trend series (Aug 18 style)
     trend_prices = [24000.0 + i * 10.0 for i in range(30)] # Net move = 290, total path = 290 -> ER = 1.0
     dates = pd.date_range("2026-08-18 09:15:00", periods=30, freq="5min", tz="Asia/Kolkata")
     df_trend = pd.DataFrame({"close": trend_prices}, index=dates)
@@ -18,7 +18,7 @@ def test_kaufman_efficiency_ratio_discrimination():
     assert res_trend["regime"] == "STRONG_TREND"
     assert res_trend["is_trending"] is True
 
-    # 2. Pure Chop series
+    # 2. Pure Chop series (Aug 17 style)
     chop_prices = [24000.0 + (20.0 if i % 2 == 0 else -20.0) for i in range(30)]
     df_chop = pd.DataFrame({"close": chop_prices}, index=dates)
     
@@ -73,7 +73,8 @@ def test_conviction_efficiency_ratio_calibration():
     assert score_chop_fade > score_chop_mom
 
 
-def test_ranked_opportunity_board_synthesis():
+def test_ranked_opportunity_board_synthesis_and_contract_levels():
+    # Test Bug 1 fix: raw dict with short keys 'entry', 'sl', 't1', 't2', 't3'
     sig = Signal(
         signal_type=SignalType.LONG,
         entry_price=24500.0,
@@ -87,9 +88,11 @@ def test_ranked_opportunity_board_synthesis():
                 {
                     "signal_type": "SHORT_ORDER_FLOW",
                     "direction": "SHORT",
-                    "entry_price": 24500.0,
-                    "sl_price": 24540.0,
-                    "target_1": 24450.0,
+                    "entry": 24214.05,
+                    "sl": 24204.0,
+                    "t1": 24244.05,
+                    "t2": 24276.55,
+                    "t3": 24320.0,
                     "confluence": 65.0,
                     "veto_gate": "HTF_ALIGNMENT_VETO",
                     "reason": "1H trend is Bullish",
@@ -98,19 +101,20 @@ def test_ranked_opportunity_board_synthesis():
                 {
                     "signal_type": "RANGE_FADE_SHORT",
                     "direction": "SHORT",
-                    "entry_price": 24500.0,
-                    "sl_price": 24530.0,
-                    "target_1": 24470.0,
+                    "entry": 24500.0,
+                    "sl": 24530.0,
+                    "t1": 24470.0,
+                    "t2": 24440.0,
                     "confluence": 50.0,
                     "veto_gate": "CONFLUENCE_FLOOR",
-                    "reason": "Confluence 50 < 70",
-                    "edge_status": "UNMEASURED"
+                    "reason": "Confluence 50 < 70"
                 }
             ]
         }
     )
 
     ticket = {
+        "status": "READY",
         "strike": 24500,
         "option_type": "CE",
         "entry_premium": 150.0,
@@ -133,11 +137,21 @@ def test_ranked_opportunity_board_synthesis():
     assert verdict.efficiency_regime == "STRONG_TREND"
     assert len(verdict.ranked_opportunities) >= 3
     
-    # Check that all 3 setups are represented in ranked_opportunities
-    setup_ids = [opp["setup_id"] for opp in verdict.ranked_opportunities]
-    assert "LONG" in setup_ids
-    assert "SHORT_ORDER_FLOW" in setup_ids
-    assert "RANGE_FADE_SHORT" in setup_ids
+    # Verify Bug 1 fix: check that short-key candidates have non-zero levels
+    short_of = next(opp for opp in verdict.ranked_opportunities if opp["setup_id"] == "SHORT_ORDER_FLOW")
+    assert short_of["entry_price"] == 24214.05
+    assert short_of["sl_price"] == 24204.0
+    assert short_of["target_1"] == 24244.05
+    assert short_of["target_2"] == 24276.55
+    assert short_of["r_multiple_t1"] > 0.0
+    assert short_of["status"] == "VETOED_BY_GATE"
+    assert short_of["edge_status"] == "TRUSTED"
+
+    rf = next(opp for opp in verdict.ranked_opportunities if opp["setup_id"] == "RANGE_FADE_SHORT")
+    assert rf["entry_price"] == 24500.0
+    assert rf["sl_price"] == 24530.0
+    assert rf["target_1"] == 24470.0
+    assert rf["status"] == "CONFLUENCE_FLOOR"
 
 
 def test_setup_level_cluster_attribution():

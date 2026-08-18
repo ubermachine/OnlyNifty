@@ -966,7 +966,7 @@ if desk_verdict.edge_status and desk_verdict.edge_status != 'UNMEASURED':
 
 # Task 04: Cluster Context & Prior MFE Decay Tracking
 _cluster_dir = "LONG" if ("CE" in desk_verdict.action or desk_verdict.trend_bias == "BULLISH") else ("SHORT" if ("PE" in desk_verdict.action or desk_verdict.trend_bias == "BEARISH") else "WAIT")
-_cluster_info = journal_engine.cluster_context(_cluster_dir, last_bar_ts) if hasattr(journal_engine, "cluster_context") else {}
+_cluster_info = journal_engine.cluster_context(direction=_cluster_dir, now_ist=last_bar_ts) if hasattr(journal_engine, "cluster_context") else {}
 _cluster_chip = ""
 if _cluster_info and _cluster_info.get("count", 0) > 0:
     _cluster_chip = f'<span style="font-size: 10px; color: #38bdf8; margin-left: 10px;">SEQ: #{_cluster_info["index"]} in {_cluster_dir} (Med MFE: +{_cluster_info["prior_mfe_median"]:.1f}pts, Neg: {_cluster_info["prior_went_negative"]})</span>'

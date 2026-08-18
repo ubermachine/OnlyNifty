@@ -649,33 +649,38 @@ class StrategyEngine:
 
         # Define internal candidate gate check and pre-decision finalizer
         def _check_and_return(direction: str, candidate_sig: Signal) -> Signal:
+            setup_id = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
+            active_regime = markov_info.get("active_regime", "UNKNOWN")
+            edge_stat_early = self.edge_table.lookup(setup_id, active_regime) if self.edge_table else None
+            edge_status_early = getattr(edge_stat_early, "status", "UNMEASURED")
+
             gate_ok, gate_msg, audit = self._apply_universal_gates(
                 direction, close, skew_info, vpin_info, hfi_score, gex_info, htf_regime,
                 current_bar_idx=current_idx, options_context=options_context,
-                candidate_signal_type=candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
+                candidate_signal_type=setup_id
             )
+
             if not gate_ok:
                 # Direction- and candidate-specific vetoes reject THIS candidate only;
                 # the ladder must keep looking. Absolute vetoes (toxic flow, session
                 # lock) genuinely block every trade this bar and stop it.
                 _rejections.append(gate_msg)
                 _rejected.append({
-                    "signal_type": candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type),
+                    "signal_type": setup_id,
                     "direction": direction,
                     "entry": candidate_sig.entry_price,
                     "sl": candidate_sig.sl_price,
                     "t1": candidate_sig.target_1,
                     "t2": candidate_sig.target_2,
+                    "t3": getattr(candidate_sig, "target_3_moonshot", 0.0),
                     "veto_gate": audit.get("veto_gate", "GATE_BLOCKED"),
                     "reason": gate_msg,
                     "confluence": (candidate_sig.details or {}).get("confluence_score", 0.0),
+                    "edge_status": edge_status_early,
                 })
                 if audit.get("veto_gate") in _ABSOLUTE_VETOES:
                     _absolute_veto.append(gate_msg)
                 return None
-
-            setup_id = candidate_sig.signal_type.value if hasattr(candidate_sig.signal_type, "value") else str(candidate_sig.signal_type)
-            active_regime = markov_info.get("active_regime", "UNKNOWN")
 
             # Walk-forward OOS edge gate: quarantined (measured negative-EV) setups
             # are blocked in the regimes where they lost money.
@@ -696,9 +701,11 @@ class StrategyEngine:
                     "sl": candidate_sig.sl_price,
                     "t1": candidate_sig.target_1,
                     "t2": candidate_sig.target_2,
+                    "t3": getattr(candidate_sig, "target_3_moonshot", 0.0),
                     "veto_gate": "EDGE_TABLE_QUARANTINED",
                     "reason": _rej_msg,
                     "confluence": (candidate_sig.details or {}).get("confluence_score", 0.0),
+                    "edge_status": "QUARANTINED",
                 })
                 return None
 
@@ -739,9 +746,11 @@ class StrategyEngine:
                     "sl": candidate_sig.sl_price,
                     "t1": candidate_sig.target_1,
                     "t2": candidate_sig.target_2,
-                    "veto_gate": "CONFLUENCE_FLOOR_VETO",
+                    "t3": getattr(candidate_sig, "target_3_moonshot", 0.0),
+                    "veto_gate": "CONFLUENCE_FLOOR",
                     "reason": _final.reason,
                     "confluence": (_final.details or {}).get("confluence_score", 0.0),
+                    "edge_status": candidate_sig.details.get("edge_status", "UNMEASURED"),
                 })
                 return None
             return _final

@@ -786,7 +786,21 @@ def build_desk_verdict(
         rej_setup = rej.get("signal_type", "UNKNOWN")
         rej_dir = rej.get("direction", "LONG" if "LONG" in rej_setup else ("SHORT" if "SHORT" in rej_setup else "WAIT"))
         rej_conf = float(rej.get("confluence", 0.0))
-        rej_edge = rej.get("edge_status", "UNMEASURED")
+        
+        # Edge status resolution
+        rej_edge = rej.get("edge_status")
+        if not rej_edge or rej_edge == "UNMEASURED":
+            if edge_stats is not None:
+                if hasattr(edge_stats, "get_status"):
+                    rej_edge = edge_stats.get_status(rej_setup)
+                elif isinstance(edge_stats, dict) and rej_setup in edge_stats:
+                    val = edge_stats[rej_setup]
+                    rej_edge = val.get("status", "UNMEASURED") if isinstance(val, dict) else str(val)
+                else:
+                    rej_edge = "UNMEASURED"
+            else:
+                rej_edge = "UNMEASURED"
+
         rej_action = "BUY_CE" if rej_dir == "LONG" else ("BUY_PE" if rej_dir == "SHORT" else "WAIT")
         rej_is_bk = "BREAKOUT" in rej_setup.upper() or "3PM" in rej_setup.upper()
         rej_conv_score, rej_tier, rej_agree, rej_notes = compute_conviction(
@@ -800,20 +814,36 @@ def build_desk_verdict(
             efficiency_ratio=er_val,
             setup_id=rej_setup
         )
-        rej_entry = float(rej.get("entry_price", spot))
-        rej_sl = float(rej.get("sl_price", 0.0))
-        rej_t1 = float(rej.get("target_1", 0.0))
-        rej_r1 = round(abs(rej_t1 - rej_entry) / max(abs(rej_entry - rej_sl), 1.0), 2) if rej_t1 and rej_sl else 0.0
-        
+
+        # Level extraction with dual-contract defense (reads entry/sl/t1/t2/t3 as well as full names)
+        rej_entry = float(rej.get("entry_price") or rej.get("entry") or spot)
+        rej_sl = float(rej.get("sl_price") or rej.get("sl") or 0.0)
+        rej_t1 = float(rej.get("target_1") or rej.get("t1") or 0.0)
+        rej_t2 = float(rej.get("target_2") or rej.get("t2") or 0.0)
+        rej_t3 = float(rej.get("target_3") or rej.get("t3") or 0.0)
+        rej_r1 = round(abs(rej_t1 - rej_entry) / max(abs(rej_entry - rej_sl), 1.0), 2) if (rej_t1 > 0 and rej_sl > 0) else 0.0
+
+        # Status resolution with reachable branches
+        rej_gate = str(rej.get("veto_gate", ""))
+        rej_reason = str(rej.get("reason", ""))
+        if "CONFLUENCE" in rej_gate or "Confluence" in rej_reason or rej_gate == "CONFLUENCE_FLOOR":
+            rej_stat = "CONFLUENCE_FLOOR"
+        elif rej_edge == "QUARANTINED" or rej_gate == "EDGE_TABLE_QUARANTINED":
+            rej_stat = "EDGE_QUARANTINED"
+        elif rej_gate and rej_gate not in ["NONE", "ALLOWED"]:
+            rej_stat = "VETOED_BY_GATE"
+        else:
+            rej_stat = "EVALUATED"
+
         ranked_opps.append({
             "setup_id": rej_setup,
             "direction": rej_dir,
-            "status": "VETOED_BY_GATE" if rej.get("veto_gate") else ("EDGE_QUARANTINED" if rej_edge == "QUARANTINED" else "CONFLUENCE_FLOOR"),
+            "status": rej_stat,
             "entry_price": round(rej_entry, 2),
             "sl_price": round(rej_sl, 2),
             "target_1": round(rej_t1, 2),
-            "target_2": round(float(rej.get("target_2", 0.0)), 2),
-            "target_3": round(float(rej.get("target_3", 0.0)), 2),
+            "target_2": round(rej_t2, 2),
+            "target_3": round(rej_t3, 2),
             "r_multiple_t1": rej_r1,
             "confluence_score": rej_conf,
             "conviction_score": rej_conv_score,
@@ -824,9 +854,18 @@ def build_desk_verdict(
             "reason": rej.get("reason", "Vetoed")
         })
 
+    # Deduplicate candidates by (setup_id, direction, entry, sl)
+    unique_opps: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for opp in ranked_opps:
+        key = (opp["setup_id"], opp["direction"], round(opp["entry_price"], 1), round(opp["sl_price"], 1))
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_opps.append(opp)
+
     # Sort opportunities descending by conviction score, prioritizing active trades
-    ranked_opps.sort(key=lambda x: (x["status"] == "ACTIVE_RECOMMENDED", x["conviction_score"], x["confluence_score"]), reverse=True)
-    for idx, opp in enumerate(ranked_opps, 1):
+    unique_opps.sort(key=lambda x: (x["status"] == "ACTIVE_RECOMMENDED", x["conviction_score"], x["confluence_score"]), reverse=True)
+    for idx, opp in enumerate(unique_opps, 1):
         opp["rank"] = idx
 
     return DeskVerdict(
@@ -856,5 +895,5 @@ def build_desk_verdict(
         candidates=rejected_list,
         efficiency_ratio=er_val if er_val is not None else 0.0,
         efficiency_regime=er_regime,
-        ranked_opportunities=ranked_opps
+        ranked_opportunities=unique_opps
     )
