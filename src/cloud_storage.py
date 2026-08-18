@@ -246,6 +246,7 @@ def upsert_signals_batch(entries: List[Dict[str, Any]]) -> int:
                     ))
                     count += 1
                 conn.commit()
+        return count
     except Exception as e:
         logger.warning(f"Batch upsert failed: {e}")
         return count

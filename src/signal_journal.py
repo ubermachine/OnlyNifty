@@ -51,6 +51,63 @@ def compute_sha256_record_hash(prev_hash: str, entry_dict: Dict[str, Any]) -> st
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def verify_chain_integrity(entries: List[Any], genesis_hash: str = "GENESIS_ROOT_HASH_0000000000000000") -> Dict[str, Any]:
+    """
+    Cryptographically verifies an ordered list of SignalEntry records.
+    Returns a dict with 'is_valid', 'total_records', 'broken_links', 'content_mismatches', and 'errors'.
+    """
+    if not entries:
+        return {"is_valid": True, "total_records": 0, "broken_links": 0, "content_mismatches": 0, "errors": []}
+
+    broken_links = 0
+    content_mismatches = 0
+    errors = []
+    curr_prev = genesis_hash
+
+    for idx, e in enumerate(entries):
+        e_prev = getattr(e, "prev_hash", None) if hasattr(e, "prev_hash") else e.get("prev_hash")
+        e_hash = getattr(e, "record_hash", None) if hasattr(e, "record_hash") else e.get("record_hash")
+        e_id = getattr(e, "signal_id", f"idx_{idx}") if hasattr(e, "signal_id") else e.get("signal_id", f"idx_{idx}")
+        e_dict = e.to_dict() if hasattr(e, "to_dict") else dict(e)
+
+        if e_prev != curr_prev:
+            broken_links += 1
+            errors.append(f"Record {idx} ({e_id}): prev_hash mismatch. Expected {curr_prev[:12]}..., got {str(e_prev)[:12]}...")
+
+        expected_hash = compute_sha256_record_hash(e_prev or "", e_dict)
+        if e_hash != expected_hash:
+            content_mismatches += 1
+            errors.append(f"Record {idx} ({e_id}): content_hash mismatch. Expected {expected_hash[:12]}..., got {str(e_hash)[:12]}...")
+
+        curr_prev = e_hash or ""
+
+    is_valid = (broken_links == 0 and content_mismatches == 0)
+    return {
+        "is_valid": is_valid,
+        "total_records": len(entries),
+        "broken_links": broken_links,
+        "content_mismatches": content_mismatches,
+        "errors": errors
+    }
+
+
+def verify_archive_file(filepath: str, genesis_hash: str = "GENESIS_ROOT_HASH_0000000000000000") -> Dict[str, Any]:
+    """Reads a .jsonl archive file and verifies its cryptographic hash chain integrity."""
+    if not os.path.exists(filepath):
+        return {"is_valid": False, "total_records": 0, "broken_links": 0, "content_mismatches": 0, "errors": [f"File not found: {filepath}"]}
+
+    entries = []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    entries.append(SignalEntry.from_dict(json.loads(line)))
+    except Exception as ex:
+        return {"is_valid": False, "total_records": len(entries), "broken_links": 0, "content_mismatches": 0, "errors": [str(ex)]}
+
+    return verify_chain_integrity(entries, genesis_hash=genesis_hash)
+
+
 @dataclass
 class SignalEntry:
     signal_id: str
@@ -554,14 +611,25 @@ class LiveSignalJournal:
         risk_rupees = float(ticket.get("actual_risk_rupees", ticket.get("max_risk_rupees", 5000.0 if is_actionable else 0.0)))
         tca_friction = float(ticket.get("tca_friction", {}).get("total_friction", 180.0) if isinstance(ticket.get("tca_friction"), dict) else (180.0 if is_actionable else 0.0))
 
+        existing_ids = {e.signal_id for e in self.entries}
         if is_seed and bar_timestamp:
             clean_ts = bar_timestamp.replace("-", "").replace(" ", "").replace(":", "")
             sig_date = clean_ts[:8] if len(clean_ts) >= 8 else datetime.now(IST).strftime("%Y%m%d")
             sig_time = (clean_ts[8:12] + "00") if len(clean_ts) >= 12 else datetime.now(IST).strftime("%H%M%S")
-            sig_id = f"SIG-{sig_date}-{sig_time}-{strike}{opt_type}"
+            base_sig_id = f"SIG-{sig_date}-{sig_time}-{strike}{opt_type}"
+            sig_id = base_sig_id
+            s_idx = 1
+            while sig_id in existing_ids:
+                sig_id = f"{base_sig_id}_{s_idx}"
+                s_idx += 1
             now_ist = f"{bar_timestamp}:00 IST" if len(bar_timestamp) == 16 else (f"{bar_timestamp} IST" if "IST" not in bar_timestamp else bar_timestamp)
         else:
-            sig_id = f"SIG-{datetime.now(IST).strftime('%Y%m%d')}-{datetime.now(IST).strftime('%H%M%S')}-{strike}{opt_type}"
+            base_sig_id = f"SIG-{datetime.now(IST).strftime('%Y%m%d')}-{datetime.now(IST).strftime('%H%M%S')}-{strike}{opt_type}"
+            sig_id = base_sig_id
+            s_idx = 1
+            while sig_id in existing_ids:
+                sig_id = f"{base_sig_id}_{s_idx}"
+                s_idx += 1
 
         conviction_score = float(ticket.get("conviction_score", 0.0) or getattr(signal, "conviction_score", 0.0) or 0.0)
         conviction_tier = str(ticket.get("conviction_tier", "") or getattr(signal, "conviction_tier", "LOW") or "LOW")
