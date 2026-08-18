@@ -18,9 +18,9 @@ def test_edge_stats_quarantine_policy():
     assert stats_loser.status == "QUARANTINED"
     assert stats_loser.ev < 0
 
-    # 3. 40 samples with high positive mean EV -> TRUSTED
+    # 3. 40 samples with high positive mean EV and QUOTE tier -> TRUSTED
     r_winner = [1.8] * 28 + [-1.0] * 12
-    stats_winner = runner.compute_edge_stats(r_winner, "ABSORPTION_LONG", "MEAN_REVERTING_CHOP")
+    stats_winner = runner.compute_edge_stats(r_winner, "ABSORPTION_LONG", "MEAN_REVERTING_CHOP", evidence_tier="QUOTE")
     assert stats_winner.status == "TRUSTED"
     assert stats_winner.ev > 0
 

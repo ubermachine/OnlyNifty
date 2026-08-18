@@ -101,7 +101,7 @@ def verify_archive_file(filepath: str, genesis_hash: str = "GENESIS_ROOT_HASH_00
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    entries.append(SignalEntry.from_dict(json.loads(line)))
+                    entries.append(json.loads(line))
     except Exception as ex:
         return {"is_valid": False, "total_records": len(entries), "broken_links": 0, "content_mismatches": 0, "errors": [str(ex)]}
 
@@ -151,6 +151,7 @@ class SignalEntry:
     realized_pnl_rupees: float = 0.0
     realized_pnl_net: float = 0.0
     is_seed: bool = False
+    evidence_tier: str = "MODEL"  # "QUOTE" | "MODEL" | "SPOT"
     setup_id: str = ""
     structure_epoch: str = ""
     gate_audit: Dict[str, Any] = field(default_factory=dict)
@@ -480,7 +481,7 @@ class LiveSignalJournal:
                 self.entries = []
 
         # If local disk has no entries (e.g. fresh ephemeral container on Streamlit Cloud), restore from Neon
-        if not self.entries:
+        if self.persistence_file and not self.entries:
             try:
                 today_ist = datetime.now(IST).strftime("%Y-%m-%d")
                 from src.cloud_storage import fetch_signals_by_date
@@ -640,6 +641,7 @@ class LiveSignalJournal:
         gate_audit_resolved = gate_audit or (ticket.get("gate_audit") if isinstance(ticket, dict) else None) or (signal.details.get("gate_audit") if signal and signal.details else {}) or {}
         evidence_resolved = evidence or (ticket.get("evidence") if isinstance(ticket, dict) else None) or (signal.details.get("evidence") if signal and signal.details else {}) or {}
 
+        greeks_dict = ticket.get("greeks") if isinstance(ticket.get("greeks"), dict) else {}
         entry = SignalEntry(
             signal_id=sig_id,
             timestamp_ist=now_ist,
@@ -679,15 +681,16 @@ class LiveSignalJournal:
             tca_friction_est=tca_friction,
             lifecycle_status=SignalLifecycleStatus.TRIGGERED.value if is_actionable else "AWAITING_SETUP",
             is_seed=is_seed,
+            evidence_tier="QUOTE" if ticket.get("pricing_source") == "MARKET_QUOTE" else "MODEL",
             setup_id=setup_id or sig_type_str,
             structure_epoch=structure_epoch,
             gate_audit=gate_audit_resolved,
             evidence=evidence_resolved,
             greeks_snapshot={
-                "delta": ticket.get("delta", 0.55 if is_actionable else 0.0),
-                "gamma": ticket.get("gamma", 0.0008 if is_actionable else 0.0),
-                "theta": ticket.get("theta_decay_daily", -12.0 if is_actionable else 0.0),
-                "vanna": ticket.get("vanna", 0.04 if is_actionable else 0.0)
+                "delta": ticket.get("delta", greeks_dict.get("delta", 0.55 if is_actionable else 0.0)),
+                "gamma": ticket.get("gamma", greeks_dict.get("gamma", 0.0008 if is_actionable else 0.0)),
+                "theta": ticket.get("theta_decay_daily", greeks_dict.get("theta", -12.0 if is_actionable else 0.0)),
+                "vanna": ticket.get("vanna", greeks_dict.get("vanna", 0.04 if is_actionable else 0.0))
             },
             notes="Institutional setup triggered & registered in audit log." if is_actionable else "Consolidation / Awaiting confluence trigger.",
             prev_hash=self._last_hash,
@@ -756,23 +759,38 @@ class LiveSignalJournal:
                 if t2_spot > 0 and current_low <= t2_spot: entry.touched_t2 = True
                 if t3_spot > 0 and current_low <= t3_spot: entry.touched_t3 = True
 
+            qty = max(entry.total_qty, entry.lots_suggested * LOT_SIZE, 25)
+            e_prem = entry.entry_premium
+            sl_prem = entry.sl_premium
+            t1_prem = entry.target_1_premium
+            t2_prem = entry.target_2_premium
+            t3_prem = entry.target_3_premium
+
             # Check 15:15 Hard Squareoff
             if bar_time_str >= "15:15" and entry.is_active():
-                entry.lifecycle_status = SignalLifecycleStatus.SQUARED_OFF.value
+                entry.lifecycle_status = SignalLifecycleStatus.EOD_SQUAREOFF.value
                 entry.exit_timestamp_ist = now_ist
                 entry.exit_spot = current_spot
-                sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
-                move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
-                squared_r = round(move_pts / sl_pts, 2)
-                if entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value or entry.realized_r_multiple > 0:
-                    squared_r = round(max(squared_r, entry.realized_r_multiple), 2)
-                entry.realized_r_multiple = squared_r
-                entry.realized_pnl_rupees = round(entry.capital_risk_rupees * squared_r, 2)
+                dS = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
+                
+                # Dynamic Greeks extraction from entry snapshot
+                greeks = entry.greeks_snapshot if isinstance(entry.greeks_snapshot, dict) else {}
+                g_delta = abs(float(greeks.get("delta", 0.55)))
+                g_gamma = float(greeks.get("gamma", 0.0008))
+                g_theta_daily = abs(float(greeks.get("theta", -10.0)))
+                theta_per_bar = max(g_theta_daily / 75.0, 0.10)
+                decay = entry.bars_held * theta_per_bar
+                convexity = 0.5 * g_gamma * (dS ** 2)
+                
+                exit_prem = max(round(e_prem + (dS * g_delta) + convexity - decay, 2), 0.05)
+                entry.exit_premium = exit_prem
+                entry.realized_pnl_rupees = round((exit_prem - e_prem) * qty, 2)
+                entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                 entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
-                entry.notes += f" | 15:15 IST Mandatory Squareoff @ {squared_r:+.2f}R."
+                entry.notes += f" | 15:15 IST Mandatory Squareoff @ ₹{exit_prem:.2f} ({entry.realized_r_multiple:+.2f}R)."
                 updates_count += 1
                 with self._lifecycle_lock:
-                    self._pending_lifecycle_events.append((entry, "SQUARED_OFF", current_spot, float(getattr(entry, "exit_premium", 0.0))))
+                    self._pending_lifecycle_events.append((entry, "SQUARED_OFF", current_spot, exit_prem))
                 continue
 
             # Task 02: Stall Time Stop (Stagnation Exit before T1)
@@ -780,20 +798,29 @@ class LiveSignalJournal:
                 SignalLifecycleStatus.TRIGGERED.value,
                 SignalLifecycleStatus.ACTIVE.value
             ]:
-                sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
-                move_pts = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
-                cur_r = move_pts / sl_pts
+                dS = (current_spot - entry.spot_price) if direction == "LONG" else (entry.spot_price - current_spot)
+                greeks = entry.greeks_snapshot if isinstance(entry.greeks_snapshot, dict) else {}
+                g_delta = abs(float(greeks.get("delta", 0.55)))
+                g_gamma = float(greeks.get("gamma", 0.0008))
+                g_theta_daily = abs(float(greeks.get("theta", -10.0)))
+                theta_per_bar = max(g_theta_daily / 75.0, 0.10)
+                decay = entry.bars_held * theta_per_bar
+                convexity = 0.5 * g_gamma * (dS ** 2)
+                
+                exit_prem = max(round(e_prem + (dS * g_delta) + convexity - decay, 2), 0.05)
+                cur_r = round(((exit_prem - e_prem) * qty) / max(entry.capital_risk_rupees, 1.0), 2)
                 if cur_r < TIME_STOP_MIN_R:
                     entry.lifecycle_status = SignalLifecycleStatus.TIME_STOPPED.value
-                    entry.realized_r_multiple = round(cur_r, 2)
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.realized_r_multiple = cur_r
+                    entry.exit_premium = exit_prem
+                    entry.realized_pnl_rupees = round((exit_prem - e_prem) * qty, 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = current_spot
                     entry.notes += f" | Time stop @ {entry.bars_held} bars ({entry.realized_r_multiple:+.2f}R)."
                     updates_count += 1
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "TIME_STOPPED", current_spot, float(getattr(entry, "entry_premium", 0.0))))
+                        self._pending_lifecycle_events.append((entry, "TIME_STOPPED", current_spot, exit_prem))
                     continue
 
             if direction == "LONG":
@@ -814,67 +841,77 @@ class LiveSignalJournal:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.target_1_premium
-                        entry.notes += f" | Trailed SL (T1) hit on remaining 25%."
+                        entry.exit_premium = t1_prem
+                        p1 = 0.35 * (t1_prem - e_prem)
+                        p2 = 0.35 * (t2_prem - e_prem)
+                        p3 = 0.30 * (t1_prem - e_prem)
+                        entry.realized_pnl_rupees = round((p1 + p2 + p3) * qty, 2)
+                        entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        entry.notes += f" | Trailed SL (T1) hit on remaining 30%."
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.target_1_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, t1_prem))
                     elif entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.entry_premium
-                        entry.notes += f" | Breakeven SL hit on remaining 50%."
+                        entry.exit_premium = e_prem
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        entry.notes += f" | Breakeven SL hit on remaining 50%."
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.entry_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, e_prem))
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
-                        entry.realized_r_multiple = -1.0
-                        entry.realized_pnl_rupees = - entry.capital_risk_rupees
-                        entry.realized_pnl_net = - entry.capital_risk_rupees - entry.tca_friction_est
+                        entry.exit_premium = sl_prem
+                        entry.realized_pnl_rupees = round((sl_prem - e_prem) * qty, 2)
+                        entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.sl_premium
                         entry.notes += f" | SL Hit @ ₹{current_low:.1f}"
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, sl_prem))
                     updates_count += 1
                 elif hit_t3:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
-                    _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
-                    entry.realized_r_multiple = _t3_r
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * _t3_r, 2)
+                    entry.exit_premium = t3_prem
+                    p1 = 0.35 * (t1_prem - e_prem)
+                    p2 = 0.35 * (t2_prem - e_prem)
+                    p3 = 0.30 * (t3_prem - e_prem)
+                    entry.realized_pnl_rupees = round((p1 + p2 + p3) * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot
-                    entry.exit_premium = entry.target_3_premium
                     entry.notes += f" | T3 Moonshot Hit @ ₹{current_high:.1f}"
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
+                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, t3_prem))
                     updates_count += 1
                 elif hit_t2:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
-                    entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.exit_premium = t2_prem
+                    p1 = 0.35 * (t1_prem - e_prem)
+                    p2 = 0.35 * (t2_prem - e_prem)
+                    entry.realized_pnl_rupees = round((p1 + p2) * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.sl_spot = entry.target_1_spot if entry.target_1_spot > 0 else entry.spot_price  # Trail SL to T1
                     entry.exit_spot = t2_spot
-                    entry.exit_premium = entry.target_2_premium
                     entry.notes += f" | T2 Hit @ ₹{current_high:.1f}. Trailed SL to T1."
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_high, entry.target_2_premium))
+                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_high, t2_prem))
                     updates_count += 1
                 elif hit_t1:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
-                    entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
-                    entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
+                    entry.exit_premium = t1_prem
+                    p1 = 0.50 * (t1_prem - e_prem)
+                    entry.realized_pnl_rupees = round(p1 * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price  # Trail SL to Breakeven
                     entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_high, entry.target_1_premium))
+                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_high, t1_prem))
                     updates_count += 1
 
             elif direction == "SHORT":
@@ -895,67 +932,77 @@ class LiveSignalJournal:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.target_1_premium
-                        entry.notes += f" | Trailed SL (T1) hit on remaining 25%."
+                        entry.exit_premium = t1_prem
+                        p1 = 0.35 * (t1_prem - e_prem)
+                        p2 = 0.35 * (t2_prem - e_prem)
+                        p3 = 0.30 * (t1_prem - e_prem)
+                        entry.realized_pnl_rupees = round((p1 + p2 + p3) * qty, 2)
+                        entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        entry.notes += f" | Trailed SL (T1) hit on remaining 30%."
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.target_1_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, t1_prem))
                     elif entry.lifecycle_status == SignalLifecycleStatus.T1_REACHED.value:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.entry_premium
-                        entry.notes += f" | Breakeven SL hit on remaining 50%."
+                        entry.exit_premium = e_prem
                         entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
+                        entry.notes += f" | Breakeven SL hit on remaining 50%."
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.entry_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, e_prem))
                     else:
                         entry.lifecycle_status = SignalLifecycleStatus.STOPPED_OUT.value
-                        entry.realized_r_multiple = -1.0
-                        entry.realized_pnl_rupees = - entry.capital_risk_rupees
-                        entry.realized_pnl_net = - entry.capital_risk_rupees - entry.tca_friction_est
+                        entry.exit_premium = sl_prem
+                        entry.realized_pnl_rupees = round((sl_prem - e_prem) * qty, 2)
+                        entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
+                        entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                         entry.exit_timestamp_ist = now_ist
                         entry.exit_spot = sl_spot
-                        entry.exit_premium = entry.sl_premium
                         entry.notes += f" | SL Hit @ ₹{current_high:.1f}"
                         with self._lifecycle_lock:
-                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, entry.sl_premium))
+                            self._pending_lifecycle_events.append((entry, "STOPPED_OUT", sl_spot, sl_prem))
                     updates_count += 1
                 elif hit_t3:
                     entry.lifecycle_status = SignalLifecycleStatus.T3_MOONSHOT.value
-                    _sl_pts = max(abs(entry.spot_price - entry.sl_spot), 1.0)
-                    _t3_r = round(abs(t3_spot - entry.spot_price) / _sl_pts, 2)
-                    entry.realized_r_multiple = _t3_r
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * _t3_r, 2)
+                    entry.exit_premium = t3_prem
+                    p1 = 0.35 * (t1_prem - e_prem)
+                    p2 = 0.35 * (t2_prem - e_prem)
+                    p3 = 0.30 * (t3_prem - e_prem)
+                    entry.realized_pnl_rupees = round((p1 + p2 + p3) * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.exit_timestamp_ist = now_ist
                     entry.exit_spot = t3_spot
-                    entry.exit_premium = entry.target_3_premium
                     entry.notes += f" | T3 Moonshot Hit @ ₹{current_low:.1f}"
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, entry.target_3_premium))
+                        self._pending_lifecycle_events.append((entry, "T3_MOONSHOT", t3_spot, t3_prem))
                     updates_count += 1
                 elif hit_t2:
                     entry.lifecycle_status = SignalLifecycleStatus.T2_REACHED.value
-                    entry.realized_r_multiple = round(0.5 * entry.r_multiple_t1 + 0.5 * entry.r_multiple_t2, 2)
-                    entry.realized_pnl_rupees = round(entry.capital_risk_rupees * entry.realized_r_multiple, 2)
+                    entry.exit_premium = t2_prem
+                    p1 = 0.35 * (t1_prem - e_prem)
+                    p2 = 0.35 * (t2_prem - e_prem)
+                    entry.realized_pnl_rupees = round((p1 + p2) * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - entry.tca_friction_est, 2)
                     entry.sl_spot = entry.target_1_spot if entry.target_1_spot > 0 else entry.spot_price  # Trail SL to T1
                     entry.exit_spot = t2_spot
-                    entry.exit_premium = entry.target_2_premium
                     entry.notes += f" | T2 Hit @ ₹{current_low:.1f}. Trailed SL to T1."
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_low, entry.target_2_premium))
+                        self._pending_lifecycle_events.append((entry, "T2_REACHED", current_low, t2_prem))
                     updates_count += 1
                 elif hit_t1:
                     entry.lifecycle_status = SignalLifecycleStatus.T1_REACHED.value
-                    entry.realized_r_multiple = round(entry.r_multiple_t1 * 0.5, 2)
-                    entry.realized_pnl_rupees = round(0.5 * entry.capital_risk_rupees * entry.r_multiple_t1, 2)
+                    entry.exit_premium = t1_prem
+                    p1 = 0.50 * (t1_prem - e_prem)
+                    entry.realized_pnl_rupees = round(p1 * qty, 2)
+                    entry.realized_r_multiple = round(entry.realized_pnl_rupees / max(entry.capital_risk_rupees, 1.0), 2)
                     entry.realized_pnl_net = round(entry.realized_pnl_rupees - (0.5 * entry.tca_friction_est), 2)
                     entry.sl_spot = entry.spot_price
                     entry.notes += f" | T1 Hit. 50% booked, SL trailed to entry."
                     with self._lifecycle_lock:
-                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_low, entry.target_1_premium))
+                        self._pending_lifecycle_events.append((entry, "T1_REACHED", current_low, t1_prem))
                     updates_count += 1
 
         if updates_count > 0:

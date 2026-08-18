@@ -531,6 +531,25 @@ class StrategyEngine:
                 details={"bar_time": bar_time}
             )
 
+        # Event & Holiday Blackout Gate
+        from src.event_calendar import check_event_risk_gate
+        bar_ts_full = bar.name.strftime("%Y-%m-%d %H:%M") if hasattr(bar.name, "strftime") else str(bar.name)
+        ev_passed, ev_reason, ev_audit = check_event_risk_gate(bar_ts_full)
+        if not ev_passed:
+            return Signal(
+                signal_type=SignalType.WAIT,
+                entry_price=close,
+                sl_price=0.0,
+                target_1=0.0,
+                target_2=0.0,
+                target_3_moonshot=0.0,
+                pyramid_trigger=0.0,
+                reason=ev_reason,
+                htf_aligned=False,
+                fib_retracement=0.0,
+                details={"event_blackout": ev_audit}
+            )
+
         if len(sub_df) < 15:
             return Signal(SignalType.WAIT, close, 0.0, 0.0, 0.0, 0.0, 0.0, "Accumulating bars for indicator stability", True, 0.0, {})
 

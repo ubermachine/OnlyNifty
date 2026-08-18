@@ -80,6 +80,7 @@ GST_PCT: float = 0.18                   # 18% GST on (Brokerage + Exchange Fees)
 SEBI_CHARGES_PCT: float = 0.000001      # ₹10 per Crore
 STAMP_DUTY_BUY_PCT: float = 0.00003     # 0.003% Stamp duty on buy turnover
 DEFAULT_SLIPPAGE_PTS: float = 0.75      # ₹0.75 baseline per share slippage
+SPREAD_RISK_MAX_RATIO: float = 0.15     # Max allowed Bid/Ask spread as fraction of stop distance (15%)
 
 # ----------------- RISK MANAGEMENT & MONTE CARLO UPGRADES (v3.2) -----------------
 GOLDEN_VAULT_TRIGGER_PCT: float = 0.015   # +1.5% Intraday Net PnL activates the Golden Vault

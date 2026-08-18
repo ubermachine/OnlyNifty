@@ -5,13 +5,15 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 from src.config import (
     DEFAULT_CAPITAL, LOT_SIZE, DAILY_LOSS_LIMIT_PCT,
-    MAX_CONSECUTIVE_LOSSES_DAY, MAX_TRADES_PER_DAY
+    MAX_CONSECUTIVE_LOSSES_DAY, MAX_TRADES_PER_DAY,
+    NIFTY_WEEKLY_EXPIRY_WEEKDAY
 )
 from src.strategy_rules import StrategyEngine, SignalType
 from src.options_engine import (
     generate_option_trade_ticket,
     calculate_adaptive_tca_friction_multi_tier,
-    compute_dynamic_trailing_option_sl
+    compute_dynamic_trailing_option_sl,
+    calculate_time_to_expiry_days
 )
 from src.performance_analytics import compute_institutional_performance_suite
 
@@ -97,8 +99,8 @@ class BacktestEngine:
                 daily_trades_count >= MAX_TRADES_PER_DAY
             )
             
-            is_thursday = hasattr(bar.name, "weekday") and bar.name.weekday() == 3
-            is_0dte_afternoon = is_thursday and (bar_time_str >= "12:30")
+            is_expiry_day = hasattr(bar.name, "weekday") and bar.name.weekday() == NIFTY_WEEKLY_EXPIRY_WEEKDAY
+            is_0dte_afternoon = is_expiry_day and (bar_time_str >= "12:30")
             
             if not in_trade:
                 if not is_session_locked:
@@ -109,11 +111,13 @@ class BacktestEngine:
                         options_context=options_context
                     )
                     if signal.signal_type in [SignalType.LONG, SignalType.SHORT, SignalType.LONG_3PM, SignalType.SHORT_3PM]:
+                        t_days_calc = calculate_time_to_expiry_days(bar.name, expiry_weekday=NIFTY_WEEKLY_EXPIRY_WEEKDAY)
                         ticket = generate_option_trade_ticket(
                             close, signal, capital, current_dd_pct,
-                            t_days=0.15 if is_0dte_afternoon else 4.0,
+                            t_days=t_days_calc,
                             is_0dte_afternoon=is_0dte_afternoon,
-                            current_intraday_pnl=gross_pnl_accumulated - total_tca_accumulated
+                            current_intraday_pnl=gross_pnl_accumulated - total_tca_accumulated,
+                            option_chain_df=option_chain_df
                         )
                         if ticket.get("status") == "READY" and ticket.get("lots", 0) > 0:
                             in_trade = True
@@ -134,16 +138,21 @@ class BacktestEngine:
                 is_call = "CE" in active_ticket["option_type"]
                 spot_entry = float(active_ticket.get("spot_entry", df_5m.iloc[entry_idx]["close"]))
                 gamma = float(active_ticket.get("gamma", 0.0008))
+                open_px = float(bar["open"]) if "open" in bar else spot_entry
                 
-                # Approximate current option high/low via second-order Taylor series
+                # Approximate current option open/high/low via second-order Taylor series
                 if is_call:
+                    dS_open = open_px - spot_entry
                     dS_high = high - spot_entry
                     dS_low = low - spot_entry
+                    opt_open = entry_prem + (dS_open * delta) + (0.5 * gamma * (dS_open ** 2))
                     opt_high = entry_prem + (dS_high * delta) + (0.5 * gamma * (dS_high ** 2))
                     opt_low = entry_prem + (dS_low * delta) - (0.5 * gamma * (dS_low ** 2))
                 else:
+                    dS_open = spot_entry - open_px
                     dS_high = spot_entry - low
                     dS_low = spot_entry - high
+                    opt_open = entry_prem + (dS_open * delta) + (0.5 * gamma * (dS_open ** 2))
                     opt_high = entry_prem + (dS_high * delta) + (0.5 * gamma * (dS_high ** 2))
                     opt_low = entry_prem + (dS_low * delta) - (0.5 * gamma * (dS_low ** 2))
                 
@@ -151,15 +160,34 @@ class BacktestEngine:
                 lots_t2 = active_ticket.get("lots_t2_35pct", max(lots // 2, 1))
                 lots_t3 = active_ticket.get("lots_t3_30pct", max(lots - lots_t1 - lots_t2, 1))
 
+                current_sl_val = float(active_ticket["sl_premium"])
+                sl_potential_hit = opt_low <= current_sl_val
+                t1_potential_hit = not t1_booked and opt_high >= t1_prem
+                t2_potential_hit = enable_3tier and t1_booked and not t2_booked and opt_high >= t2_prem
+
+                # Unbiased Intrabar Resolution:
+                # If the bar touches both Stop-Loss and Target, resolve by whichever level is closer to bar open
+                if sl_potential_hit and (t1_potential_hit or t2_potential_hit):
+                    target_lvl = t2_prem if t2_potential_hit else t1_prem
+                    dist_to_sl = abs(opt_open - current_sl_val)
+                    dist_to_tgt = abs(opt_open - target_lvl)
+                    if dist_to_sl <= dist_to_tgt:
+                        # Stop was hit first!
+                        t1_potential_hit = False
+                        t2_potential_hit = False
+                    else:
+                        # Target was hit first
+                        sl_potential_hit = False
+
                 # 1. TIER 1 EXIT (35% at +1.2x ATR)
-                if not t1_booked and opt_high >= t1_prem:
+                if t1_potential_hit:
                     t1_booked = True
                     pnl_t1 = (t1_prem - entry_prem) * lots_t1 * LOT_SIZE
                     capital += pnl_t1
                     gross_pnl_accumulated += pnl_t1
 
                 # 2. TIER 2 EXIT (35% at +2.5x ATR)
-                if enable_3tier and t1_booked and not t2_booked and opt_high >= t2_prem:
+                if t2_potential_hit:
                     t2_booked = True
                     pnl_t2 = (t2_prem - entry_prem) * lots_t2 * LOT_SIZE
                     capital += pnl_t2
@@ -185,7 +213,7 @@ class BacktestEngine:
 
                 # 4. CHECK STOP-LOSS OR EOD SQUARE-OFF
                 is_eod = (i == len(df_5m) - 1) or (bar_time_str >= "15:20")
-                sl_hit = opt_low <= float(active_ticket["sl_premium"])
+                sl_hit = sl_potential_hit or (opt_low <= float(active_ticket["sl_premium"]))
                 
                 if sl_hit or is_eod:
                     exit_prem = float(active_ticket["sl_premium"]) if sl_hit else entry_prem + ((close - spot_entry) * delta if is_call else (spot_entry - close) * delta)
