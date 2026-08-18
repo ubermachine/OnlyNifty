@@ -1238,12 +1238,20 @@ def calculate_time_to_expiry_days(
     else:
         now = datetime.now(IST)
 
-    # 1. Authoritative broker expiry epoch derivation
-    if expiry_epoch is not None and expiry_epoch > 0:
-        expiry_dt = datetime.fromtimestamp(expiry_epoch, tz=IST)
-        delta_sec = (expiry_dt - now).total_seconds()
-        t_days = max(delta_sec / 86400.0, 0.005)
-        return round(float(t_days), 4)
+    # 1. Authoritative broker expiry epoch derivation.
+    # Coerce defensively: the epoch can arrive as a str/float/numpy int depending on whether
+    # the chain came from Fyers, jugaad, or the synthetic fallback. A raw `str > 0` comparison
+    # crashes the entire Streamlit app, so any non-numeric input silently falls through.
+    if expiry_epoch is not None:
+        try:
+            _epoch = float(expiry_epoch)
+            if _epoch > 0:
+                expiry_dt = datetime.fromtimestamp(_epoch, tz=IST)
+                delta_sec = (expiry_dt - now).total_seconds()
+                t_days = max(delta_sec / 86400.0, 0.005)
+                return round(float(t_days), 4)
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
 
     # 2. Authoritative expiry date string / object derivation
     if expiry_date is not None:
@@ -1708,10 +1716,16 @@ def generate_option_trade_ticket(
         )
 
     
+    # Broker contract symbol (NSE:NIFTY...CE) — only present on live MARKET_QUOTE pricing.
+    # Must be captured now; expired weekly contracts return "Invalid symbol" and cannot be
+    # reconstructed for outcome resolution later (premium history is perishable).
+    fyers_symbol = market_symbol if (pricing_source == "MARKET_QUOTE" and str(market_symbol).startswith("NSE:")) else ""
+
     return {
         "status": "READY",
         "signal": signal.signal_type.value,
         "symbol": market_symbol if market_symbol else strike_info["symbol"],
+        "fyers_symbol": fyers_symbol,
         "strike": strike_info["strike"],
         "target_strike": strike_info["strike"],
         "option_type": strike_info["option_type"],
