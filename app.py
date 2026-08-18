@@ -16,6 +16,7 @@ import numpy as np
 from datetime import datetime
 import time
 import json
+import textwrap
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -462,6 +463,16 @@ with st.sidebar.expander("🔔 Telegram Alert Webhook", expanded=False):
             st.success("✅ Test alert sent successfully to Telegram!")
         else:
             st.error(f"❌ Dispatch failed: {msg}")
+
+with st.sidebar.expander("🗄️ Neon PostgreSQL Cloud DB", expanded=False):
+    from src.cloud_storage import get_cloud_storage_status
+    db_status = get_cloud_storage_status()
+    if db_status["is_connected"]:
+        st.success(f"🟢 **Neon DB: Connected**\n* **Status:** Online & Synced\n* **Cluster:** `{db_status['host']}`\n* **Archived Records:** {db_status['records_count']}")
+    elif db_status["status"] == "NOT_CONFIGURED":
+        st.warning("⚪ **Cloud DB: Local Mode**\n* No `DATABASE_URL` configured in secrets.\n* Signals persist to local files only.")
+    else:
+        st.error(f"🔴 **Cloud DB: Offline**\n* {db_status['message']}")
 
 # ----------------- PIPELINE EXECUTION & LATENCY INSTRUMENTATION -----------------
 t_pipeline_start = time.perf_counter()
@@ -1409,7 +1420,11 @@ with tab_chart:
 
 # ----- TAB 2: LIVE INSTITUTIONAL SIGNALS JOURNAL & AUDIT LOG -----
 with tab_journal:
-    st.markdown("""
+    from src.cloud_storage import get_cloud_storage_status
+    _db_status = get_cloud_storage_status()
+    _db_badge = f'<span style="background: rgba(5,223,114,0.12); color: #05df72; border: 1px solid rgba(5,223,114,0.35); padding: 4px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700;">🟢 Neon Cloud Synced ({_db_status["records_count"]} records)</span>' if _db_status["is_connected"] else '<span style="background: rgba(142,159,181,0.12); color: #8e9fb5; border: 1px solid rgba(142,159,181,0.25); padding: 4px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700;">⚪ Local Storage Only</span>'
+
+    st.markdown(textwrap.dedent(f"""
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <div>
             <h3 style="margin: 0; font-weight: 800; color: #f1f5f9;">📜 Live Institutional Signals Journal & Daily Audit Store</h3>
@@ -1417,8 +1432,11 @@ with tab_journal:
                 Real-Time Bar-by-Bar Signal Capture • State-Transition Deduplication • Greeks Snapshots • Lifecycle Trade Tracking
             </div>
         </div>
+        <div>
+            {_db_badge}
+        </div>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
     today_ist_str = datetime.now(IST).strftime("%Y-%m-%d")
     available_dates = sorted(list({

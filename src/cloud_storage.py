@@ -68,6 +68,51 @@ def get_connection():
     return psycopg2.connect(db_url, sslmode="require")
 
 
+def get_cloud_storage_status() -> Dict[str, Any]:
+    """Returns connection health and summary metrics for Neon PostgreSQL."""
+    db_url = get_database_url()
+    if not db_url:
+        return {
+            "is_connected": False,
+            "status": "NOT_CONFIGURED",
+            "message": "No DATABASE_URL found in secrets or environment",
+            "records_count": 0,
+            "host": None
+        }
+
+    try:
+        import psycopg2
+        host = db_url.split("@")[-1].split("/")[0].split("?")[0] if "@" in db_url else "Neon Cluster"
+        with psycopg2.connect(db_url, sslmode="require", connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'signals_journal_audit'
+                );
+                """)
+                table_exists = cur.fetchone()[0]
+                count = 0
+                if table_exists:
+                    cur.execute("SELECT count(*) FROM signals_journal_audit;")
+                    count = cur.fetchone()[0]
+                return {
+                    "is_connected": True,
+                    "status": "CONNECTED",
+                    "message": f"Connected to Neon PostgreSQL ({host})",
+                    "records_count": int(count),
+                    "host": host
+                }
+    except Exception as ex:
+        return {
+            "is_connected": False,
+            "status": "CONNECTION_ERROR",
+            "message": str(ex),
+            "records_count": 0,
+            "host": None
+        }
+
+
 def init_db() -> bool:
     """Initializes the signals_journal_audit table and indices on Neon PostgreSQL."""
     global _db_initialized
