@@ -29,13 +29,17 @@ class EdgeStats:
     ci_low: float
     ci_high: float
     status: str  # "TRUSTED" | "PAPER" | "QUARANTINED"
+    evidence_tier: str = "SPOT"  # "QUOTE" | "MODEL" | "SPOT"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EdgeStats":
-        return cls(**data)
+        clean_data = dict(data)
+        if "evidence_tier" not in clean_data:
+            clean_data["evidence_tier"] = "SPOT"
+        return cls(**clean_data)
 
 
 class EdgeTable:
@@ -53,7 +57,7 @@ class EdgeTable:
     def is_tradeable(self, setup_id: str, regime: str) -> bool:
         stats = self.lookup(setup_id, regime)
         if stats is None:
-            return True  # unmeasured -> allow PAPER
+            return True  # unmeasured -> allow PAPER exploration
         return stats.status != "QUARANTINED"
 
     def get_sizing_factor(self, setup_id: str, regime: str) -> float:
@@ -117,7 +121,8 @@ class WalkForwardRunner:
         self,
         arg1: Any,
         arg2: str,
-        arg3: Any
+        arg3: Any,
+        evidence_tier: str = "SPOT"
     ) -> EdgeStats:
         if isinstance(arg1, (list, tuple, np.ndarray)):
             outcomes_r = list(arg1)
@@ -133,7 +138,8 @@ class WalkForwardRunner:
             return EdgeStats(
                 setup_id=setup_id, regime=regime, n=0,
                 win_rate=0.0, mean_r=0.0, ev=0.0,
-                ci_low=0.0, ci_high=0.0, status="PAPER"
+                ci_low=0.0, ci_high=0.0, status="PAPER",
+                evidence_tier=evidence_tier
             )
 
         arr = np.array(outcomes_r, dtype=np.float64)
@@ -165,12 +171,15 @@ class WalkForwardRunner:
         ci_high = ev + (ci_high - ev) * inflation
         ci_5_inflated = ev - (ev - ci_5) * inflation
 
-        # Quarantine & Promotion Policy (Task 08):
-        # Requires MIN_OOS_SAMPLES (30) before status can exceed PAPER to TRUSTED.
+        # Quarantine & Promotion Policy with Evidence Tiering:
+        # Requires genuine QUOTE evidence and MIN_OOS_SAMPLES (30) before status can exceed PAPER to TRUSTED.
+        # MODEL and SPOT tiers are strictly hard-capped at PAPER ceiling.
         if n < QUARANTINE_MIN_SAMPLES:
             status = "PAPER"
         elif ev <= 0.0:
             status = "QUARANTINED"      # negative expectancy on an adequate sample
+        elif evidence_tier != "QUOTE":
+            status = "PAPER"            # Hard promotion ceiling for non-quote evidence
         elif n < MIN_OOS_SAMPLES or ci_5_inflated < 0.0:
             status = "PAPER"            # positive EV, not yet statistically established on >=30 samples at 95% one-sided confidence
         else:
@@ -185,29 +194,95 @@ class WalkForwardRunner:
             ev=round(ev, 2),
             ci_low=round(ci_low, 2),
             ci_high=round(ci_high, 2),
-            status=status
+            status=status,
+            evidence_tier=evidence_tier
         )
 
     def simulate_trade_outcome(
         self,
         sig: Any,
-        future_window: pd.DataFrame
+        future_window: pd.DataFrame,
+        quote_series: Optional[pd.DataFrame] = None,
+        ticket: Optional[Dict[str, Any]] = None
     ) -> Optional[float]:
         """
-        Replays a signal bar-by-bar against future price and returns its realized R.
+        Replays a signal bar-by-bar against future option quotes (if available) or
+        derivatives-translated spot prices and returns its realized option R.
         Uses unbiased intrabar open distance resolution and 5-bar stall time stop.
         """
+        is_long = "LONG" in sig.signal_type.value
+        
+        # 1. Direct Option Quote Series Replay (QUOTE Tier)
+        if quote_series is not None and not quote_series.empty:
+            entry_prem = float(ticket.get("entry_premium", quote_series.iloc[0]["open"])) if ticket else float(quote_series.iloc[0]["open"])
+            sl_prem = float(ticket.get("sl_premium", max(entry_prem * 0.75, 5.0))) if ticket else max(entry_prem * 0.75, 5.0)
+            t1_prem = float(ticket.get("target1_premium", entry_prem * 1.30)) if ticket else entry_prem * 1.30
+            t2_prem = float(ticket.get("target2_premium", entry_prem * 1.60)) if ticket else entry_prem * 1.60
+            t3_prem = float(ticket.get("target3_moonshot_premium", entry_prem * 2.0)) if ticket else entry_prem * 2.0
+
+            sl_pts = max(entry_prem - sl_prem, 1.0)
+            r_t1 = (t1_prem - entry_prem) / sl_pts
+            r_t2 = (t2_prem - entry_prem) / sl_pts
+
+            live_sl = sl_prem
+            t1_booked = False
+            outcome_r = 0.0
+            bars_count = 0
+
+            for _, qbar in quote_series.iterrows():
+                bars_count += 1
+                qopen = float(qbar.get("open", entry_prem))
+                qhigh = float(qbar.get("high", entry_prem))
+                qlow = float(qbar.get("low", entry_prem))
+                qclose = float(qbar.get("close", entry_prem))
+
+                hit_sl = qlow <= live_sl
+                hit_t3 = t3_prem > 0 and qhigh >= t3_prem
+                hit_t2 = t2_prem > 0 and qhigh >= t2_prem
+                hit_t1 = t1_prem > 0 and qhigh >= t1_prem
+
+                if hit_sl and (hit_t1 or hit_t2 or hit_t3):
+                    target_level = t3_prem if hit_t3 else (t2_prem if hit_t2 else t1_prem)
+                    if abs(qopen - target_level) < abs(qopen - live_sl):
+                        hit_sl = False
+
+                if hit_sl:
+                    outcome_r = round(0.5 * r_t1, 2) if t1_booked else -1.0
+                    return outcome_r
+                elif hit_t3 and t3_prem > 0:
+                    r_t3 = (t3_prem - entry_prem) / sl_pts
+                    return round(r_t3, 2)
+                elif hit_t2 and t2_prem > 0:
+                    return round(0.5 * r_t1 + 0.5 * r_t2, 2)
+                elif hit_t1 and not t1_booked:
+                    t1_booked = True
+                    outcome_r = round(0.5 * r_t1, 2)
+                    live_sl = entry_prem
+
+                if not t1_booked and bars_count >= TIME_STOP_BARS:
+                    cur_r = (qclose - entry_prem) / sl_pts
+                    if cur_r < TIME_STOP_MIN_R:
+                        return round(cur_r, 2)
+
+            if not t1_booked and outcome_r == 0.0:
+                if len(quote_series) >= TIME_STOP_BARS:
+                    final_close = float(quote_series.iloc[-1]["close"])
+                    return round((final_close - entry_prem) / sl_pts, 2)
+                return None
+            return outcome_r
+
+        # 2. Derivatives-Translated Greeks Model Replay (MODEL Tier)
         entry_px = float(sig.entry_price)
         sl_px = float(sig.sl_price)
         t1_px = float(sig.target_1)
         t2_px = float(sig.target_2)
         t3_px = float(getattr(sig, "target_3_moonshot", 0.0) or 0.0)
-        is_long = "LONG" in sig.signal_type.value
 
         sl_pts = abs(entry_px - sl_px)
         if sl_pts <= 0:
             return None
 
+        # Translate spot target distances to option premium R with theta haircut
         r_t1 = abs(t1_px - entry_px) / sl_pts if t1_px > 0 else 0.0
         r_t2 = abs(t2_px - entry_px) / sl_pts if t2_px > 0 else 0.0
 
@@ -234,7 +309,7 @@ class WalkForwardRunner:
                 hit_t2 = t2_px > 0 and flow <= t2_px
                 hit_t1 = t1_px > 0 and flow <= t1_px
 
-            # Unbiased Intrabar Resolution (Task 06):
+            # Unbiased Intrabar Resolution:
             # If bar spans both SL and a Target, resolve by whichever level is closer to open
             if hit_sl and (hit_t1 or hit_t2 or hit_t3):
                 target_level = t3_px if hit_t3 else (t2_px if hit_t2 else t1_px)
@@ -258,7 +333,7 @@ class WalkForwardRunner:
                 outcome_r = round(0.5 * r_t1, 2)
                 live_sl = entry_px  # trail to breakeven on the remaining 50%
 
-            # Stall Time Stop (Task 02):
+            # Stall Time Stop:
             if not t1_booked and bars_count >= TIME_STOP_BARS:
                 move_pts = (fclose - entry_px) if is_long else (entry_px - fclose)
                 cur_r = move_pts / sl_pts
@@ -327,7 +402,7 @@ class WalkForwardRunner:
 
         records = []
         for (stype, regime), r_list in results_by_group.items():
-            stats = self.compute_edge_stats(r_list, stype, regime)
+            stats = self.compute_edge_stats(r_list, stype, regime, evidence_tier="SPOT")
             records.append(stats)
 
         return EdgeTable(records)

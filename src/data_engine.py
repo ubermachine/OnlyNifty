@@ -219,6 +219,10 @@ class DataEngine:
                 return {
                     "underlying_value": multi["underlying_value"],
                     "expiry_dates": multi["expiry_dates"],
+                    "near_expiry": multi.get("near_expiry"),
+                    "near_expiry_epoch": multi.get("near_expiry_epoch"),
+                    "next_expiry_epoch": multi.get("next_expiry_epoch"),
+                    "monthly_expiry_epoch": multi.get("monthly_expiry_epoch"),
                     "dataframe": multi["near_chain"],
                     "source": multi.get("source", "Fyers API v3 (Live Broker)"),
                     "data_quality": "VERIFIED"
@@ -244,15 +248,30 @@ class DataEngine:
                     ce_vol = ce.get("totalTradedVolume", 0)
                     pe_vol = pe.get("totalTradedVolume", 0)
                     expiry = item.get("expiryDates") or item.get("expiryDate") or ce.get("expiryDate") or pe.get("expiryDate")
+                    ce_ltp = float(ce.get("lastPrice", 0.0))
+                    pe_ltp = float(pe.get("lastPrice", 0.0))
+                    ce_bid = float(ce.get("buyPrice1", 0.0) or ce.get("bid", 0.0))
+                    ce_ask = float(ce.get("sellPrice1", 0.0) or ce.get("ask", 0.0))
+                    pe_bid = float(pe.get("buyPrice1", 0.0) or pe.get("bid", 0.0))
+                    pe_ask = float(pe.get("sellPrice1", 0.0) or pe.get("ask", 0.0))
+
                     rows.append({
                         "strike": strike,
                         "expiry": expiry,
-                        "ce_ltp": ce.get("lastPrice", 0.0),
+                        "ce_ltp": ce_ltp,
+                        "ce_bid": ce_bid,
+                        "ce_ask": ce_ask,
+                        "ce_spread": max(round(ce_ask - ce_bid, 2), 0.0) if ce_ask > 0 and ce_bid > 0 else 0.0,
+                        "ce_symbol": str(ce.get("identifier", "")),
                         "ce_oi": ce.get("openInterest", 0),
                         "ce_change_oi": ce.get("changeinOpenInterest", 0),
                         "ce_iv": ce.get("impliedVolatility", 0.0),
                         "ce_volume": ce_vol,
-                        "pe_ltp": pe.get("lastPrice", 0.0),
+                        "pe_ltp": pe_ltp,
+                        "pe_bid": pe_bid,
+                        "pe_ask": pe_ask,
+                        "pe_spread": max(round(pe_ask - pe_bid, 2), 0.0) if pe_ask > 0 and pe_bid > 0 else 0.0,
+                        "pe_symbol": str(pe.get("identifier", "")),
                         "pe_oi": pe.get("openInterest", 0),
                         "pe_change_oi": pe.get("changeinOpenInterest", 0),
                         "pe_iv": pe.get("impliedVolatility", 0.0),
@@ -263,6 +282,7 @@ class DataEngine:
                     return {
                         "underlying_value": underlying if underlying > 0 else spot,
                         "expiry_dates": expiry_dates,
+                        "near_expiry": expiry_dates[0] if expiry_dates else "",
                         "dataframe": df,
                         "source": "jugaad-data (NSELive Scraping)",
                         "data_quality": "VERIFIED"
@@ -281,10 +301,12 @@ class DataEngine:
         strikes = [atm_center + (i * 50) for i in range(-12, 13)]
         
         today = datetime.now(IST)
-        days_ahead = (3 - today.weekday() + 7) % 7
+        from src.config import NIFTY_WEEKLY_EXPIRY_WEEKDAY
+        days_ahead = (NIFTY_WEEKLY_EXPIRY_WEEKDAY - today.weekday() + 7) % 7
         if days_ahead == 0:
             days_ahead = 7
         expiry_dt = today + timedelta(days=days_ahead)
+        expiry_epoch = int(expiry_dt.replace(hour=15, minute=30, second=0).timestamp())
         expiry_str = expiry_dt.strftime("%d-%b-%Y")
         
         rows = []
@@ -302,15 +324,34 @@ class DataEngine:
             ce_price = max(round(spot - k + 45.0, 2) if spot > k else round(max(150.0 - abs(k - spot) * 0.45, 8.0), 2), 2.0)
             pe_price = max(round(k - spot + 45.0, 2) if k > spot else round(max(150.0 - abs(spot - k) * 0.45, 8.0), 2), 2.0)
             
+            ce_spread = round(0.50 + 0.015 * abs(spot - k), 2)
+            ce_bid = round(max(ce_price - ce_spread / 2.0, 0.05), 2)
+            ce_ask = round(ce_bid + ce_spread, 2)
+            ce_symbol = f"NIFTY{expiry_dt.strftime('%y%m%d')}{k}CE"
+
+            pe_spread = round(0.50 + 0.015 * abs(spot - k), 2)
+            pe_bid = round(max(pe_price - pe_spread / 2.0, 0.05), 2)
+            pe_ask = round(pe_bid + pe_spread, 2)
+            pe_symbol = f"NIFTY{expiry_dt.strftime('%y%m%d')}{k}PE"
+
             rows.append({
                 "strike": k,
                 "expiry": expiry_str,
+                "expiry_epoch": expiry_epoch,
                 "ce_ltp": ce_price,
+                "ce_bid": ce_bid,
+                "ce_ask": ce_ask,
+                "ce_spread": ce_spread,
+                "ce_symbol": ce_symbol,
                 "ce_oi": ce_oi,
                 "ce_change_oi": ce_chg,
                 "ce_iv": 11.8,
                 "ce_volume": int(ce_oi * 1.8),
                 "pe_ltp": pe_price,
+                "pe_bid": pe_bid,
+                "pe_ask": pe_ask,
+                "pe_spread": pe_spread,
+                "pe_symbol": pe_symbol,
                 "pe_oi": pe_oi,
                 "pe_change_oi": pe_chg,
                 "pe_iv": 12.4,
@@ -321,6 +362,8 @@ class DataEngine:
         return {
             "underlying_value": spot,
             "expiry_dates": [expiry_str, (expiry_dt + timedelta(days=7)).strftime("%d-%b-%Y")],
+            "near_expiry": expiry_str,
+            "near_expiry_epoch": expiry_epoch,
             "dataframe": df,
             "source": "Synthetic Fallback Chain"
         }
@@ -458,7 +501,8 @@ class DataEngine:
         strikes = [atm_center + (i * 50) for i in range(-12, 13)]
         
         today = datetime.now(IST)
-        days_to_near = (3 - today.weekday() + 7) % 7
+        from src.config import NIFTY_WEEKLY_EXPIRY_WEEKDAY
+        days_to_near = (NIFTY_WEEKLY_EXPIRY_WEEKDAY - today.weekday() + 7) % 7
         if days_to_near == 0:
             days_to_near = 7
         near_dt = today + timedelta(days=days_to_near)

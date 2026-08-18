@@ -540,6 +540,7 @@ hfi_res = load_heavyweight_flow_index(data_mode)
 # Fetch Live Option Chain for Options Desk & GEX Walls (cached, 5s TTL)
 oc_raw = load_live_option_chain_data(data_mode, spot_price=round(current_spot, 2))
 oc_df = oc_raw.get("dataframe") if isinstance(oc_raw, dict) else oc_raw
+near_expiry_epoch = oc_raw.get("near_expiry_epoch") if isinstance(oc_raw, dict) else None
 pcr_analytics = calculate_pcr_and_max_pain(oc_df)
 gex_chart_res = compute_strike_level_gex_chart_data(oc_df, current_spot, iv_input, 1.0)
 range_fc_res = compute_oi_based_range_forecast(oc_df, current_spot, pcr_analytics.get("max_pain_strike", current_spot))
@@ -731,7 +732,17 @@ if getattr(strategy_engine, '_last_lunch_lull', False):
 if signal and signal.details and "size_factor" in signal.details:
     effective_capital *= signal.details["size_factor"]
 
-t_days_live = calculate_time_to_expiry_days(df.index[-1] if not df.empty else None)
+# Event Calendar Risk Sizing Cap
+from src.event_calendar import get_event_risk_status
+current_bar_ts = df.index[-1].strftime("%Y-%m-%d %H:%M") if not df.empty and hasattr(df.index[-1], "strftime") else (str(df.index[-1]) if not df.empty else datetime.now(IST).strftime("%Y-%m-%d %H:%M"))
+event_status = get_event_risk_status(current_bar_ts)
+if event_status.get("sizing_cap", 1.0) < 1.0:
+    effective_capital *= event_status["sizing_cap"]
+
+t_days_live = calculate_time_to_expiry_days(
+    df.index[-1] if not df.empty else None,
+    expiry_epoch=near_expiry_epoch
+)
 
 ticket = generate_option_trade_ticket(
     current_spot,
@@ -743,7 +754,8 @@ ticket = generate_option_trade_ticket(
     is_0dte_afternoon=is_0dte_mode,
     current_intraday_pnl=session_risk.realized_pnl_today,
     risk_pct_override=dyn_kelly["dynamic_risk_pct"],
-    lot_size=int(contract_lot_size)
+    lot_size=int(contract_lot_size),
+    option_chain_df=oc_df
 )
 
 # Synthesize Unified Desk Verdict

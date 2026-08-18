@@ -22,7 +22,7 @@ from src.config import (
     DELTA_MIN, DELTA_MAX, DELTA_TARGET, DELTA_DEEP_ITM_0DTE, RISK_FREE_RATE, DEFAULT_IV,
     PUT_SKEW_PREMIUM, STT_SELL_PCT, BROKERAGE_PER_ORDER,
     NSE_TURNOVER_PCT, GST_PCT, SEBI_CHARGES_PCT, STAMP_DUTY_BUY_PCT,
-    DEFAULT_SLIPPAGE_PTS, KELLY_FRACTION, MAX_TOLERABLE_MDD,
+    DEFAULT_SLIPPAGE_PTS, SPREAD_RISK_MAX_RATIO, KELLY_FRACTION, MAX_TOLERABLE_MDD,
     IV_ADVERSE_DRIFT_T1, IV_ADVERSE_DRIFT_T2, IV_ADVERSE_DRIFT_T3,
     NIFTY_WEEKLY_EXPIRY_WEEKDAY, IST
 )
@@ -767,7 +767,7 @@ def calculate_position_size(
                 max_risk_rupees = vault_info["risk_cushion"]
                 vault_constrained = True
 
-    risk_per_share = max(entry_prem - sl_prem, 12.0)
+    risk_per_share = max(round(entry_prem - sl_prem, 2), 0.05)
     risk_per_lot = risk_per_share * lot_size
     
     lots = int(max_risk_rupees // risk_per_lot) if risk_per_lot > 0 else 0
@@ -1210,11 +1210,14 @@ def construct_ratio_spread(
 
 def calculate_time_to_expiry_days(
     timestamp: Optional[Any] = None,
-    expiry_weekday: int = NIFTY_WEEKLY_EXPIRY_WEEKDAY
+    expiry_weekday: int = NIFTY_WEEKLY_EXPIRY_WEEKDAY,
+    expiry_epoch: Optional[int] = None,
+    expiry_date: Optional[Any] = None,
 ) -> float:
     """
-    Calculates actual calendar time-to-expiry in days (t_days) to the next weekly expiry.
-    Handles exact intraday time decay leading up to 15:30 IST market close on expiry days.
+    Calculates actual calendar time-to-expiry in days (t_days).
+    If expiry_epoch or expiry_date is provided, derives exact time from authoritative broker expiry.
+    Otherwise falls back to weekly expiry weekday calculation.
     """
     if timestamp is None:
         now = datetime.now(IST)
@@ -1235,6 +1238,32 @@ def calculate_time_to_expiry_days(
     else:
         now = datetime.now(IST)
 
+    # 1. Authoritative broker expiry epoch derivation
+    if expiry_epoch is not None and expiry_epoch > 0:
+        expiry_dt = datetime.fromtimestamp(expiry_epoch, tz=IST)
+        delta_sec = (expiry_dt - now).total_seconds()
+        t_days = max(delta_sec / 86400.0, 0.005)
+        return round(float(t_days), 4)
+
+    # 2. Authoritative expiry date string / object derivation
+    if expiry_date is not None:
+        try:
+            if isinstance(expiry_date, str):
+                exp_dt = pd.to_datetime(expiry_date)
+            else:
+                exp_dt = expiry_date
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.tz_localize(IST) if hasattr(exp_dt, "tz_localize") else exp_dt.replace(tzinfo=IST)
+            else:
+                exp_dt = exp_dt.astimezone(IST)
+            exp_dt = exp_dt.replace(hour=15, minute=30, second=0)
+            delta_sec = (exp_dt - now).total_seconds()
+            t_days = max(delta_sec / 86400.0, 0.005)
+            return round(float(t_days), 4)
+        except Exception:
+            pass
+
+    # 3. Fallback to weekly weekday
     current_weekday = now.weekday()
     hour_float = now.hour + (now.minute / 60.0) + (now.second / 3600.0)
     market_close_hour = 15.5
@@ -1247,6 +1276,8 @@ def calculate_time_to_expiry_days(
             t_days = 7.0 - ((hour_float - market_close_hour) / 24.0)
     else:
         days_ahead = (expiry_weekday - current_weekday) % 7
+        if days_ahead == 0:
+            days_ahead = 7
         remaining_today = max(market_close_hour - hour_float, 0.0) / 24.0
         t_days = max(round(days_ahead + remaining_today, 4), 0.05)
         
@@ -1420,7 +1451,9 @@ def generate_option_trade_ticket(
     current_intraday_pnl: float = 0.0,
     peak_intraday_pnl: float = 0.0,
     risk_pct_override: Optional[float] = None,
-    lot_size: int = LOT_SIZE
+    lot_size: int = LOT_SIZE,
+    option_chain_df: Optional[pd.DataFrame] = None,
+    max_spread_risk_ratio: float = SPREAD_RISK_MAX_RATIO
 ) -> Dict[str, Any]:
     """Translates 3-Tier spot setups into convex institutional Option Trade Ticket with Free Spread details."""
     if signal.signal_type == SignalType.WAIT or getattr(signal, "entry_price", 0.0) <= 0.0:
@@ -1436,7 +1469,82 @@ def generate_option_trade_ticket(
     entry_prem = strike_info["price"]
     k1 = strike_info["strike"]
     
-    # 1. Spot Risk Bounds with Defensive Index Sanitization
+    pricing_source = "THEORETICAL_MODEL"
+    market_bid = 0.0
+    market_ask = 0.0
+    market_spread = 0.0
+    market_symbol = strike_info.get("symbol", "")
+
+    # 0. Live market quote & per-strike IV extraction if chain provided
+    if option_chain_df is not None and isinstance(option_chain_df, pd.DataFrame) and not option_chain_df.empty:
+        col_strike = "strike" if "strike" in option_chain_df.columns else "strikePrice"
+        if col_strike in option_chain_df.columns:
+            matches = option_chain_df[option_chain_df[col_strike] == k1]
+            if not matches.empty:
+                m_row = matches.iloc[0]
+                m_ltp = float(m_row.get("ce_ltp" if is_call else "pe_ltp", 0.0) or m_row.get("CE_ltp" if is_call else "PE_ltp", 0.0) or 0.0)
+                m_iv = float(m_row.get("ce_iv" if is_call else "pe_iv", 0.0) or 0.0)
+                m_bid = float(m_row.get("ce_bid" if is_call else "pe_bid", 0.0) or 0.0)
+                m_ask = float(m_row.get("ce_ask" if is_call else "pe_ask", 0.0) or 0.0)
+                m_sym = str(m_row.get("ce_symbol" if is_call else "pe_symbol", "") or "")
+                m_spd = float(m_row.get("ce_spread" if is_call else "pe_spread", 0.0) or 0.0)
+
+                # Hard fail-closed liquidity check:
+                # If ask <= 0, bid <= 0, or crossed quote (ask < bid), market quote is illiquid/unquoted
+                if m_ask <= 0 or m_bid <= 0 or m_ask < m_bid:
+                    return {
+                        "status": "VETOED",
+                        "gate": "GATE_VETO_ILLIQUID_MARKET_QUOTE",
+                        "message": f"GATE_VETO_ILLIQUID_MARKET_QUOTE: Strike {k1} lacks two-sided liquidity (Bid: ₹{m_bid:.2f}, Ask: ₹{m_ask:.2f})",
+                        "reason": f"Strike {k1} lacks two-sided liquidity in live option chain",
+                        "market_bid": m_bid,
+                        "market_ask": m_ask,
+                        "market_spread": m_spd,
+                        "selected_strike": k1,
+                        "pricing_source": "MARKET_QUOTE"
+                    }
+
+                entry_prem = round(m_ask, 2)
+                pricing_source = "MARKET_QUOTE"
+                market_bid = m_bid
+                market_ask = m_ask
+                market_spread = round(m_spd if m_spd > 0 else (m_ask - m_bid), 2)
+                if market_spread <= 0:
+                    market_spread = max(round(m_ask - m_bid, 2), 0.05)
+
+                if m_sym:
+                    market_symbol = m_sym
+                if m_iv > 0:
+                    iv_used = m_iv / 100.0 if m_iv > 1.0 else m_iv
+                    g_live = black_scholes_greeks(spot, k1, t_days=t_days, sigma=iv_used, is_call=is_call)
+                    delta = abs(g_live["delta"])
+                    gamma = g_live["gamma"]
+                    theta = g_live["theta"]
+                    vega = abs(float(g_live.get("vega", 0.0)))
+            else:
+                return {
+                    "status": "VETOED",
+                    "gate": "GATE_VETO_STRIKE_NOT_IN_CHAIN",
+                    "message": f"GATE_VETO_STRIKE_NOT_IN_CHAIN: Selected strike {k1} not found in option chain",
+                    "reason": f"Strike {k1} not found in option chain dataframe",
+                    "selected_strike": k1,
+                    "pricing_source": "MARKET_QUOTE"
+                }
+
+    # 1. Minimum Viable Option Buying Premium Gate
+    MIN_BUY_PREMIUM = 2.00
+    if entry_prem < MIN_BUY_PREMIUM:
+        return {
+            "status": "VETOED",
+            "gate": "GATE_VETO_PREMIUM_TOO_LOW",
+            "message": f"GATE_VETO_PREMIUM_TOO_LOW: Entry premium ₹{entry_prem:.2f} is below minimum viable threshold (₹{MIN_BUY_PREMIUM:.2f})",
+            "reason": f"Option premium (₹{entry_prem:.2f}) too cheap for viable risk/reward geometry",
+            "entry_premium": entry_prem,
+            "selected_strike": k1,
+            "pricing_source": pricing_source
+        }
+
+    # 2. Spot Risk Bounds with Defensive Index Sanitization & Relative Option Risk
     sl_p = float(getattr(signal, "sl_price", 0.0))
     if sl_p > 1000.0 and abs(spot - sl_p) < 300.0:
         spot_risk = abs(spot - sl_p)
@@ -1445,10 +1553,66 @@ def generate_option_trade_ticket(
         
     convexity_benefit = 0.5 * gamma * (spot_risk ** 2)
     theta_risk = abs(theta) * 0.15
-    option_risk = max((spot_risk * delta) - convexity_benefit + theta_risk, 10.0)
-    sl_prem = max(round(entry_prem - option_risk, 2), 5.0)
-    
-    # 2. 3-Tier Convex Option Target Premiums with Dynamic Bounds (Accounting for Theta Decay & Adverse Vega Crush)
+    option_risk_raw = (spot_risk * delta) - convexity_benefit + theta_risk
+
+    # Relative stop bounds: scale with entry premium rather than absolute floors
+    # Max risk: at most 50% of premium (or entry_prem - 0.05)
+    max_risk_allowed = min(round(entry_prem * 0.50, 2), round(entry_prem - 0.05, 2))
+    # Min risk: at least 15% of premium or 1 tick (₹0.05)
+    min_risk_allowed = max(round(entry_prem * 0.15, 2), 0.05)
+
+    if max_risk_allowed < min_risk_allowed:
+        max_risk_allowed = min_risk_allowed
+
+    option_risk = round(min(max(option_risk_raw, min_risk_allowed), max_risk_allowed), 2)
+    sl_prem = round(entry_prem - option_risk, 2)
+
+    # Invariant: Stop premium must be strictly less than entry premium and >= 0.05
+    if sl_prem >= entry_prem or sl_prem < 0.05:
+        sl_prem = round(max(entry_prem - max(0.05, round(entry_prem * 0.30, 2)), 0.05), 2)
+
+    stop_dist = round(entry_prem - sl_prem, 2)
+    if stop_dist <= 0.0:
+        return {
+            "status": "VETOED",
+            "gate": "GATE_VETO_INVALID_STOP_DISTANCE",
+            "message": f"GATE_VETO_INVALID_STOP_DISTANCE: Inverted or zero stop distance (Entry: ₹{entry_prem:.2f}, SL: ₹{sl_prem:.2f})",
+            "reason": f"Calculated option stop (₹{sl_prem:.2f}) exceeds or equals entry (₹{entry_prem:.2f})",
+            "entry_premium": entry_prem,
+            "sl_premium": sl_prem,
+            "selected_strike": k1,
+            "pricing_source": pricing_source
+        }
+
+    # 3. Hard Bid/Ask Spread Gate (Fail Closed)
+    if pricing_source == "MARKET_QUOTE":
+        if market_spread <= 0:
+            return {
+                "status": "VETOED",
+                "gate": "GATE_VETO_SPREAD_UNAVAILABLE",
+                "message": f"GATE_VETO_SPREAD_UNAVAILABLE: Zero or unavailable spread for strike {k1}",
+                "reason": f"Zero spread reported on live quote",
+                "spread": market_spread,
+                "pricing_source": pricing_source,
+                "selected_strike": k1
+            }
+        spread_risk_ratio = market_spread / stop_dist
+        if spread_risk_ratio > max_spread_risk_ratio:
+            return {
+                "status": "VETOED",
+                "gate": "GATE_VETO_SPREAD_TOO_WIDE",
+                "message": f"GATE_VETO_SPREAD_TOO_WIDE: Spread ₹{market_spread:.2f} is {spread_risk_ratio:.1%} of stop distance (₹{stop_dist:.2f}), exceeding {max_spread_risk_ratio:.0%} limit",
+                "reason": f"Wide bid/ask spread (₹{market_spread:.2f}) consumes {spread_risk_ratio:.1%} of stop risk",
+                "spread": market_spread,
+                "market_spread": market_spread,
+                "spread_risk_ratio": round(spread_risk_ratio, 3),
+                "pricing_source": pricing_source,
+                "entry_premium": entry_prem,
+                "sl_premium": sl_prem,
+                "selected_strike": k1
+            }
+
+    # 4. 3-Tier Convex Option Target Premiums with Relative Dynamic Bounds
     t1_p = float(getattr(signal, "target_1", 0.0))
     if t1_p > 1000.0 and abs(t1_p - spot) < 400.0:
         diff_t1 = abs(t1_p - spot)
@@ -1457,7 +1621,9 @@ def generate_option_trade_ticket(
         
     theta_decay_t1 = abs(theta) * 0.10
     vega_decay_t1 = vega * (IV_ADVERSE_DRIFT_T1 * 100.0)
-    target1_prem = round(max(entry_prem + (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)) - theta_decay_t1 - vega_decay_t1, entry_prem + 1.0), 2)
+    raw_t1_gain = (diff_t1 * delta) + (0.5 * gamma * (diff_t1 ** 2)) - theta_decay_t1 - vega_decay_t1
+    min_t1_gain = max(round(stop_dist * 1.0, 2), 0.10)
+    target1_prem = round(entry_prem + max(raw_t1_gain, min_t1_gain), 2)
     
     t2_p = float(getattr(signal, "target_2", 0.0))
     if t2_p > 1000.0 and abs(t2_p - spot) < 600.0:
@@ -1467,7 +1633,9 @@ def generate_option_trade_ticket(
         
     theta_decay_t2 = abs(theta) * 0.20
     vega_decay_t2 = vega * (IV_ADVERSE_DRIFT_T2 * 100.0)
-    target2_prem = round(max(entry_prem + (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)) - theta_decay_t2 - vega_decay_t2, target1_prem + 1.0), 2)
+    raw_t2_gain = (diff_t2 * delta) + (0.5 * gamma * (diff_t2 ** 2)) - theta_decay_t2 - vega_decay_t2
+    min_t2_gain = max(round(stop_dist * 2.0, 2), 0.20)
+    target2_prem = round(max(entry_prem + max(raw_t2_gain, min_t2_gain), target1_prem + 0.05), 2)
     
     t3_p = float(getattr(signal, "target_3_moonshot", 0.0))
     if t3_p > 1000.0 and abs(t3_p - spot) < 800.0:
@@ -1477,7 +1645,9 @@ def generate_option_trade_ticket(
         
     theta_decay_t3 = abs(theta) * 0.35
     vega_decay_t3 = vega * (IV_ADVERSE_DRIFT_T3 * 100.0)
-    target3_prem = round(max(entry_prem + (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)) - theta_decay_t3 - vega_decay_t3, target2_prem + 1.0), 2)
+    raw_t3_gain = (diff_t3 * delta) + (0.5 * gamma * (diff_t3 ** 2)) - theta_decay_t3 - vega_decay_t3
+    min_t3_gain = max(round(stop_dist * 3.5, 2), 0.50)
+    target3_prem = round(max(entry_prem + max(raw_t3_gain, min_t3_gain), target2_prem + 0.05), 2)
     
     risk_pct_to_use = risk_pct_override if risk_pct_override is not None else MAX_RISK_PCT
     sizing = calculate_position_size(
@@ -1541,16 +1711,21 @@ def generate_option_trade_ticket(
     return {
         "status": "READY",
         "signal": signal.signal_type.value,
-        "symbol": strike_info["symbol"],
+        "symbol": market_symbol if market_symbol else strike_info["symbol"],
         "strike": strike_info["strike"],
         "target_strike": strike_info["strike"],
         "option_type": strike_info["option_type"],
         "regime_mode": strike_info["regime_mode"],
         "spot_entry": spot,
-        "delta": strike_info["delta"],
-        "gamma": strike_info["gamma"],
-        "theta_decay_daily": strike_info["theta"],
-        "vega": strike_info["vega"],
+        "pricing_source": pricing_source,
+        "market_bid": market_bid,
+        "market_ask": market_ask,
+        "market_spread": market_spread,
+        "bid_ask_spread": market_spread,
+        "delta": delta,
+        "gamma": gamma,
+        "theta_decay_daily": theta,
+        "vega": vega,
         "vanna": strike_info["vanna"],
         "charm": strike_info["charm"],
         "volga": strike_info["volga"],
@@ -1577,7 +1752,7 @@ def generate_option_trade_ticket(
             "tier_1_asymmetric": (
                 f"Tier 1 (+1.2x ATR @ ₹{signal.target_1:.1f}): Book 35% ({lots_35} lots) at ₹{target1_prem:.2f} "
                 f"OR Sell {sizing['lots']} Lots OTM {k2} {strike_info['option_type']} @ ~₹{credit_received_k2:.2f} for Free Spread "
-                f"(Net Debit: ₹{net_debit:.2f}, Max Profit: ₹{max_profit_pts:.2f} pts)."
+                f"(Locked Max Profit: ₹{max_profit_rupees:+,.2f})"
             ),
             "tier_2_structural": f"Tier 2 (+2.5x ATR): Book 35% ({lots_35} lots) at ₹{target2_prem:.2f}.",
             "tier_3_moonshot": f"Tier 3 (Moonshot Runner): Trail remaining 30% ({max(lots_30, 1)} lots) on 5m 21 EMA / AVWAP 1σ into ₹{target3_prem:.2f}.",

@@ -58,6 +58,7 @@ class DecisionContext:
     htf_regime: Dict[str, Any] = field(default_factory=dict)
     options_context: Optional[Dict[str, Any]] = None
     vol_report: Optional[Dict[str, Any]] = None
+    bar_timestamp: Optional[str] = None
 
 
 class DecisionEngine:
@@ -90,6 +91,16 @@ class DecisionEngine:
             "passed": True,
             "veto_gate": None
         }
+
+        # 0. EVENT & HOLIDAY BLACKOUT GATE
+        if ctx.bar_timestamp:
+            from src.event_calendar import check_event_risk_gate
+            ev_passed, ev_reason, ev_audit = check_event_risk_gate(ctx.bar_timestamp)
+            if not ev_passed:
+                audit["passed"] = False
+                audit["veto_gate"] = "EVENT_RISK_BLACKOUT"
+                audit["event_info"] = ev_audit
+                return False, ev_reason, audit
 
         # 0. DATA SUFFICIENCY (GATE_FAIL_TO_WAIT)
         missing_inputs: List[str] = []

@@ -137,15 +137,31 @@ def _rows_from_chain(raw: Dict[str, Any], spot: float, expiry_label: str, expiry
         ce, pe = legs.get("CE", {}), legs.get("PE", {})
         ce_ltp = float(ce.get("ltp", 0.0))
         pe_ltp = float(pe.get("ltp", 0.0))
+        ce_bid = float(ce.get("bid", 0.0))
+        ce_ask = float(ce.get("ask", 0.0))
+        ce_spread = max(round(ce_ask - ce_bid, 2), 0.0) if ce_ask > 0 and ce_bid > 0 else 0.0
+        pe_bid = float(pe.get("bid", 0.0))
+        pe_ask = float(pe.get("ask", 0.0))
+        pe_spread = max(round(pe_ask - pe_bid, 2), 0.0) if pe_ask > 0 and pe_bid > 0 else 0.0
+
         rows.append({
             "strike": strike,
             "expiry": expiry_label,
+            "expiry_epoch": int(expiry_epoch),
             "ce_ltp": ce_ltp,
+            "ce_bid": ce_bid,
+            "ce_ask": ce_ask,
+            "ce_spread": ce_spread,
+            "ce_symbol": str(ce.get("symbol", "")),
             "ce_oi": int(ce.get("oi", 0)),
             "ce_change_oi": int(ce.get("oich", 0)),
             "ce_iv": _implied_vol(ce_ltp, spot, strike, t_years, True) if ce_ltp > 0 else 0.0,
             "ce_volume": int(ce.get("volume", 0)),
             "pe_ltp": pe_ltp,
+            "pe_bid": pe_bid,
+            "pe_ask": pe_ask,
+            "pe_spread": pe_spread,
+            "pe_symbol": str(pe.get("symbol", "")),
             "pe_oi": int(pe.get("oi", 0)),
             "pe_change_oi": int(pe.get("oich", 0)),
             "pe_iv": _implied_vol(pe_ltp, spot, strike, t_years, False) if pe_ltp > 0 else 0.0,
@@ -188,8 +204,11 @@ def get_multi_expiry_chain(symbol: str = "NSE:NIFTY50-INDEX", strikecount: int =
         "underlying_value": spot,
         "expiry_dates": [near["date"]] + ([next_["date"]] if not next_chain.empty else []) + ([monthly["date"]] if not monthly_chain.empty else []),
         "near_expiry": near["date"],
+        "near_expiry_epoch": int(near["expiry"]),
         "next_expiry": next_["date"] if len(expiries) > 1 else near["date"],
+        "next_expiry_epoch": int(next_["expiry"]) if len(expiries) > 1 else int(near["expiry"]),
         "monthly_expiry": monthly["date"] if expiries else near["date"],
+        "monthly_expiry_epoch": int(monthly["expiry"]) if expiries else int(near["expiry"]),
         "near_chain": near_chain,
         "next_chain": next_chain,
         "monthly_chain": monthly_chain,

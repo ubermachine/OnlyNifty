@@ -1,0 +1,98 @@
+{
+  "2026-08-18|24100CE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "CE",
+    "path": "data\\premium_archive\\2026-08-18\\24100CE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24100,
+    "symbol": "NSE:NIFTY2681824100CE",
+    "updated_utc": "2026-08-18T17:10:25"
+  },
+  "2026-08-18|24100PE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "PE",
+    "path": "data\\premium_archive\\2026-08-18\\24100PE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24100,
+    "symbol": "NSE:NIFTY2681824100PE",
+    "updated_utc": "2026-08-18T17:10:25"
+  },
+  "2026-08-18|24150CE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "CE",
+    "path": "data\\premium_archive\\2026-08-18\\24150CE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24150,
+    "symbol": "NSE:NIFTY2681824150CE",
+    "updated_utc": "2026-08-18T17:10:24"
+  },
+  "2026-08-18|24150PE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "PE",
+    "path": "data\\premium_archive\\2026-08-18\\24150PE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24150,
+    "symbol": "NSE:NIFTY2681824150PE",
+    "updated_utc": "2026-08-18T17:10:24"
+  },
+  "2026-08-18|24200CE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "CE",
+    "path": "data\\premium_archive\\2026-08-18\\24200CE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24200,
+    "symbol": "NSE:NIFTY2681824200CE",
+    "updated_utc": "2026-08-18T17:10:24"
+  },
+  "2026-08-18|24200PE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "PE",
+    "path": "data\\premium_archive\\2026-08-18\\24200PE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24200,
+    "symbol": "NSE:NIFTY2681824200PE",
+    "updated_utc": "2026-08-18T17:10:25"
+  },
+  "2026-08-18|24250CE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "CE",
+    "path": "data\\premium_archive\\2026-08-18\\24250CE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24250,
+    "symbol": "NSE:NIFTY2681824250CE",
+    "updated_utc": "2026-08-18T17:10:25"
+  },
+  "2026-08-18|24250PE|5": {
+    "expiry": "2026-08-18",
+    "first_bar": "2026-08-10 09:15:00+05:30",
+    "last_bar": "2026-08-18 15:35:00+05:30",
+    "option_type": "PE",
+    "path": "data\\premium_archive\\2026-08-18\\24250PE_5.parquet",
+    "resolution": "5",
+    "rows": 539,
+    "strike": 24250,
+    "symbol": "NSE:NIFTY2681824250PE",
+    "updated_utc": "2026-08-18T17:10:25"
+  }
+}
