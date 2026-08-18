@@ -28,53 +28,34 @@ def test_kaufman_efficiency_ratio_discrimination():
     assert res_chop["is_trending"] is False
 
 
-def test_conviction_efficiency_ratio_calibration():
+def test_conviction_efficiency_ratio_decoupled_from_live_scoring():
     votes = {"structure": 1, "flow": 1, "positioning": 1, "macro": 0}
     
-    # In Strong Trend (ER = 0.20), momentum setup gets bonus
-    score_trend_mom, _, _, notes_trend_mom = compute_conviction(
+    # Intraday ER is noted for diagnostic review but decoupled from live score modification
+    score_trend, _, _, notes_trend = compute_conviction(
         action="BUY_CE",
         votes=votes,
         confluence_score=70.0,
         efficiency_ratio=0.20,
         setup_id="LONG_ORDER_FLOW"
     )
-    assert any("trend efficiency high" in n for n in notes_trend_mom)
+    assert any("session ER: 0.200" in n for n in notes_trend)
 
-    # In Strong Trend (ER = 0.20), counter-trend fade gets penalty
-    score_trend_fade, _, _, notes_trend_fade = compute_conviction(
-        action="BUY_PE",
-        votes={"structure": -1, "flow": -1, "positioning": -1, "macro": 0},
-        confluence_score=70.0,
-        efficiency_ratio=0.20,
-        setup_id="RANGE_FADE_SHORT"
-    )
-    assert any("counter-trend fade" in n for n in notes_trend_fade)
-    assert score_trend_mom > score_trend_fade
-
-    # In Chop (ER = 0.04), momentum gets penalty and range fade gets bonus
-    score_chop_mom, _, _, notes_chop_mom = compute_conviction(
+    score_no_er, _, _, _ = compute_conviction(
         action="BUY_CE",
         votes=votes,
         confluence_score=70.0,
-        efficiency_ratio=0.04,
+        efficiency_ratio=None,
         setup_id="LONG_ORDER_FLOW"
     )
-    assert any("momentum penalized in chop" in n for n in notes_chop_mom)
-
-    score_chop_fade, _, _, notes_chop_fade = compute_conviction(
-        action="BUY_CE",
-        votes=votes,
-        confluence_score=70.0,
-        efficiency_ratio=0.04,
-        setup_id="RANGE_FADE_LONG"
-    )
-    assert any("range fade favored in chop" in n for n in notes_chop_fade)
-    assert score_chop_fade > score_chop_mom
+    # Score should be identical, confirming decoupling from live execution gating
+    assert score_trend == score_no_er
 
 
 def test_ranked_opportunity_board_synthesis_and_contract_levels():
     # Test Bug 1 fix: raw dict with short keys 'entry', 'sl', 't1', 't2', 't3'
+    # Test Status Precedence: HTF veto prose with edge_status=QUARANTINED -> EDGE_QUARANTINED
+    # Test Dedup: 2 identical candidates with 1pt SL difference collapsed to 1 row
     sig = Signal(
         signal_type=SignalType.LONG,
         entry_price=24500.0,
@@ -94,9 +75,22 @@ def test_ranked_opportunity_board_synthesis_and_contract_levels():
                     "t2": 24276.55,
                     "t3": 24320.0,
                     "confluence": 65.0,
-                    "veto_gate": "HTF_ALIGNMENT_VETO",
-                    "reason": "1H trend is Bullish",
-                    "edge_status": "TRUSTED"
+                    "veto_gate": "HTF_NOT_ALIGNED_LONG",
+                    "reason": "HTF Confluence Veto: Long not supported by 1H EMA200",
+                    "edge_status": "QUARANTINED"
+                },
+                {
+                    "signal_type": "SHORT_ORDER_FLOW",
+                    "direction": "SHORT",
+                    "entry": 24214.05,
+                    "sl": 24203.0,  # 1-pt difference should be collapsed by 10pt dedup bucket
+                    "t1": 24244.05,
+                    "t2": 24276.55,
+                    "t3": 24320.0,
+                    "confluence": 65.0,
+                    "veto_gate": "HTF_NOT_ALIGNED_LONG",
+                    "reason": "HTF Confluence Veto: Long not supported by 1H EMA200",
+                    "edge_status": "QUARANTINED"
                 },
                 {
                     "signal_type": "RANGE_FADE_SHORT",
@@ -107,7 +101,8 @@ def test_ranked_opportunity_board_synthesis_and_contract_levels():
                     "t2": 24440.0,
                     "confluence": 50.0,
                     "veto_gate": "CONFLUENCE_FLOOR",
-                    "reason": "Confluence 50 < 70"
+                    "reason": "Confluence 50 < 70",
+                    "edge_status": "UNMEASURED"
                 }
             ]
         }
@@ -135,17 +130,20 @@ def test_ranked_opportunity_board_synthesis_and_contract_levels():
 
     assert verdict.efficiency_ratio == 0.18
     assert verdict.efficiency_regime == "STRONG_TREND"
-    assert len(verdict.ranked_opportunities) >= 3
     
-    # Verify Bug 1 fix: check that short-key candidates have non-zero levels
-    short_of = next(opp for opp in verdict.ranked_opportunities if opp["setup_id"] == "SHORT_ORDER_FLOW")
+    # Verify deduplication collapsed 2 SHORT_ORDER_FLOW candidates into 1
+    short_of_list = [opp for opp in verdict.ranked_opportunities if opp["setup_id"] == "SHORT_ORDER_FLOW"]
+    assert len(short_of_list) == 1
+    
+    short_of = short_of_list[0]
     assert short_of["entry_price"] == 24214.05
     assert short_of["sl_price"] == 24204.0
     assert short_of["target_1"] == 24244.05
     assert short_of["target_2"] == 24276.55
     assert short_of["r_multiple_t1"] > 0.0
-    assert short_of["status"] == "VETOED_BY_GATE"
-    assert short_of["edge_status"] == "TRUSTED"
+    # Strict precedence: edge_status=QUARANTINED takes priority over prose containing "Confluence"
+    assert short_of["status"] == "EDGE_QUARANTINED"
+    assert short_of["edge_status"] == "QUARANTINED"
 
     rf = next(opp for opp in verdict.ranked_opportunities if opp["setup_id"] == "RANGE_FADE_SHORT")
     assert rf["entry_price"] == 24500.0
@@ -196,7 +194,7 @@ def test_setup_level_cluster_attribution():
             entry.realized_r_multiple = -1.0
             entry.peak_favorable_excursion_pts = 8.0 + i * 2.0
 
-    cl = journal.cluster_context("SHORT", setup_id="RANGE_FADE_SHORT")
+    cl = journal.cluster_context(direction="SHORT", setup_id="RANGE_FADE_SHORT")
     assert cl["setup_index"] == 4
     assert cl["setup_count"] == 3
     assert cl["setup_mfe_median"] == 10.0

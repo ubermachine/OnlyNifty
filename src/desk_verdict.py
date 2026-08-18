@@ -332,23 +332,11 @@ def compute_conviction(
         score -= 7.0
         notes.append("1 family opposes")
 
-    # Kaufman Efficiency Ratio (KER) Dynamic Conviction Calibration:
+    # Note: Kaufman Efficiency Ratio (KER) is displayed in the Environment Quality Banner
+    # and recorded in post-session audit analytics, but decoupled from live intraday conviction
+    # to avoid awarding false momentum bonuses during the first 60-90m of V-reversal chop sessions.
     if efficiency_ratio is not None and efficiency_ratio > 0.0:
-        is_fade = "FADE" in setup_id.upper() or "ABSORPTION" in setup_id.upper() or "MEAN_REV" in setup_id.upper()
-        if efficiency_ratio >= 0.15:
-            if not is_fade:
-                score += 8.0
-                notes.append(f"trend efficiency high (ER={efficiency_ratio:.3f} >= 0.15)")
-            else:
-                score -= 15.0
-                notes.append(f"counter-trend fade penalized in strong trend (ER={efficiency_ratio:.3f})")
-        elif efficiency_ratio < 0.08:
-            if not is_fade:
-                score -= 15.0
-                notes.append(f"momentum penalized in chop regime (ER={efficiency_ratio:.3f} < 0.08)")
-            else:
-                score += 8.0
-                notes.append(f"range fade favored in chop regime (ER={efficiency_ratio:.3f} < 0.08)")
+        notes.append(f"session ER: {efficiency_ratio:.3f}")
 
     if desk_state is not None:
         # Range exhaustion: if the day has already travelled well past its implied
@@ -823,13 +811,12 @@ def build_desk_verdict(
         rej_t3 = float(rej.get("target_3") or rej.get("t3") or 0.0)
         rej_r1 = round(abs(rej_t1 - rej_entry) / max(abs(rej_entry - rej_sl), 1.0), 2) if (rej_t1 > 0 and rej_sl > 0) else 0.0
 
-        # Status resolution with reachable branches
+        # Status resolution with strict precedence on veto_gate and edge_status
         rej_gate = str(rej.get("veto_gate", ""))
-        rej_reason = str(rej.get("reason", ""))
-        if "CONFLUENCE" in rej_gate or "Confluence" in rej_reason or rej_gate == "CONFLUENCE_FLOOR":
-            rej_stat = "CONFLUENCE_FLOOR"
-        elif rej_edge == "QUARANTINED" or rej_gate == "EDGE_TABLE_QUARANTINED":
+        if rej_edge == "QUARANTINED" or rej_gate == "EDGE_TABLE_QUARANTINED":
             rej_stat = "EDGE_QUARANTINED"
+        elif rej_gate in ["CONFLUENCE_FLOOR", "CONFLUENCE_FLOOR_VETO", "CONFLUENCE_VETO"]:
+            rej_stat = "CONFLUENCE_FLOOR"
         elif rej_gate and rej_gate not in ["NONE", "ALLOWED"]:
             rej_stat = "VETOED_BY_GATE"
         else:
@@ -854,11 +841,13 @@ def build_desk_verdict(
             "reason": rej.get("reason", "Vetoed")
         })
 
-    # Deduplicate candidates by (setup_id, direction, entry, sl)
+    # Deduplicate candidates by (setup_id, direction, 10pt entry bucket, 10pt sl bucket)
     unique_opps: List[Dict[str, Any]] = []
     seen_keys = set()
     for opp in ranked_opps:
-        key = (opp["setup_id"], opp["direction"], round(opp["entry_price"], 1), round(opp["sl_price"], 1))
+        entry_bucket = round(opp["entry_price"], -1)
+        sl_bucket = round(opp["sl_price"], -1)
+        key = (opp["setup_id"], opp["direction"], entry_bucket, sl_bucket)
         if key not in seen_keys:
             seen_keys.add(key)
             unique_opps.append(opp)
