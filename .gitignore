@@ -25,5 +25,14 @@ data/test_*.json
 .DS_Store
 Thumbs.db
 
-__pycache__/
-*.tmp
+# Mutable runtime state buffers (rewritten per autorefresh)
+data/*.tmp.*
+data/*.tmp
+data/signals_journal_today.json
+data/risk_state_today.json
+data/options_state.json
+
+# Immutable daily archives & derived analytics ARE tracked
+!data/archive/
+!data/archive/*.jsonl
+!data/edge_table.json

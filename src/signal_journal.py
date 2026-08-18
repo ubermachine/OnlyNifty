@@ -12,6 +12,7 @@ Features:
 """
 
 import os
+import glob
 import json
 import uuid
 import hashlib
@@ -38,9 +39,16 @@ class SignalLifecycleStatus(str, Enum):
     T3_MOONSHOT = "T3_MOONSHOT"
     STOPPED_OUT = "STOPPED_OUT"
     TIME_STOPPED = "TIME_STOPPED"
-    EXPIRED_EOD = "EXPIRED_EOD"
+    EOD_SQUAREOFF = "EOD_SQUAREOFF"
     CANCELLED = "CANCELLED"
-    SQUARED_OFF = "SQUARED_OFF"
+
+
+def compute_sha256_record_hash(prev_hash: str, entry_dict: Dict[str, Any]) -> str:
+    """Computes a cryptographic SHA-256 fingerprint chained to the previous record hash."""
+    clean_dict = {k: v for k, v in entry_dict.items() if k not in ("prev_hash", "record_hash")}
+    serialized = json.dumps(clean_dict, sort_keys=True, default=str)
+    payload = f"{prev_hash}|{serialized}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -310,16 +318,92 @@ class LiveSignalJournal:
     BSM Greeks, target tranches, risk budgets, and automated lifecycle outcome tracking.
     """
 
-    def __init__(self, persistence_file: Optional[str] = "data/signals_journal_today.json"):
+    def __init__(
+        self,
+        persistence_file: Optional[str] = "data/signals_journal_today.json",
+        archive_dir: Optional[str] = "data/archive"
+    ):
         self.persistence_file = persistence_file
+        self.archive_dir = archive_dir
         self.entries: List[SignalEntry] = []
         self._last_hash: str = "GENESIS_ROOT_HASH_0000000000000000"
         self._pending_lifecycle_events: List[Tuple[SignalEntry, str, float, float]] = []
         self._lifecycle_lock = threading.Lock()
+        self._cleanup_orphaned_temps()
         self.reload_from_disk()
 
+    def _cleanup_orphaned_temps(self) -> None:
+        """Unlinks any stale atomic-write temp files left over from interrupted sessions."""
+        if not self.persistence_file:
+            return
+        try:
+            parent_dir = os.path.dirname(self.persistence_file) or "."
+            pattern = os.path.join(parent_dir, "*.tmp.*")
+            for tmp_file in glob.glob(pattern):
+                try:
+                    os.unlink(tmp_file)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _archive_previous_days(self) -> None:
+        """
+        Flushes entries belonging to previous calendar dates into immutable JSONL daily archives
+        (data/archive/signals-YYYY-MM-DD.jsonl) and retains only today's session entries in active memory.
+        """
+        if not self.entries or not self.archive_dir:
+            return
+
+        today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+        by_date: Dict[str, List[SignalEntry]] = {}
+        today_entries: List[SignalEntry] = []
+
+        for e in self.entries:
+            e_date = None
+            if e.timestamp_ist and len(e.timestamp_ist) >= 10:
+                e_date = e.timestamp_ist[:10]
+            elif e.bar_timestamp and len(e.bar_timestamp) >= 10:
+                e_date = e.bar_timestamp[:10]
+
+            if e_date and e_date < today_ist:
+                by_date.setdefault(e_date, []).append(e)
+            else:
+                today_entries.append(e)
+
+        if not by_date:
+            return
+
+        try:
+            os.makedirs(self.archive_dir, exist_ok=True)
+            for date_str, old_entries in by_date.items():
+                archive_file = os.path.join(self.archive_dir, f"signals-{date_str}.jsonl")
+                
+                existing_ids = set()
+                if os.path.exists(archive_file):
+                    try:
+                        with open(archive_file, "r", encoding="utf-8") as f:
+                            for line in f:
+                                if line.strip():
+                                    rec = json.loads(line)
+                                    if "signal_id" in rec:
+                                        existing_ids.add(rec["signal_id"])
+                    except Exception:
+                        pass
+
+                with open(archive_file, "a", encoding="utf-8") as f:
+                    for entry in old_entries:
+                        if entry.signal_id not in existing_ids:
+                            f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+                            existing_ids.add(entry.signal_id)
+
+            self.entries = today_entries
+            self._persist_to_disk()
+        except Exception:
+            pass
+
     def reload_from_disk(self) -> None:
-        """Reloads entries from disk persistence file if present."""
+        """Reloads entries from disk persistence file if present and archives previous days."""
         if self.persistence_file and os.path.exists(self.persistence_file):
             try:
                 with open(self.persistence_file, "r", encoding="utf-8") as f:
@@ -327,6 +411,7 @@ class LiveSignalJournal:
                     self.entries = [SignalEntry.from_dict(item) for item in raw]
                 if self.entries:
                     self._last_hash = self.entries[-1].record_hash or self._last_hash
+                self._archive_previous_days()
             except Exception:
                 self.entries = []
 
