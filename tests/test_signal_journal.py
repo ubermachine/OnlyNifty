@@ -12,7 +12,7 @@ from src.signal_journal import LiveSignalJournal
 def temp_journal():
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tmp_path = tmp.name
-    journal = LiveSignalJournal(persistence_file=tmp_path)
+    journal = LiveSignalJournal(persistence_file=tmp_path, allow_cloud_restore=False)
     yield journal
     if os.path.exists(tmp_path):
         os.remove(tmp_path)

@@ -379,10 +379,12 @@ class LiveSignalJournal:
     def __init__(
         self,
         persistence_file: Optional[str] = "data/signals_journal_today.json",
-        archive_dir: Optional[str] = "data/archive"
+        archive_dir: Optional[str] = "data/archive",
+        allow_cloud_restore: bool = True
     ):
         self.persistence_file = persistence_file
         self.archive_dir = archive_dir
+        self.allow_cloud_restore = allow_cloud_restore
         self.entries: List[SignalEntry] = []
         self._last_hash: str = "GENESIS_ROOT_HASH_0000000000000000"
         self._pending_lifecycle_events: List[Tuple[SignalEntry, str, float, float]] = []
@@ -480,8 +482,11 @@ class LiveSignalJournal:
             except Exception:
                 self.entries = []
 
-        # If local disk has no entries (e.g. fresh ephemeral container on Streamlit Cloud), restore from Neon
-        if self.persistence_file and not self.entries:
+        # If local disk has no entries (e.g. fresh ephemeral container on Streamlit Cloud), restore from Neon.
+        # Skippable via allow_cloud_restore=False so an isolated (e.g. test) journal instance
+        # never silently absorbs live production trades just because DATABASE_URL is configured
+        # in the local environment.
+        if self.allow_cloud_restore and self.persistence_file and not self.entries:
             try:
                 today_ist = datetime.now(IST).strftime("%Y-%m-%d")
                 from src.cloud_storage import fetch_signals_by_date
@@ -524,11 +529,40 @@ class LiveSignalJournal:
         bar_time_str = str(bar_timestamp) if bar_timestamp else now_ist[:16]
         sig_type_str = signal.signal_type.value
 
-        is_actionable = signal.signal_type != SignalType.WAIT and ticket.get("status") == "READY"
+        # A "READY" ticket can still size to 0 lots (Kelly risk budget below this option's
+        # per-lot stop cost — deep-ITM premiums make risk_per_lot large, and lunch-lull /
+        # event-risk sizing caps can compound it below one lot). Without this guard, such a
+        # ticket was journaled as an executed TRIGGERED trade; the lifecycle tracker then
+        # fell back to a fabricated floor quantity (25 shares) to compute a PnL for a
+        # position that was never actually sized, and capital_risk_rupees=0.0 made the
+        # R-multiple formula (pnl / max(risk, 1.0)) collapse into raw rupees mislabeled as
+        # R — corrupting the daily aggregate. backtest_engine.py already guards on
+        # `lots > 0`; the live journal must match it.
+        # Distinguish "lots key absent" (caller/test didn't populate it — preserve legacy
+        # behavior) from "lots explicitly 0" (the real Kelly sizer's computed zero-size
+        # output, which always includes the key). Only the latter is a genuine veto.
+        _lots_sentinel = object()
+        _lots_raw = ticket.get("lots", _lots_sentinel)
+        lots_ready = None if _lots_raw is _lots_sentinel else int(_lots_raw or 0)
+        zero_lot_veto = (
+            signal.signal_type != SignalType.WAIT
+            and ticket.get("status") == "READY"
+            and lots_ready is not None and lots_ready <= 0
+        )
+        is_actionable = signal.signal_type != SignalType.WAIT and ticket.get("status") == "READY" and not zero_lot_veto
         direction = "LONG" if "LONG" in sig_type_str else ("SHORT" if "SHORT" in sig_type_str else "WAIT")
+        if zero_lot_veto:
+            # Keep signal_type/setup_id so the audit trail still shows which setup fired;
+            # force direction to WAIT so it's excluded from win-rate / L-S split / R stats.
+            direction = "WAIT"
+            base_reason = (getattr(signal, "reason", "") or "").strip()
+            signal.reason = (
+                f"{base_reason} | RISK SIZING GATE: Position sized to 0 lots "
+                f"(risk budget below this option's per-lot stop cost) — no trade taken."
+            ).strip(" |")
 
         if not is_actionable:
-            if ticket.get("status") != "WAIT":
+            if not zero_lot_veto and ticket.get("status") != "WAIT":
                 return None
             # Filter duplicate consecutive WAIT logs only when the veto reason is structurally identical.
             # Normalizing reasons avoids logging duplicate rows on minor score flutter (e.g. 54.3 vs 54.8).
