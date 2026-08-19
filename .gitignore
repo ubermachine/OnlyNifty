@@ -40,3 +40,4 @@ data/options_state.json
 !data/edge_table.json
 data/premium_pending.jsonl
 data/premium_resolved.jsonl
+data/edge_table_model.json
