@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from src.config import (
     EMA_FAST, EMA_MID, EMA_SLOW, VAKC_LAMBDA,
-    FIB_GOLDEN_MIN, FIB_GOLDEN_MAX, MA_STRETCH_THRESHOLD,
+    FIB_GOLDEN_MIN, FIB_GOLDEN_MAX, MA_STRETCH_THRESHOLD, STOP_FLOOR_ATR_MULT,
     HURST_TRENDING_MIN, HURST_MEAN_REV_MAX, DEFAULT_IV, OFI_ZSCORE_MIN,
     SKEW_ZSCORE_THRESHOLD, GEX_WALL_BUFFER_PTS, VCR_SQUEEZE_THRESHOLD,
     SIGNAL_MIN_CONFLUENCE, VPIN_TOXICITY_THRESHOLD, STOP_MIN_ATR_FRACTION,
@@ -208,9 +208,39 @@ class StrategyEngine:
         if options_context is not None:
             signal.details['options_context'] = options_context
             
+        # ---- ATR STOP FLOOR ----
+        # Applied centrally here rather than at each of the ~20 sl_price assignment sites,
+        # so every setup inherits it and none can regress. A structure-derived stop closer
+        # than STOP_FLOOR_ATR_MULT x ATR(14) sits inside single-bar noise: it gets taken out
+        # by a routine wiggle and you pay full round-trip friction on a coin flip.
+        # This only ever WIDENS a stop. Targets are deliberately left untouched — the
+        # resulting lower R is the honest number; a noise-tight stop was inflating it.
+        # Widening also raises risk-per-lot, so the Kelly sizer books fewer lots, which is
+        # the correct response to a trade that needs more room.
+        if signal.signal_type != SignalType.WAIT and signal.entry_price > 0 and signal.sl_price > 0:
+            atr14 = float(getattr(self, "_last_atr14", 0.0) or 0.0)
+            if atr14 > 0:
+                min_stop = STOP_FLOOR_ATR_MULT * atr14
+                entry_px = float(signal.entry_price)
+                cur_stop = abs(entry_px - float(signal.sl_price))
+                if cur_stop < min_stop:
+                    is_long = "LONG" in signal.signal_type.value
+                    signal.sl_price = round(entry_px - min_stop, 2) if is_long else round(entry_px + min_stop, 2)
+                    signal.reason += (
+                        f" [STOP FLOOR: widened {cur_stop:.1f}->{min_stop:.1f} pts "
+                        f"({STOP_FLOOR_ATR_MULT:.2f}x ATR) — original stop sat inside bar noise]"
+                    )
+                    if signal.details is None:
+                        signal.details = {}
+                    signal.details["stop_floor_applied"] = {
+                        "original_pts": round(cur_stop, 2),
+                        "floored_pts": round(min_stop, 2),
+                        "atr14": round(atr14, 2),
+                    }
+
         if getattr(self, '_last_lunch_lull', False) and signal.signal_type != SignalType.WAIT:
             signal.reason += " [LUNCH LULL: Reduced confidence, halved sizing recommended]"
-            
+
         return signal
 
     def _apply_universal_gates(
@@ -630,6 +660,7 @@ class StrategyEngine:
         # ATR 14 proxy
         atr_14 = float((sub_df["high"].tail(14) - sub_df["low"].tail(14)).mean())
         atr_14 = max(atr_14, 25.0)
+        self._last_atr14 = atr_14  # consumed by the stop floor in evaluate_bar()
         prev_close_val = float(sub_df.iloc[-2]["close"]) if len(sub_df) >= 2 else close
 
         # 3. Multi-Timeframe Alignment Engine (1H + 15m + 5m)

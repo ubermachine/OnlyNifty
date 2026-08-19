@@ -49,6 +49,14 @@ FIB_SL_LONG: float = 0.786              # 78.6% Retracement boundary + 5 points 
 FIB_SL_SHORT: float = 0.786             # 78.6% Retracement boundary + 5 points for Short SL
 MA_STRETCH_THRESHOLD: float = 0.0035    # 0.35% distance threshold from 21/55 EMA (Query 12 filter)
 
+# Minimum stop distance as a fraction of ATR(14).
+# Structure-derived stops (shelves, swing points, IB edges) can land arbitrarily close to
+# entry: on 2026-08-19 the day's highest-rated signal (100% confluence) placed a 15pt stop
+# off a 1.1pt "shelf" while 5m bars were ranging 20-27pt — i.e. inside a single bar's noise,
+# so a routine wiggle takes it out and you pay full friction for a coin flip. A stop CAP
+# already existed; this is the missing FLOOR. Only ever widens a stop, never tightens one.
+STOP_FLOOR_ATR_MULT: float = 0.75       # stop >= 0.75 x ATR(14)
+
 # 4. Order Flow Imbalance (OFI) & Cumulative Volume Delta (CVD)
 OFI_ZSCORE_MIN: float = 0.65            # Minimum rolling Z-score OFI required to validate AVWAP defense
 VPIN_TOXICITY_THRESHOLD: float = 0.75   # Volume-Synchronized Probability of Informed Trading limit (0.75 institutional consensus)
