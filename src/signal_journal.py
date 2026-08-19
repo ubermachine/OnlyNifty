@@ -26,7 +26,7 @@ import pandas as pd
 from scipy import stats
 
 from src.strategy_rules import Signal, SignalType
-from src.config import LOT_SIZE, TIME_STOP_BARS, TIME_STOP_MIN_R
+from src.config import LOT_SIZE, TIME_STOP_BARS, TIME_STOP_MIN_R, SESSION_START, SESSION_END
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -764,6 +764,27 @@ class LiveSignalJournal:
         for entry in self.entries:
             if not entry.is_active():
                 continue
+
+            # STALE-BAR GUARD (money-critical).
+            # A trade may only be resolved against bars at or after its OWN entry bar.
+            # On 2026-08-19 the candle frame lagged the live quote: entries were taken off a
+            # live spot (09:30, 12:01) while df.iloc[-1] was still the 09:15 opening bar, so
+            # every stop was checked against that bar's high (24172.85 — the day's high).
+            # Both trades were marked STOPPED_OUT on a price that had already happened BEFORE
+            # they existed and was never revisited (real post-entry highs: 24108.45 / 24082.20).
+            # One of them had actually reached T1. The fabricated pair of losses then tripped
+            # the 2-strike breaker and locked the session.
+            # Resolving a trade against its own past is never valid — skip until the frame
+            # catches up rather than exiting on a price the trade never saw.
+            if bar_time_str and getattr(entry, "bar_timestamp", ""):
+                _ts = str(entry.bar_timestamp).strip()
+                _time_part = _ts.split()[-1] if " " in _ts else ""
+                entry_hm = _time_part[:5] if len(_time_part) >= 5 else ""
+                # Only treat it as a candle stamp when it is a plausible NSE session time.
+                # Entries logged without an explicit bar_timestamp fall back to wall clock,
+                # which must never gate lifecycle evaluation.
+                if entry_hm and SESSION_START <= entry_hm <= SESSION_END and bar_time_str < entry_hm:
+                    continue
 
             if bar_time_str and bar_time_str != entry.last_counted_bar:
                 entry.bars_held += 1
