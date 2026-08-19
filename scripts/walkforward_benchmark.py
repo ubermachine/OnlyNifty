@@ -66,7 +66,13 @@ def main() -> int:
     p.add_argument("--embargo-bars", type=int, default=12)
     p.add_argument("--out", default=DEFAULT_OUT)
     p.add_argument("--dry-run", action="store_true", help="print results without writing the table")
+    p.add_argument("--spot-only", action="store_true",
+                   help="disable synthetic options context (fail-closed gate blocks all trades; for diagnostics only)")
     args = p.parse_args()
+    # Default ON: without an options context the fail-closed data-sufficiency gate fires
+    # zero trades. Synthetic context makes gates evaluable; records are tagged MODEL and
+    # can never promote to TRUSTED — only the live QUOTE harvester can do that.
+    synthetic_context = not args.spot_only
 
     print("=" * 78)
     print("WALK-FORWARD OUT-OF-SAMPLE EDGE BENCHMARK")
@@ -101,7 +107,9 @@ def main() -> int:
         test_days=args.test_days,
         purge_bars=args.purge_bars,
         embargo_bars=args.embargo_bars,
+        synthetic_context=synthetic_context,
     )
+    print(f"  context mode: {'SYNTHETIC (MODEL-tier, not TRUSTED-eligible)' if synthetic_context else 'SPOT-ONLY (fail-closed gate active)'}")
     elapsed = time.time() - t0
 
     records = sorted(table.records.values(), key=lambda r: (r.status, -r.n))
@@ -144,8 +152,19 @@ def main() -> int:
         print("\n--dry-run: table NOT written.")
         return 0
 
-    table.save_to_disk(args.out)
-    print(f"\nWrote {args.out} — StrategyEngine picks this up on next start.")
+    # MODEL-tier synthetic-context walks must NEVER clobber the live edge_table.json:
+    # that file holds real QUARANTINED setups that actively block bad trades live, and
+    # MODEL records (PAPER-capped, synthetic-driven) must not replace them. Route MODEL
+    # output to a separate research file unless the user explicitly overrode --out.
+    out_path = args.out
+    if synthetic_context and args.out == DEFAULT_OUT:
+        out_path = os.path.join("data", "edge_table_model.json")
+        print("\nSynthetic (MODEL) walk: writing to research file, NOT the live gating table.")
+
+    table.save_to_disk(out_path)
+    note = ("research only — MODEL tier, NOT loaded by the live gate"
+            if out_path != DEFAULT_OUT else "StrategyEngine picks this up on next start")
+    print(f"\nWrote {out_path} — {note}.")
     return 0
 
 

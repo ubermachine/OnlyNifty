@@ -112,6 +112,24 @@ class EdgeStats:
         return cls(**clean_data)
 
 
+def build_synthetic_options_context(spot: float, sub_df: pd.DataFrame, iv: float = 0.13) -> Dict[str, Any]:
+    """Builds a synthetic-but-structurally-complete options context for research walks.
+
+    The strategy's data-sufficiency gate fails CLOSED without a chain (no 25d skew, no
+    verified dealer walls, no positioning flow), so a spot-only walk-forward fires zero
+    trades. This supplies a synthetic chain + computed GEX walls + directional vector so
+    the gates can actually evaluate — but because the chain is synthetic, any resulting
+    edge is MODEL tier and can NEVER promote to TRUSTED (only live QUOTE evidence can).
+    """
+    from src.data_engine import DataEngine
+    from src.options_flow import compute_strike_level_gex_chart_data, compute_short_term_directional_vector
+    chain = DataEngine(use_cache=False).generate_synthetic_option_chain(spot=float(spot))
+    chain_df = chain.get("dataframe")
+    gex_chart = compute_strike_level_gex_chart_data(chain_df, spot=float(spot), iv=iv)
+    dir_flow = compute_short_term_directional_vector(float(spot), sub_df, option_chain_df=chain_df, live_iv=iv)
+    return {"chain_df": chain_df, "gex_chart": gex_chart, "dir_flow": dir_flow}
+
+
 class EdgeTable:
     """Stores statistical edge verification records across setup IDs and regimes."""
 
@@ -378,10 +396,16 @@ class WalkForwardRunner:
         train_days: int = 30,
         test_days: int = 5,
         purge_bars: int = 60,
-        embargo_bars: int = 12
+        embargo_bars: int = 12,
+        synthetic_context: bool = False,
+        context_iv: float = 0.13,
     ) -> EdgeTable:
         """
         Executes rolling walk-forward test across the dataframe.
+
+        synthetic_context=True feeds a synthetic options context per bar so the
+        fail-closed data-sufficiency gate can evaluate (otherwise spot-only walks fire
+        zero trades). Records are then tagged MODEL — never TRUSTED-eligible.
         """
         from src.strategy_rules import StrategyEngine, SignalType
         engine = self.strategy_engine or StrategyEngine()
@@ -406,7 +430,17 @@ class WalkForwardRunner:
             if test_start < test_end:
                 for bar_idx in range(test_start, test_end):
                     sub = df_5m.iloc[:bar_idx + 1]
-                    sig = engine.evaluate_bar(sub, current_idx=len(sub) - 1)
+                    octx = None
+                    if synthetic_context:
+                        try:
+                            octx = build_synthetic_options_context(float(sub["close"].iloc[-1]), sub, iv=context_iv)
+                        except Exception:
+                            octx = None
+                    sig = engine.evaluate_bar(
+                        sub, current_idx=len(sub) - 1,
+                        option_chain_df=(octx.get("chain_df") if octx else None),
+                        options_context=octx,
+                    )
                     if sig.signal_type != SignalType.WAIT and sig.entry_price > 0:
                         # Outcome simulation across next 12 bars (60 min)
                         future_window = df_5m.iloc[bar_idx + 1 : min(bar_idx + 13, total_bars)]
@@ -421,9 +455,10 @@ class WalkForwardRunner:
 
             start_idx += step_bars
 
+        tier = "MODEL" if synthetic_context else "SPOT"
         records = []
         for (stype, regime), r_list in results_by_group.items():
-            stats = self.compute_edge_stats(r_list, stype, regime, evidence_tier="SPOT")
+            stats = self.compute_edge_stats(r_list, stype, regime, evidence_tier=tier)
             records.append(stats)
 
         return EdgeTable(records)
