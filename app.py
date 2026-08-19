@@ -999,35 +999,53 @@ verdict_badge_text = f"● {desk_verdict.action.replace('_', ' ')} CONFIRMED" if
 
 if desk_verdict.option_pick:
     opt = desk_verdict.option_pick
+    tca_val = opt.get('tca_friction', 0.0)
+    if isinstance(tca_val, dict):
+        tca_display = float(tca_val.get('total_friction', 0.0))
+    else:
+        try:
+            tca_display = float(tca_val or 0.0)
+        except (ValueError, TypeError):
+            tca_display = 0.0
+
+    opt_symbol = opt.get('symbol', 'NIFTY OPT')
+    opt_lots = opt.get('lots', 1)
+    opt_total_qty = opt.get('total_qty', 75)
+    opt_entry = float(opt.get('entry_premium', opt.get('entry_price', 0.0)) or 0.0)
+    opt_sl = float(opt.get('sl_premium', opt.get('sl_price', 0.0)) or 0.0)
+    opt_t1 = float(opt.get('target1_premium', opt.get('target_1', 0.0)) or 0.0)
+    opt_t2 = float(opt.get('target2_premium', opt.get('target_2', 0.0)) or 0.0)
+    opt_t3 = float(opt.get('target3_premium', opt.get('target_3', 0.0)) or 0.0)
+
     ticket_html = f'''<div style="background: #0a101d; border: 1px solid #00d2ff; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px;">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 800; color: #00d2ff;">
-🎯 RECOMMENDED TICKET: {opt['symbol']} ({opt['lots']} Lots / {opt['total_qty']} Qty)
+🎯 RECOMMENDED TICKET: {opt_symbol} ({opt_lots} Lots / {opt_total_qty} Qty)
 </div>
 <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #64748b;">
-TCA Friction: ₹{opt.get('tca_friction', 0.0):.1f}
+TCA Friction: ₹{tca_display:.1f}
 </div>
 </div>
 <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;">
 <div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
 <div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Entry Premium</div>
-<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">₹{opt['entry_premium']:.2f}</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">₹{opt_entry:.2f}</div>
 </div>
 <div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
 <div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Stop Loss</div>
-<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">₹{opt['sl_premium']:.2f}</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">₹{opt_sl:.2f}</div>
 </div>
 <div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
 <div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Target 1 (50%)</div>
-<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">₹{opt['target1_premium']:.2f}</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">₹{opt_t1:.2f}</div>
 </div>
 <div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
 <div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Target 2 (50%)</div>
-<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #00d2ff;">₹{opt['target2_premium']:.2f}</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #00d2ff;">₹{opt_t2:.2f}</div>
 </div>
 <div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
 <div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Moonshot (T3)</div>
-<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #fbb024;">₹{opt['target3_premium']:.2f}</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #fbb024;">₹{opt_t3:.2f}</div>
 </div>
 </div>
 </div>'''
