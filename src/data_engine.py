@@ -989,7 +989,27 @@ class DataEngine:
         trade_date: datetime.date,
         save_dir: Optional[str] = None
     ) -> pd.DataFrame:
-        """Downloads and standardizes daily NSE F&O Bhavcopy via jugaad-data or synthetic fallback."""
+        """Downloads and standardizes daily NSE F&O Bhavcopy.
+
+        Prefers the CURRENT official NSE UDiFF archive (src/nse_bhavcopy.py). jugaad-data's
+        bhavcopy_fo_save is tried only as a legacy fallback — it is broken against present
+        NSE infrastructure (BadZipFile: the old /content/historical/DERIVATIVES path is gone).
+
+        The synthetic frame below is a LAST-RESORT shape-preserving stub for offline UI
+        resilience. It is flagged with is_synthetic=True so no caller can mistake it for
+        market data: it previously carried identical OHLC on every strike and was returned
+        silently, which would have made any research built on it fabricated.
+        """
+        try:
+            from src.nse_bhavcopy import fetch_fo_bhavcopy
+            real = fetch_fo_bhavcopy(trade_date, symbol="NIFTY")
+            if real is not None and not real.empty:
+                real = real.copy()
+                real["is_synthetic"] = False
+                return real
+        except Exception:
+            pass
+
         try:
             from jugaad_data.nse import bhavcopy_fo_save
             import tempfile
@@ -1027,7 +1047,9 @@ class DataEngine:
                 "settle_pr": 135.0, "contracts": 14000, "val_inlakh": 1150.0,
                 "open_int": 780000, "chg_in_oi": 12000
             })
-        return pd.DataFrame(records)
+        stub = pd.DataFrame(records)
+        stub["is_synthetic"] = True   # never let this masquerade as market data
+        return stub
 
     def download_nifty_index_bhavcopy(
         self,
