@@ -1050,8 +1050,69 @@ TCA Friction: ₹{tca_display:.1f}
 </div>
 </div>'''
 else:
-    ticket_html = '''<div style="background: rgba(251, 176, 36, 0.04); border: 1px dashed #334155; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; color: #64748b; text-align: center;">
-No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 55.0%).
+    # PREMIUM-SELLING BRANCH.
+    # When the directional engine declines but implied vol is rich, the desk previously had
+    # nothing to say — despite printing SELL_VOL all day and owning the defined-risk
+    # structures to act on it. This surfaces that trade at the moment of decision instead of
+    # leaving it buried in a collapsed expander in the backtest tab. It is a strict fallback:
+    # it never fires alongside a directional call, and never converts a hard risk veto
+    # (event blackout, session lock, data outage) into a different flavour of risk.
+    _credit = {"eligible": False, "reason": ""}
+    try:
+        from src.credit_structures import evaluate_credit_opportunity
+        _credit = evaluate_credit_opportunity(
+            spot=current_spot,
+            vol_report=vol_report,
+            regime_state=regime_state,
+            t_days=t_days_live,
+            iv=iv_input,
+            capital=account_capital,
+            directional_action=desk_verdict.action,
+            directional_reason=desk_verdict.reason,
+            risk_pct=dyn_kelly.get("dynamic_risk_pct", 0.01),
+            lot_size=int(contract_lot_size),
+            expected_move_pts=float(getattr(desk_verdict, "expected_move_pts", 0.0) or 0.0),
+        )
+    except Exception as _cr_exc:
+        import logging
+        logging.getLogger("OnlyNifty").warning(f"Credit branch skipped: {_cr_exc}")
+
+    if _credit.get("eligible"):
+        _s = _credit["structure"]
+        _lg = _s["legs"]
+        ticket_html = f'''<div style="background: rgba(5, 223, 114, 0.05); border: 1px solid #05df7255; border-left: 3px solid #05df72; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; color: #05df72; letter-spacing: 0.06em;">◆ SELL PREMIUM — DEFINED-RISK IRON CONDOR</span>
+<span style="font-size: 10px; color: #64748b;">VRP +{_credit['vrp_pct']:.1f}% • {_credit['vol_regime']} • PoP {_credit['probability_of_profit_pct']:.0f}%</span>
+</div>
+<div style="font-size: 11px; color: #94a3b8; margin-bottom: 8px;">{_credit['reason']}</div>
+<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px;">
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Net Credit</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #05df72;">₹{_credit['net_credit_rupees']:,.0f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Max Loss (Defined)</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #ff3355;">₹{_credit['max_loss_rupees']:,.0f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Profit Corridor</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">{_s['lower_breakeven']:.0f} – {_s['upper_breakeven']:.0f}</div>
+</div>
+<div style="background: #060910; border: 1px solid #1a2436; border-radius: 4px; padding: 6px; text-align: center;">
+<div style="font-size: 9px; color: #64748b; text-transform: uppercase;">Lots</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: #f1f5f9;">{_credit['lots']}</div>
+</div>
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #94a3b8; line-height: 1.6;">
+BUY {_lg['long_put']['strike']} PE @ ₹{_lg['long_put']['premium']:.2f} &nbsp;•&nbsp; SELL {_lg['short_put']['strike']} PE @ ₹{_lg['short_put']['premium']:.2f} &nbsp;•&nbsp; SELL {_lg['short_call']['strike']} CE @ ₹{_lg['short_call']['premium']:.2f} &nbsp;•&nbsp; BUY {_lg['long_call']['strike']} CE @ ₹{_lg['long_call']['premium']:.2f}
+</div>
+<div style="font-size: 9px; color: #64748b; margin-top: 6px;">UNMEASURED edge — sized off defined max loss, not directional stats. Paper-tier until QUOTE evidence accrues.</div>
+</div>'''
+    else:
+        _why = f" ({_credit.get('reason')})" if _credit.get("reason") else ""
+        ticket_html = f'''<div style="background: rgba(251, 176, 36, 0.04); border: 1px dashed #334155; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; color: #64748b; text-align: center;">
+No active execution ticket — System in risk-preservation mode (Awaiting multi-pillar edge confluence ≥ 55.0%).<br><span style="font-size: 10px; color: #475569;">Premium-selling branch: not actionable{_why}</span>
 </div>'''
 
 qual_clr = "#05df72" if desk_verdict.data_quality == "VERIFIED" else "#fbb024"
