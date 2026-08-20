@@ -1163,6 +1163,26 @@ _agree_label = (
     f"{desk_verdict.family_agreement}/4 aligned (WAIT)" if desk_verdict.action == "WAIT" and desk_verdict.family_agreement > 0
     else ("Split board (WAIT)" if desk_verdict.action == "WAIT" else f"{desk_verdict.family_agreement}/4 families agree")
 )
+# Calibration chip: what THIS confluence score has historically been worth.
+# The score is a hand-weighted heuristic that was never fitted to outcomes; measured
+# out-of-sample it carries no information (non-overlapping n=50, r=-0.005, t=-0.03).
+# Rather than display it as authoritative, show its realized track record beside it —
+# and say UNCALIBRATED where the band has never been measured (the live 70-100 band).
+_calib_chip = ""
+try:
+    from src.verdict_calibration import VerdictCalibrator
+    _cal = VerdictCalibrator.from_entries(getattr(journal_engine, "entries", []) or [])
+    _cb = _cal.calibrate(float(desk_verdict.confluence_score))
+    _cb_clr = {"CALIBRATED": "#05df72", "SPARSE": "#fbbf24", "UNCALIBRATED": "#64748b"}.get(_cb.status, "#64748b")
+    _cb_txt = (f"{_cb.mean_r:+.2f}R x{_cb.n}" if _cb.n else "no data")
+    _calib_chip = (
+        f'<span style="font-size: 10px; color: {_cb_clr}; margin-left: 10px;" '
+        f'title="{_cb.note}">SCORE TRACK RECORD: {_cb.band} band {_cb_txt} [{_cb.status}]</span>'
+    )
+except Exception as _cal_exc:
+    import logging
+    logging.getLogger("OnlyNifty").warning(f"Verdict calibration skipped: {_cal_exc}")
+
 # Measured Edge chip: setup graded by REALIZED option-premium expectancy (QUOTE-tier),
 # not asserted confluence. This is the number the trader should weigh most heavily.
 _measured_chip = ""
@@ -1183,6 +1203,7 @@ conviction_html = f'''<div style="display: flex; justify-content: space-between;
 <span style="font-size: 10px; color: #64748b;">{_agree_label}</span>
 {_edge_chip}
 {_measured_chip}
+{_calib_chip}
 {_cluster_chip}
 </div>
 <div style="display: flex; align-items: center;">{_fam_chips}</div>
